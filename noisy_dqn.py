@@ -1,3 +1,6 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # 必须放在导入其他库之前 OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
+import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,8 +9,6 @@ import numpy as np
 from matplotlib import pyplot as plt
 from datetime import *
 from real2D_env222 import Env
-import os, csv
-
 
 h = datetime.now()
 model_dir = r'.\\noisemodel\\'
@@ -277,4 +278,5 @@ if __name__ == '__main__':
     plt.rcParams['figure.figsize'] = (20.0, 10.0)
     fig, ax = plt.subplots()
     plt.plot(range(len(reward_total_list)), reward_total_list)
+    plt.show()
     plt.savefig("reward.png")

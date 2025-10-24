@@ -211,7 +211,7 @@ if __name__ == '__main__':
     exploration = 2000
     update_freq = 1000
     batch_size = 64
-    episode = 4000
+    episode = 1000
     render = False
     learning_rate = 1e-3
     gamma = 0.99
@@ -278,5 +278,6 @@ if __name__ == '__main__':
     plt.rcParams['figure.figsize'] = (20.0, 10.0)
     fig, ax = plt.subplots()
     plt.plot(range(len(reward_total_list)), reward_total_list)
-    plt.show()
+    # plt.show()
     plt.savefig("reward.png")
+    env.final()

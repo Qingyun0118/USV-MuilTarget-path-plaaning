@@ -385,6 +385,7 @@ class Env():
         goal = self.goal
         ax.plot(goal[0:1], goal[1:2], 'ro', markersize=7, markeredgecolor='k')
         return fig,ax
+    
     def refresh(self,fig,ax):
         #fig, ax = plt.subplots()
         ax2 = ax.twinx()

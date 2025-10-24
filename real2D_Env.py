@@ -514,80 +514,80 @@ class Env():
 
         plt.savefig('path' + '.png')  # 保存路径图
         
-    def visualization(self):
-        """
-        环境可视化
-        
-        Returns:
-            tuple: (fig, ax) - 图形和坐标轴对象
-        """
-        plt.rcParams['figure.figsize'] = (12.0, 12.0)
-        fig, ax = plt.subplots()
-        X, Y = np.meshgrid(np.arange(-10, 10, 1), np.arange(-10,10, 1))
-        q = ax.quiver(X, Y, self.u, self.v)  # 绘制海流场
-        # 绘制障碍物（矩形）
-        for rectangle_para in self.obs_rectangle:
-            ax.add_patch(
-                plt.Rectangle(
-                    (rectangle_para[0], rectangle_para[1]),
-                    rectangle_para[2],
-                    rectangle_para[3],
-                    color='black',
-                    alpha=1
-                )
-            )
-        # 标记起点和终点
-        ax.plot(self.start[0:1], self.start[1:2], 'bo', markersize=12, markeredgecolor='k')
-        goal = self.goal
-        ax.plot(goal[0:1], goal[1:2], 'ro', markersize=7, markeredgecolor='k')
-        return fig,ax
     # def visualization(self):
     #     """
-    #     环境可视化 - 修复版本
+    #     环境可视化
         
     #     Returns:
     #         tuple: (fig, ax) - 图形和坐标轴对象
     #     """
     #     plt.rcParams['figure.figsize'] = (12.0, 12.0)
     #     fig, ax = plt.subplots()
-        
-    #     # 创建与环境范围匹配的网格
-    #     X, Y = np.meshgrid(np.arange(0, 40, 1), 
-    #                     np.arange(0, 40, 1))
-        
-    #     # 绘制海流场，注意转置数据以匹配网格
-    #     # 由于self.U, self.V是41x41的数组，我们需要确保网格匹配
-    #     q = ax.quiver(X, Y, self.U[:40, :40].T, self.V[:40, :40].T, 
-    #                 width=0.002, scale=20, color='blue', alpha=0.7)
-
-    #     # 绘制圆形障碍物
-    #     for circle_para in self.circlelist:
+    #     X, Y = np.meshgrid(np.arange(-10, 10, 1), np.arange(-10,10, 1))
+    #     q = ax.quiver(X, Y, self.u, self.v)  # 绘制海流场
+    #     # 绘制障碍物（矩形）
+    #     for rectangle_para in self.obs_rectangle:
     #         ax.add_patch(
-    #             plt.Circle(
-    #                 (circle_para[0], circle_para[1]),
-    #                 self.r,
-    #                 color='red',
-    #                 alpha=0.7,
-    #                 fill=True
+    #             plt.Rectangle(
+    #                 (rectangle_para[0], rectangle_para[1]),
+    #                 rectangle_para[2],
+    #                 rectangle_para[3],
+    #                 color='black',
+    #                 alpha=1
     #             )
     #         )
-        
     #     # 标记起点和终点
-    #     ax.plot(self.start[0], self.start[1], 'go', markersize=15, markeredgecolor='k', label='Start')
-    #     ax.plot(self.goal[0], self.goal[1], 'r*', markersize=20, markeredgecolor='k', label='Goal')
+    #     ax.plot(self.start[0:1], self.start[1:2], 'bo', markersize=12, markeredgecolor='k')
+    #     goal = self.goal
+    #     ax.plot(goal[0:1], goal[1:2], 'ro', markersize=7, markeredgecolor='k')
+    #     return fig,ax
+    def visualization(self):
+        """
+        环境可视化 - 修复版本
         
-    #     # 添加图例和标签
-    #     plt.xlabel('X Coordinate')
-    #     plt.ylabel('Y Coordinate')
-    #     plt.title('Ocean Navigation Environment')
-    #     plt.legend()
+        Returns:
+            tuple: (fig, ax) - 图形和坐标轴对象
+        """
+        plt.rcParams['figure.figsize'] = (12.0, 12.0)
+        fig, ax = plt.subplots()
         
-    #     # 设置坐标轴范围
-    #     plt.xlim(0, 40)
-    #     plt.ylim(0, 40)
-    #     plt.grid(True, alpha=0.3)
+        # 创建与环境范围匹配的网格
+        X, Y = np.meshgrid(np.arange(0, 40, 1), 
+                        np.arange(0, 40, 1))
         
-    #     return fig, ax
+        # 绘制海流场，注意转置数据以匹配网格
+        # 由于self.U, self.V是41x41的数组，我们需要确保网格匹配
+        q = ax.quiver(X, Y, self.U[:40, :40].T, self.V[:40, :40].T, 
+                    width=0.002, scale=20, color='blue', alpha=0.7)
+
+        # 绘制圆形障碍物
+        for circle_para in self.circlelist:
+            ax.add_patch(
+                plt.Circle(
+                    (circle_para[0], circle_para[1]),
+                    self.r,
+                    color='red',
+                    alpha=0.7,
+                    fill=True
+                )
+            )
+        
+        # 标记起点和终点
+        ax.plot(self.start[0], self.start[1], 'go', markersize=12, markeredgecolor='k', label='Start')
+        ax.plot(self.goal[0], self.goal[1], 'r*', markersize=7, markeredgecolor='k', label='Goal')
+        
+        # 添加图例和标签
+        plt.xlabel('X Coordinate')
+        plt.ylabel('Y Coordinate')
+        plt.title('Ocean Navigation Environment')
+        plt.legend()
+        
+        # 设置坐标轴范围
+        plt.xlim(0, 41)
+        plt.ylim(0, 41)
+        plt.grid(True, alpha=0.3)
+        
+        return fig, ax
 
     def refresh(self, fig, ax):
         """

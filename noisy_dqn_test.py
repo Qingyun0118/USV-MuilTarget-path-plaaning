@@ -1,3 +1,5 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'  # 必须放在导入其他库之前 OMP: Error #15: Initializing libiomp5md.dll, but found libiomp5md.dll already initialized.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +7,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from datetime import *
 from real2D_env222 import Env
-import random, os
+import random
 
 # 记录loss
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -144,7 +146,7 @@ class ddqn(nn.Module):
         # self.noisy1.reset_noise()
         self.noisy2.reset_noise()
     def load_w(self):
-        fname_model = os.path.join("./noisemodel/", '3900model.dump')
+        fname_model = os.path.join("./noisemodel/", '900model.dump')
         #fname_optim = os.path.join(self.model_dir, '756optim.dump')
 
         if os.path.isfile(fname_model):

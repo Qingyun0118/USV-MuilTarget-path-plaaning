@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import * 
 import gymnasium as gym
-from gymnasium.spaces import Box,Tuple,MultiBinary
+from gymnasium.spaces import Box,Dict,MultiBinary
 from netCDF4 import Dataset
 import random
 
@@ -78,6 +78,14 @@ OBSTACLE_POS_R=[
     np.array([90.0,90.0,5.0]),
 ]
 
+OBSTACLE_POS=[
+    np.array([20.0,70.0]),
+    np.array([40.0,30.0]),
+    np.array([60.0,70.0]),
+    np.array([80.0,20.0]),
+    np.array([90.0,90.0]),
+]
+
 ROU_C=1.5
 ROU_S=3.5
 
@@ -91,6 +99,10 @@ TARGET_POS=[
 # define the boundary of the environment
 MIN=0.0
 MAX=100.0
+X_MIN=0.0
+Y_MIN=0.0
+X_MAX=100.0
+Y_MAX=100.0
 ROU_MAX=25.0
 
 class MyUsvEnv():
@@ -113,23 +125,62 @@ class MyUsvEnv():
         rou_t_norm: normalized distance between the USV and the target deploy on the P
         alpha_t_norm: normalized yaw angle between the USV and the targets
         """
-        self.observation_space = Tuple((
-            Box(low=0.0, high=1.0, shape=(1,)),#x_norm
-            Box(low=0.0, high=1.0, shape=(1,)),#y_norm
-            Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Rou_o_norm
-            Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Alpha_o_norm
-            MultiBinary(len(TARGET_POS)),  # P
-            Box(low=0.0, high=1.0, shape=(1,)),  # rou_t_norm
-            Box(low=0.0, high=1.0, shape=(1,)),  # alpha_t_norm
-        ))
+        self.observation_space = Dict({
+            "x_norm":Box(low=0.0, high=1.0, shape=(1,)),#x_norm
+            "y_norm":Box(low=0.0, high=1.0, shape=(1,)),#y_norm
+            "Rou_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Rou_o_norm
+            "Alpha_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
+            "Priority_vector":MultiBinary(len(TARGET_POS)),  # P
+            "rou_t_norm":Box(low=0.0, high=1.0, shape=(1,)),  # rou_t_norm
+            "alpha_t_norm":Box(low=0.0, high=1.0, shape=(1,2)),  # alpha_t_norm
+        })
+    
+        self.step_counter = 0# the number of steps
+        self.start_pos = START_POS # starting position of the USV
+        self.target_r=3.0 # radius of the target area
+    
         
+    #define the reset function for the environment
+    def reset(self):
+        self.step_counter = 0
+        self.start_pos = START_POS.copy()
+        x_norm=self.normalize_x_y(self.start_pos[0])
+        y_norm=self.normalize_x_y(self.start_pos[1])
+        Rou_o_norm=self.calculate_normalize_Rou(OBSTACLE_POS)
+        Alpha_o_norm=self.calculate_normalize_alpha(OBSTACLE_POS)
+        P=np.zeros(len(TARGET_POS))
+        rou_t_norm=np.array([self.calculate_normalize_Rou(TARGET_POS)[0]])
+        alpha_t_norm=np.array([self.calculate_normalize_alpha(TARGET_POS)[0]])
+        init_state={"x_norm":np.array([x_norm]),
+                    "y_norm":np.array([y_norm]),
+                    "Rou_o_norm":Rou_o_norm,
+                    "Alpha_o_norm":Alpha_o_norm,
+                    "Priority_vector":P,
+                    "rou_t_norm":rou_t_norm,
+                    "alpha_t_norm":alpha_t_norm,
+                    }
+        return init_state
+    
+    # define the reward function for the environment
+    def calculate_reward(self):
+        pass
+    
     #define the step function for the environment
     def step(self, action):
         pass
+
+    #define the normalize function for the state value
+    def normalize_x_y(self, x):
+        return x/MAX
     
-    #define the reset function for the environment
-    def reset(self):
-        pass
+    def calculate_normalize_Rou(self, Pos):
+        Pos=np.array(Pos)
+        return np.sqrt((Pos[:,0]-self.start_pos[0])**2+(Pos[:,1]-self.start_pos[1])**2)/np.sqrt(X_MAX**2+Y_MAX**2).T
+    
+    def calculate_normalize_alpha(self, Pos):
+        Pos=np.array(Pos)
+        alpha=np.arctan2(Pos[:,1]-self.start_pos[1],Pos[:,0]-self.start_pos[0])
+        return np.array([np.sin(alpha),np.cos(alpha)]).T
     
     # visualize the environment
     def visualize(self):
@@ -138,7 +189,7 @@ class MyUsvEnv():
         fig,ax=plt.subplots()
         
         # add the starting position of the USV to the environment
-        plt.plot(START_POS[0],START_POS[1],'bo')
+        plt.plot(self.start_pos[0],self.start_pos[1],'bx')
         
         # add the targets to the environment
         for i in range(len(TARGET_POS)):
@@ -156,8 +207,8 @@ class MyUsvEnv():
         plt.title('Multi-Target USV Path Planning Environment')
         plt.legend()
         
-        plt.xlim(MIN,MAX)
-        plt.ylim(MIN,MAX)
+        plt.xlim(X_MIN,X_MAX)
+        plt.ylim(Y_MIN,Y_MAX)
         plt.grid(True, alpha=0.3)
         
         plt.show()
@@ -187,7 +238,7 @@ class MyUsvEnv_gym(gym.Env):
         
         # add the targets to the environment
         for i in range(len(TARGET_POS)):
-            t=Target(TARGET_POS[i][0],TARGET_POS[i][1],3)
+            t=Target(TARGET_POS[i][0],TARGET_POS[i][1],self.target_r)
             t.show_target(ax,i)
         
         # add the obstacles to the environment
@@ -214,6 +265,9 @@ if __name__ == '__main__':
     env.visualize()
     # env.observation_space.sample()
     print(env.observation_space.sample())
+    obs=env.reset()
+    print(obs)
+    # action=env.action_space.sample()
 #     fig,ax=plt.subplots(figsize=(5,5))
 #     plt.xlim(0,100)
 #     plt.ylim(0,100)

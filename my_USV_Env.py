@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from math import * 
 import gymnasium as gym
-from gymnasium.spaces import Box,Dict,MultiBinary
+from gymnasium.spaces import Box,Dict,MultiBinary,Discrete
 from netCDF4 import Dataset
 import random
 
@@ -143,27 +143,67 @@ class MyUsvEnv():
     #define the reset function for the environment
     def reset(self):
         self.step_counter = 0
-        self.start_pos = START_POS.copy()
-        x_norm=self.normalize_x_y(self.start_pos[0])
-        y_norm=self.normalize_x_y(self.start_pos[1])
-        Rou_o_norm=self.calculate_normalize_Rou(OBSTACLE_POS)
-        Alpha_o_norm=self.calculate_normalize_alpha(OBSTACLE_POS)
-        P=np.zeros(len(TARGET_POS))
-        rou_t_norm=np.array([self.calculate_normalize_Rou(TARGET_POS)[0]])
-        alpha_t_norm=np.array([self.calculate_normalize_alpha(TARGET_POS)[0]])
-        init_state={"x_norm":np.array([x_norm]),
-                    "y_norm":np.array([y_norm]),
-                    "Rou_o_norm":Rou_o_norm,
-                    "Alpha_o_norm":Alpha_o_norm,
-                    "Priority_vector":P,
-                    "rou_t_norm":rou_t_norm,
-                    "alpha_t_norm":alpha_t_norm,
-                    }
+        self.current_pos = START_POS.copy()
+        
+        # 使用当前点作为基准计算所有相对关系
+        x_norm = self.normalize_x_y(self.current_pos[0])
+        y_norm = self.normalize_x_y(self.current_pos[1])
+        
+        # 修正：传入当前点作为基准
+        Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R])
+        Alpha_o_norm = np.array([self.calculate_normalize_alpha(self.current_pos, obs) for obs in OBSTACLE_POS_R])
+        
+        P = np.zeros(len(TARGET_POS)-1)  # 修正：维度=目标数量
+        
+        # 当前目标（第一个目标）
+        rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[0])])
+        alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[0])])
+        
+        init_state = {
+            "x_norm": np.array([x_norm]),
+            "y_norm": np.array([y_norm]),
+            "Rou_o_norm": Rou_o_norm,
+            "Alpha_o_norm": Alpha_o_norm,
+            "Priority_vector": P,
+            "rou_t_norm": rou_t_norm,
+            "alpha_t_norm": alpha_t_norm,
+        }
         return init_state
     
     # define the reward function for the environment
-    def calculate_reward(self):
-        pass
+    def calculate_reward(self,current_pos,old_pos,P):
+        #(1)Safe obstacle avoidance
+        reward_oi=0.0
+        for obstacle_pos in OBSTACLE_POS_R:
+            rou_oi=np.sqrt((obstacle_pos[0]-current_pos[0])**2+(obstacle_pos[1]-current_pos[1])**2)
+            if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
+                reward_oi+=0.0
+            else:
+                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+        
+        #(2)Target reaching
+        reward_t=0.0
+        if np.array_equal(P,np.array([0.0,0.0])):
+            rou_t=np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)
+            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
+        elif np.array_equal(P,np.array([1.0,0.0])):
+            rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
+            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
+        elif np.array_equal(P,np.array([1.0,1.0])):
+            rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
+            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
+            
+        # (3)Shortest path
+        reward_p=0.0
+        reward_p = -np.linalg.norm(current_pos - old_pos)
+        
+        #weigth the reward
+        K_oi=0.2
+        K_t=0.1
+        K_p=0.01
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
+        
+        return reward
     
     #define the step function for the environment
     def step(self, action):
@@ -173,15 +213,35 @@ class MyUsvEnv():
     def normalize_x_y(self, x):
         return x/MAX
     
-    def calculate_normalize_Rou(self, Pos):
-        Pos=np.array(Pos)
-        return np.sqrt((Pos[:,0]-self.start_pos[0])**2+(Pos[:,1]-self.start_pos[1])**2)/np.sqrt(X_MAX**2+Y_MAX**2).T
+    def calculate_normalize_Rou(self, current_pos, target_pos):
+        """计算从current_pos到target_pos的归一化距离"""
+        # 计算实际距离
+        if isinstance(target_pos, list) and len(target_pos) > 2:
+            # 如果是障碍物 [x,y,r]，只取坐标
+            actual_distance = np.sqrt((target_pos[0]-current_pos[0])**2 + (target_pos[1]-current_pos[1])**2)
+        else:
+            actual_distance = np.sqrt((target_pos[0]-current_pos[0])**2 + (target_pos[1]-current_pos[1])**2)
+        
+        # 最大可能距离（环境对角线）
+        max_possible_distance = np.sqrt(X_MAX**2 + Y_MAX**2)
+        return actual_distance / max_possible_distance
     
-    def calculate_normalize_alpha(self, Pos):
-        Pos=np.array(Pos)
-        alpha=np.arctan2(Pos[:,1]-self.start_pos[1],Pos[:,0]-self.start_pos[0])
-        return np.array([np.sin(alpha),np.cos(alpha)]).T
+    def calculate_normalize_alpha(self, current_pos, target_pos):
+        """计算从current_pos到target_pos的角度（正弦和余弦）"""
+        if isinstance(target_pos, list) and len(target_pos) > 2:
+            # 如果是障碍物 [x,y,r]，只取坐标
+            dx = target_pos[0] - current_pos[0]
+            dy = target_pos[1] - current_pos[1]
+        else:
+            dx = target_pos[0] - current_pos[0]
+            dy = target_pos[1] - current_pos[1]
+        
+        alpha = np.arctan2(dy, dx)
+        return np.array([np.sin(alpha), np.cos(alpha)])  # 形状 (2,)
     
+    def sgn(self, x):
+        return 1 if x >= 0 else 0
+        
     # visualize the environment
     def visualize(self):
         # set the figure size
@@ -266,7 +326,11 @@ if __name__ == '__main__':
     # env.observation_space.sample()
     print(env.observation_space.sample())
     obs=env.reset()
+    current_pos=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+    old_pos=current_pos.copy()
+    P=obs['Priority_vector']
     print(obs)
+    print(env.calculate_reward(current_pos,old_pos,P))
     # action=env.action_space.sample()
 #     fig,ax=plt.subplots(figsize=(5,5))
 #     plt.xlim(0,100)

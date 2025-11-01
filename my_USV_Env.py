@@ -138,7 +138,7 @@ class MyUsvEnv():
         self.step_counter = 0# the number of steps
         self.start_pos = START_POS # starting position of the USV
         self.target_r=3.0 # radius of the target area
-    
+        self.P=np.zeros(len(TARGET_POS)-1)  # 
         
     #define the reset function for the environment
     def reset(self):
@@ -153,18 +153,19 @@ class MyUsvEnv():
         Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R])
         Alpha_o_norm = np.array([self.calculate_normalize_alpha(self.current_pos, obs) for obs in OBSTACLE_POS_R])
         
-        P = np.zeros(len(TARGET_POS)-1)  # 修正：维度=目标数量
+        # P = np.zeros(len(TARGET_POS))  # 
+        self.P,target_index=self.update_priority_vector(self.current_pos)
         
         # 当前目标（第一个目标）
-        rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[0])])
-        alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[0])])
+        rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[target_index])])
+        alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[target_index])])
         
         init_state = {
             "x_norm": np.array([x_norm]),
             "y_norm": np.array([y_norm]),
             "Rou_o_norm": Rou_o_norm,
             "Alpha_o_norm": Alpha_o_norm,
-            "Priority_vector": P,
+            "Priority_vector": self.P,
             "rou_t_norm": rou_t_norm,
             "alpha_t_norm": alpha_t_norm,
         }
@@ -202,12 +203,41 @@ class MyUsvEnv():
         K_t=0.1
         K_p=0.01
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
-        
+        # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward
     
     #define the step function for the environment
     def step(self, action):
-        pass
+        self.step_counter += 1
+        old_pos = self.current_pos.copy()
+        self.current_pos = self.calculate_next_pos(self.current_pos, action)
+        self.check_pos(self.current_pos)
+        
+        # if np.sqrt((self.current_pos[0]-TARGET_POS[0][0])**2+(self.current_pos[1]-TARGET_POS[0][1])**2)<self.target_r:
+        #     P=np.array([1.0,0.0])
+        # elif np.sqrt((self.current_pos[0]-TARGET_POS[1][0])**2+(self.current_pos[1]-TARGET_POS[1][1])**2)<self.target_r:
+        #     P=np.array([1.0,1.0])
+        
+        reward=self.calculate_reward(self.current_pos,old_pos,self.P)#calculate the reward before update the priority vector
+        
+        self.P,target_index=self.update_priority_vector(self.current_pos)
+        
+        done=self.is_done()
+        
+        # reward=self.calculate_reward(self.current_pos,old_pos,P)
+        
+        state={
+            "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
+            "y_norm": np.array([self.normalize_x_y(self.current_pos[1])]),
+            "Rou_o_norm": np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
+            "Alpha_o_norm": np.array([self.calculate_normalize_alpha(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
+            "Priority_vector":self.P,
+            "rou_t_norm": np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[target_index])]),
+            "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[target_index])]),
+        }
+        
+        
+        return state, reward, done
 
     #define the normalize function for the state value
     def normalize_x_y(self, x):
@@ -241,7 +271,49 @@ class MyUsvEnv():
     
     def sgn(self, x):
         return 1 if x >= 0 else 0
-        
+    
+    # caculate the position of the USV after taking an action
+    def calculate_next_pos(self, current_pos, action):
+        rou=action[0]
+        alpha=action[1]
+        current_pos[0]+=rou*np.cos(alpha)
+        current_pos[1]+=rou*np.sin(alpha)
+        return current_pos
+    
+    # update the priority vector
+    def update_priority_vector(self, current_pos):
+        if np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)<=self.target_r:
+            self.P[0]=1.0
+            target_index+=1
+        elif np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)<=self.target_r:
+            self.P[1]=1.0
+            target_index+=1
+        elif np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)<=self.target_r:
+            self.P[2]=1.0
+        else:
+            self.P = np.zeros(len(TARGET_POS)-1)
+            target_index=0
+        return self.P,target_index
+    
+    #check the position of the USV is within the boundary
+    def check_pos(self, current_pos):
+        if current_pos[0]<X_MIN:
+            current_pos[0]=X_MIN
+        elif current_pos[0]>X_MAX:
+            current_pos[0]=X_MAX
+        if current_pos[1]<Y_MIN:
+            current_pos[1]=Y_MIN
+        elif current_pos[1]>Y_MAX:
+            current_pos[1]=Y_MAX
+        return current_pos
+    
+    #check finish all targets
+    def is_done(self):
+        if np.array_equal(self.P,np.array([1.0,1.0])):
+            return True
+        else:
+            return False
+    
     # visualize the environment
     def visualize(self):
         # set the figure size
@@ -323,14 +395,29 @@ class MyUsvEnv_gym(gym.Env):
 if __name__ == '__main__':
     env=MyUsvEnv()
     env.visualize()
-    # env.observation_space.sample()
-    print(env.observation_space.sample())
+    i=0
     obs=env.reset()
-    current_pos=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
-    old_pos=current_pos.copy()
-    P=obs['Priority_vector']
     print(obs)
-    print(env.calculate_reward(current_pos,old_pos,P))
+    while True:
+        i+=1
+        action=env.action_space.sample()
+        obs,reward,done=env.step(action)
+        print("step:",i)
+        print(action)
+        print(obs)
+        print(reward)
+        if done:
+            break
+        if i==1:
+            break
+    # env.observation_space.sample()
+    # print(env.observation_space.sample())
+    # obs=env.reset()
+    # current_pos=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+    # old_pos=current_pos.copy()
+    # P=obs['Priority_vector']
+    # print(obs)
+    # print(env.calculate_reward(current_pos,old_pos,P))
     # action=env.action_space.sample()
 #     fig,ax=plt.subplots(figsize=(5,5))
 #     plt.xlim(0,100)

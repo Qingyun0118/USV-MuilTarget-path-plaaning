@@ -17,37 +17,71 @@ import matplotlib.pyplot as plt
 
 
 class QNet(nn.Module):
-    """QNet.
-    Input: feature
-    Output: num_act of values
+    """Q-network (critic) for TD3 algorithm.
+
+    Args:
+        nn (torch.nn.Module): Base class for all neural network modules
+    
+    Implements the Q-function approximator that estimates state-action values.
+    Typically consists of fully connected layers with ReLU activations.
+    Initialization parameters:
+        - dim_state: Dimension of state space
+        - dim_action: Dimension of action space
     """
 
     def __init__(self, dim_state, dim_action):
         super().__init__()
-        self.fc1 = nn.Linear(dim_state + dim_action, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 1)
+        # self.fc1 = nn.Linear(dim_state + dim_action, 64)
+        # self.fc2 = nn.Linear(64, 32)
+        # self.fc3 = nn.Linear(32, 1)
+        self.fc1 = nn.Linear(dim_state + dim_action, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, 1)
 
     def forward(self, state, action):
         sa = torch.cat([state, action], -1)
+        # x = F.relu(self.fc1(sa))
+        # x = F.relu(self.fc2(x))
+        # x = self.fc3(x)
         x = F.relu(self.fc1(sa))
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
         return x
 
 
 class PolicyNet(nn.Module):
+    """Policy Network for TD3 algorithm.
+
+    Implements a neural network that maps states to actions. The network outputs
+    continuous actions bounded by max_action. This is the actor network in the
+    TD3 (Twin Delayed DDPG) architecture.
+
+    Args:
+        dim_state (int): Dimension of the input state space
+        dim_action (int): Dimension of the output action space
+        max_action (float, optional): Maximum value for action outputs. Defaults to 2.0.
+    """
     def __init__(self, dim_state, dim_action, max_action=2.0):
         super().__init__()
         self.max_action = max_action
-        self.fc1 = nn.Linear(dim_state, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, dim_action)
+        # self.fc1 = nn.Linear(dim_state, 64)
+        # self.fc2 = nn.Linear(64, 32)
+        # self.fc3 = nn.Linear(32, dim_action)
+        self.fc1 = nn.Linear(dim_state, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, dim_action)
 
     def forward(self, state):
+        # x = F.relu(self.fc1(state))
+        # x = F.relu(self.fc2(x))
+        # x = self.max_action * torch.tanh(self.fc3(x))
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        x = self.max_action * torch.tanh(self.fc3(x))
+        x = F.relu(self.fc3(x))
+        x = self.max_action * torch.tanh(self.fc4(x))
         return x
 
 
@@ -71,8 +105,23 @@ class TD3:
         return action
 
     def compute_value_loss(self, args, s_batch, a_batch, r_batch, d_batch, next_s_batch):
+        """Compute the value loss for the two Q networks.
+
+        Args:
+            args (argparse.Namespace): Training arguments.
+            s_batch (torch.Tensor): Batch of current states, shape (batch_size, dim_state).
+            a_batch (torch.Tensor): Batch of current actions, shape (batch_size, dim_action).
+            r_batch (torch.Tensor): Batch of rewards, shape (batch_size,).
+            d_batch (torch.Tensor): Batch of done flags, shape (batch_size,), values 0 or 1.
+            next_s_batch (torch.Tensor): Batch of next states, shape (batch_size, dim_state).
+
+        Returns:
+            value_loss1 (torch.Tensor): Loss value for Q1 network.
+            value_loss2 (torch.Tensor): Loss value for Q2 network.
+        """
+
         with torch.no_grad():
-            # 让目标策略网络做预测。
+            # Have the target policy network make predictions.
             a = self.target_Mu(next_s_batch)
             noise = torch.clamp(
                 torch.randn_like(a) * args.policy_noise,
@@ -81,14 +130,14 @@ class TD3:
             )
             a = torch.clamp(a + noise, min=-self.max_action, max=self.max_action)
 
-            # 让两个目标价值网络做预测。
+            # Let the two target value networks make predictions.
             q1 = self.target_Q1(next_s_batch, a).squeeze()
             q2 = self.target_Q2(next_s_batch, a).squeeze()
 
-            # 计算 TD 目标。
+            # Calculate the TD target.
             y = r_batch + args.gamma * torch.min(q1, q2) * (1 - d_batch)
 
-        # 让两个价值网络做预测。
+        # Have the two value networks make predictions.
         qvals1 = self.Q1(s_batch, a_batch).squeeze()
         qvals2 = self.Q2(s_batch, a_batch).squeeze()
         value_loss1 = F.mse_loss(y, qvals1)
@@ -96,11 +145,28 @@ class TD3:
         return value_loss1, value_loss2
 
     def compute_policy_loss(self, s_batch):
+        """Compute the policy loss for the given state batch.
+
+        Args:
+            s_batch (torch.Tensor): A batch of states for which the policy loss will be computed.
+
+        Returns:
+            torch.Tensor: The computed policy loss.
+        """
+
         a = self.Mu(s_batch)
         policy_loss = -self.Q1(s_batch, a).mean()
         return policy_loss
 
     def soft_update(self, tau=0.01):
+        """Perform soft update of target network parameters.
+
+        Args:
+            tau (float, optional): Interpolation parameter for updating target networks. 
+                                 Controls how much of the online network parameters are mixed into 
+                                 the target network parameters. Defaults to 0.01.
+        """
+
         def soft_update_(target, source, tau_=0.01):
             for target_param, param in zip(target.parameters(), source.parameters()):
                 target_param.data.copy_(target_param.data * (1.0 - tau_) + param.data * tau_)
@@ -155,6 +221,16 @@ class INFO:
         self.max_episode_reward = -float("inf")
 
     def put(self, done, reward):
+        """Update episode statistics when an episode is done.
+
+        Args:
+            done (bool): Flag indicating whether the episode has terminated.
+            reward (float): The reward obtained in the current step.
+        
+        Notes:
+            When done is True, accumulates the episode length and reward,
+            and records them in the training log.
+        """
         if done is True:
             self.episode_length += 1
             self.episode_reward += reward
@@ -172,6 +248,37 @@ class INFO:
 
 
 def train(args, env, agent: TD3):
+    """Train the TD3 agent using the specified environment and parameters.
+
+    Args:
+        args (argparse.Namespace): Training configuration containing:
+            - max_steps: Total training steps
+            - warmup_steps: Initial random exploration steps
+            - lr: Learning rate
+            - batch_size: Training batch size
+            - K: Policy update frequency
+            - seed: Random seed
+            - output_dir: Output directory for saving models
+        env (gym.Env): The training environment
+        agent (TD3): The TD3 agent instance to be trained
+
+    Training process:
+        1. Initializes optimizers for Q networks and policy network
+        2. Sets up experience replay buffer
+        3. Runs training loop for max_steps:
+            - Collects experience using exploration policy
+            - Stores transitions in replay buffer
+            - Samples batches for training
+            - Updates Q networks and policy network
+            - Performs soft updates of target networks
+        4. Logs training statistics and saves models periodically
+        5. Visualizes training progress with plots
+
+    Saves:
+        - Best policy model (when achieving new high score)
+        - Training loss plots (value_loss.png)
+        - Episode reward plots (episode_reward.png)
+    """
     Q1_optimizer = torch.optim.Adam(agent.Q1.parameters(), lr=args.lr)
     Q2_optimizer = torch.optim.Adam(agent.Q2.parameters(), lr=args.lr)
     Mu_optimizer = torch.optim.Adam(agent.Mu.parameters(), lr=args.lr)
@@ -195,13 +302,13 @@ def train(args, env, agent: TD3):
         info.put(done, reward)
 
         if done is True:
-            # 打印信息。
+            # Print information.
             episode_reward = info.log["episode_reward"][-1]
             episode_length = info.log["episode_length"][-1]
             value_loss = info.log["value_loss1"][-1] if len(info.log["value_loss1"]) > 0 else 0
             print(f"step={step}, reward={episode_reward:.0f}, length={episode_length}, max_reward={info.max_episode_reward}, value_loss={value_loss:.2f}")
 
-            # 如果得分更高，保存模型。
+            # If the score is higher, save the model.
             if episode_reward == info.max_episode_reward:
                 save_path = os.path.join(args.output_dir, "model.bin")
                 torch.save(agent.Mu.state_dict(), save_path)
@@ -246,7 +353,7 @@ def train(args, env, agent: TD3):
                 info.log["policy_loss"].append(policy_loss.item())
 
             if step % 10000 == 0:
-                # 画图。
+                # draw figure.
                 plt.plot(info.log["value_loss1"], label="loss1")
                 plt.plot(info.log["value_loss2"], label="loss2")
                 plt.legend()
@@ -259,6 +366,25 @@ def train(args, env, agent: TD3):
 
 
 def eval(args, env, agent):
+    """Evaluate the trained TD3 agent in the given environment.
+
+    Args:
+        args (argparse.Namespace): Evaluation configuration containing:
+            - dim_state (int): Dimension of state space
+            - dim_action (int): Dimension of action space  
+            - max_action (float): Maximum action value
+            - output_dir (str): Directory containing saved model
+        env (gym.Env): The environment to evaluate the agent in
+        agent (TD3): The TD3 agent instance to be evaluated
+
+    Loads the trained policy network and runs evaluation episodes:
+        - Loads model weights from model.bin
+        - Runs for 5000 steps total across episodes
+        - Renders the environment during evaluation
+        - Prints episode reward and length when episode terminates
+        - Resets statistics after each episode
+    """
+
     agent = TD3(args.dim_state, args.dim_action, args.max_action)
     model_path = os.path.join(args.output_dir, "model.bin")
     agent.Mu.load_state_dict(torch.load(model_path))
@@ -283,6 +409,34 @@ def eval(args, env, agent):
 
 
 def main():
+    """Main function to run TD3 training and evaluation.
+
+    Configures and runs the TD3 algorithm with command line arguments:
+        - Environment configuration:
+            --env: Gym environment name (default: Pendulum-v1)
+            --dim_state: State space dimension (default: 3)
+            --dim_action: Action space dimension (default: 1)
+            --max_action: Action value range [-max,max] (default: 2.0)
+            --gamma: Discount factor (default: 0.99)
+        
+        - Training parameters:
+            --max_steps: Total training steps (default: 100,000)
+            --warmup_steps: Initial random exploration steps (default: 10,000)
+            --lr: Learning rate (default: 1e-3)
+            --batch_size: Training batch size (default: 32)
+            --K: Policy and target network update frequency (default: 2)
+            --policy_noise: Noise added to target policy (default: 0.2)
+            --noise_clip: Noise clipping range (default: 0.5)
+        
+        - Runtime options:
+            --no_cuda: Disable CUDA if available
+            --seed: Random seed (default: 42)
+            --output_dir: Output directory (default: 'output')
+            --do_train: Enable training mode
+            --do_eval: Enable evaluation mode
+    
+    Initializes environment, agent, and runs training/evaluation as specified.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--env", default="Pendulum-v1", type=str, help="Environment name.")
     parser.add_argument("--dim_state", default=3, type=int, help="Dimension of observation.")

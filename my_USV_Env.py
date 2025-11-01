@@ -139,26 +139,28 @@ class MyUsvEnv():
         self.start_pos = START_POS # starting position of the USV
         self.target_r=3.0 # radius of the target area
         self.P=np.zeros(len(TARGET_POS)-1)  # 
+        self.target_index=0
+        self.render_flag=False # whether to render the environment
         
     #define the reset function for the environment
     def reset(self):
         self.step_counter = 0
         self.current_pos = START_POS.copy()
         
-        # 使用当前点作为基准计算所有相对关系
+        # Use the current point as a reference to calculate all relative relationships.
         x_norm = self.normalize_x_y(self.current_pos[0])
         y_norm = self.normalize_x_y(self.current_pos[1])
         
-        # 修正：传入当前点作为基准
+        # Correction: Pass the current point as the reference
         Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R])
         Alpha_o_norm = np.array([self.calculate_normalize_alpha(self.current_pos, obs) for obs in OBSTACLE_POS_R])
         
         # P = np.zeros(len(TARGET_POS))  # 
-        self.P,target_index=self.update_priority_vector(self.current_pos)
+        self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
-        # 当前目标（第一个目标）
-        rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[target_index])])
-        alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[target_index])])
+        # Current Objective (First Objective)
+        rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])])
+        alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])])
         
         init_state = {
             "x_norm": np.array([x_norm]),
@@ -172,7 +174,7 @@ class MyUsvEnv():
         return init_state
     
     # define the reward function for the environment
-    def calculate_reward(self,current_pos,old_pos,P):
+    def calculate_reward(self,current_pos,old_pos):
         #(1)Safe obstacle avoidance
         reward_oi=0.0
         for obstacle_pos in OBSTACLE_POS_R:
@@ -184,14 +186,24 @@ class MyUsvEnv():
         
         #(2)Target reaching
         reward_t=0.0
-        if np.array_equal(P,np.array([0.0,0.0])):
+        if np.array_equal(self.P,np.array([0.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)
+            if rou_t<self.target_r:
+                self.P[0]=1.0
+                print("Target{} Reached!".format(self.target_index))
+                self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
-        elif np.array_equal(P,np.array([1.0,0.0])):
+        elif np.array_equal(self.P,np.array([1.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
+            if rou_t<self.target_r:
+                self.P[1]=1.0
+                print("Target{} Reached!".format(self.target_index))
+                self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
-        elif np.array_equal(P,np.array([1.0,1.0])):
+        elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
+            if rou_t<self.target_r:
+                print("Target{} Reached!".format(self.target_index))
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
             
         # (3)Shortest path
@@ -218,9 +230,9 @@ class MyUsvEnv():
         # elif np.sqrt((self.current_pos[0]-TARGET_POS[1][0])**2+(self.current_pos[1]-TARGET_POS[1][1])**2)<self.target_r:
         #     P=np.array([1.0,1.0])
         
-        reward=self.calculate_reward(self.current_pos,old_pos,self.P)#calculate the reward before update the priority vector
+        reward=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
         
-        self.P,target_index=self.update_priority_vector(self.current_pos)
+        # self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
         done=self.is_done()
         
@@ -232,8 +244,8 @@ class MyUsvEnv():
             "Rou_o_norm": np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
             "Alpha_o_norm": np.array([self.calculate_normalize_alpha(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
             "Priority_vector":self.P,
-            "rou_t_norm": np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[target_index])]),
-            "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[target_index])]),
+            "rou_t_norm": np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])]),
+            "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])]),
         }
         
         
@@ -244,22 +256,22 @@ class MyUsvEnv():
         return x/MAX
     
     def calculate_normalize_Rou(self, current_pos, target_pos):
-        """计算从current_pos到target_pos的归一化距离"""
-        # 计算实际距离
+        """Calculate the normalized distance from current_pos to target_pos"""
+        # Calculate the actual distance
         if isinstance(target_pos, list) and len(target_pos) > 2:
-            # 如果是障碍物 [x,y,r]，只取坐标
+            # If it is an obstacle [x, y, r], only take the coordinates
             actual_distance = np.sqrt((target_pos[0]-current_pos[0])**2 + (target_pos[1]-current_pos[1])**2)
         else:
             actual_distance = np.sqrt((target_pos[0]-current_pos[0])**2 + (target_pos[1]-current_pos[1])**2)
         
-        # 最大可能距离（环境对角线）
+        # Maximum Possible Distance (Environmental Diagonal)
         max_possible_distance = np.sqrt(X_MAX**2 + Y_MAX**2)
         return actual_distance / max_possible_distance
     
     def calculate_normalize_alpha(self, current_pos, target_pos):
-        """计算从current_pos到target_pos的角度（正弦和余弦）"""
+        """Calculate the angle (sine and cosine) from current_pos to target_pos"""
         if isinstance(target_pos, list) and len(target_pos) > 2:
-            # 如果是障碍物 [x,y,r]，只取坐标
+            # If it is an obstacle [x, y, r], only take the coordinates
             dx = target_pos[0] - current_pos[0]
             dy = target_pos[1] - current_pos[1]
         else:
@@ -267,7 +279,7 @@ class MyUsvEnv():
             dy = target_pos[1] - current_pos[1]
         
         alpha = np.arctan2(dy, dx)
-        return np.array([np.sin(alpha), np.cos(alpha)])  # 形状 (2,)
+        return np.array([np.sin(alpha), np.cos(alpha)])  # shape (2,)
     
     def sgn(self, x):
         return 1 if x >= 0 else 0
@@ -284,17 +296,18 @@ class MyUsvEnv():
     def update_priority_vector(self, current_pos):
         if np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)<=self.target_r:
             self.P[0]=1.0
-            target_index+=1
+            self.target_index+=1
         elif np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)<=self.target_r:
             self.P[1]=1.0
-            target_index+=1
+            self.target_index+=1
         elif np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)<=self.target_r:
-            self.P[2]=1.0
+            # self.P[2]=1.0
+            pass
         else:
-            self.P = np.zeros(len(TARGET_POS)-1)
-            target_index=0
-        return self.P,target_index
-    
+            self.P=np.zeros(len(TARGET_POS)-1)
+            self.target_index=0
+        return self.P,self.target_index
+
     #check the position of the USV is within the boundary
     def check_pos(self, current_pos):
         if current_pos[0]<X_MIN:
@@ -309,7 +322,7 @@ class MyUsvEnv():
     
     #check finish all targets
     def is_done(self):
-        if np.array_equal(self.P,np.array([1.0,1.0])):
+        if np.array_equal(self.P,np.array([1.0,0.0])):
             return True
         else:
             return False
@@ -397,19 +410,21 @@ if __name__ == '__main__':
     env.visualize()
     i=0
     obs=env.reset()
-    print(obs)
+    # print(obs)
     while True:
         i+=1
         action=env.action_space.sample()
         obs,reward,done=env.step(action)
         print("step:",i)
-        print(action)
-        print(obs)
-        print(reward)
+        print("action:",action)
+        position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+        print("position:",position)
+        print("obs",obs)
+        print("reward:",reward)
         if done:
             break
-        if i==1:
-            break
+        # if i==100:
+        #     break
     # env.observation_space.sample()
     # print(env.observation_space.sample())
     # obs=env.reset()

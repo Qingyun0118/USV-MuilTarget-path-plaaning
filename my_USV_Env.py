@@ -405,24 +405,24 @@ class MyUsvEnv_gym(gym.Env):
 
 
 # test
-if __name__ == '__main__':
-    env=MyUsvEnv()
-    env.visualize()
-    i=0
-    obs=env.reset()
-    # print(obs)
-    while True:
-        i+=1
-        action=env.action_space.sample()
-        obs,reward,done=env.step(action)
-        print("step:",i)
-        print("action:",action)
-        position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
-        print("position:",position)
-        print("obs",obs)
-        print("reward:",reward)
-        if done:
-            break
+# if __name__ == '__main__':
+#     env=MyUsvEnv()
+#     env.visualize()
+#     i=0
+#     obs=env.reset()
+#     # print(obs)
+#     while True:
+#         i+=1
+#         action=env.action_space.sample()
+#         obs,reward,done=env.step(action)
+#         print("step:",i)
+#         print("action:",action)
+#         position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+#         print("position:",position)
+#         print("obs",obs)
+#         print("reward:",reward)
+#         if done:
+#             break
         # if i==100:
         #     break
     # env.observation_space.sample()

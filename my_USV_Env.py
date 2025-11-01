@@ -172,6 +172,7 @@ class MyUsvEnv():
             "rou_t_norm": rou_t_norm,
             "alpha_t_norm": alpha_t_norm,
         }
+        # return init_state
         return init_state
     
     # define the reward function for the environment
@@ -191,20 +192,21 @@ class MyUsvEnv():
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)
             if rou_t<self.target_r:
                 self.P[0]=1.0
-                print("Target{} Reached!".format(self.target_index))
+                # print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
             if rou_t<self.target_r:
                 self.P[1]=1.0
-                print("Target{} Reached!".format(self.target_index))
+                # print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
             if rou_t<self.target_r and self.is_done(self.current_pos):
-                print("Target{} Reached!".format(self.target_index))
+                # print("Target{} Reached!".format(self.target_index))
+                pass
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
             
         # (3)Shortest path
@@ -230,7 +232,13 @@ class MyUsvEnv():
         
         # self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
-        done=self.is_done(self.current_pos)
+        # done=self.is_done(self.current_pos)
+        terminated=self.is_done(self.current_pos)
+        
+        if self.step_counter >= 1000:
+            truncated=True
+        else:
+            truncated=False
         
         state={
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
@@ -245,7 +253,8 @@ class MyUsvEnv():
         if self.record_flag:
             self.record_points(old_pos,"usv_path_points_1.csv")
         
-        return state, reward, done
+        # return state, reward, done
+        return state, reward, terminated, truncated, {}
 
     #define the normalize function for the state value
     def normalize_x_y(self, x):

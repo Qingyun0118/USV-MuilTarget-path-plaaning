@@ -5,6 +5,7 @@ import gymnasium as gym
 from gymnasium.spaces import Box,Dict,MultiBinary,Discrete
 from netCDF4 import Dataset
 import random
+import csv,os
 
 # define the obstacles class
 class Obstacle():
@@ -106,7 +107,7 @@ Y_MAX=100.0
 ROU_MAX=25.0
 
 class MyUsvEnv():
-    def __init__(self):
+    def __init__(self,record_flag=False):
         """
         define the action space:
         rou:the relative distance between the current waypoint and the next waypoint
@@ -125,22 +126,22 @@ class MyUsvEnv():
         rou_t_norm: normalized distance between the USV and the target deploy on the P
         alpha_t_norm: normalized yaw angle between the USV and the targets
         """
-        self.observation_space = Dict({
+        self.observation_space = {
             "x_norm":Box(low=0.0, high=1.0, shape=(1,)),#x_norm
             "y_norm":Box(low=0.0, high=1.0, shape=(1,)),#y_norm
             "Rou_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Rou_o_norm
             "Alpha_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
-            "Priority_vector":MultiBinary(len(TARGET_POS)),  # P
+            "Priority_vector":MultiBinary(len(TARGET_POS)-1),  # P
             "rou_t_norm":Box(low=0.0, high=1.0, shape=(1,)),  # rou_t_norm
             "alpha_t_norm":Box(low=0.0, high=1.0, shape=(1,2)),  # alpha_t_norm
-        })
+        }
     
         self.step_counter = 0# the number of steps
         self.start_pos = START_POS # starting position of the USV
         self.target_r=3.0 # radius of the target area
         self.P=np.zeros(len(TARGET_POS)-1)  # 
         self.target_index=0
-        self.render_flag=False # whether to render the environment
+        self.record_flag=record_flag
         
     #define the reset function for the environment
     def reset(self):
@@ -202,7 +203,7 @@ class MyUsvEnv():
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
-            if rou_t<self.target_r:
+            if rou_t<self.target_r and self.is_done(self.current_pos):
                 print("Target{} Reached!".format(self.target_index))
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
             
@@ -225,18 +226,11 @@ class MyUsvEnv():
         self.current_pos = self.calculate_next_pos(self.current_pos, action)
         self.check_pos(self.current_pos)
         
-        # if np.sqrt((self.current_pos[0]-TARGET_POS[0][0])**2+(self.current_pos[1]-TARGET_POS[0][1])**2)<self.target_r:
-        #     P=np.array([1.0,0.0])
-        # elif np.sqrt((self.current_pos[0]-TARGET_POS[1][0])**2+(self.current_pos[1]-TARGET_POS[1][1])**2)<self.target_r:
-        #     P=np.array([1.0,1.0])
-        
         reward=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
         
         # self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
-        done=self.is_done()
-        
-        # reward=self.calculate_reward(self.current_pos,old_pos,P)
+        done=self.is_done(self.current_pos)
         
         state={
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
@@ -248,6 +242,8 @@ class MyUsvEnv():
             "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])]),
         }
         
+        if self.record_flag:
+            self.record_points(old_pos,"usv_path_points_1.csv")
         
         return state, reward, done
 
@@ -321,14 +317,15 @@ class MyUsvEnv():
         return current_pos
     
     #check finish all targets
-    def is_done(self):
-        if np.array_equal(self.P,np.array([1.0,0.0])):
+    def is_done(self,current_pos):
+        rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
+        if np.array_equal(self.P,np.array([1.0,1.0])) and rou_t<=self.target_r:
             return True
         else:
             return False
     
     # visualize the environment
-    def visualize(self):
+    def visualize_env(self):
         # set the figure size
         plt.rcParams['figure.figsize'] = (6.0, 6.0)
         fig,ax=plt.subplots()
@@ -357,6 +354,97 @@ class MyUsvEnv():
         plt.grid(True, alpha=0.3)
         
         plt.show()
+       
+    # record the points of path,for drawing the path
+    def record_points(self,point,csv_file = "usv_path_points.csv"):
+        # Make sure point is a tuple or list containing x,y coordinates
+        if len(point) != 2:
+            raise ValueError("Point should be a tuple/list with (x,y) coordinates")
+        
+        try:
+            # Check if the file exists
+            file_exists = os.path.isfile(csv_file)
+            
+            # Open the file in append mode, creating it if it does not exist
+            with open(csv_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                # If the file does not exist or is empty, write the header
+                if not file_exists or os.stat(csv_file).st_size == 0:
+                    writer.writerow(['x', 'y'])
+                # Write current point
+                writer.writerow(point)
+                
+            
+        except Exception as e:
+            print(f"Error recording point: {e}")
+    
+    
+    # draw the path of the USV after done
+    def draw_path(self, csv_file="usv_path_points.csv"):
+        plt.rcParams['figure.figsize'] = (6.0, 6.0)
+        fig,ax=plt.subplots()
+        
+        # add the starting position of the USV to the environment
+        plt.plot(self.start_pos[0],self.start_pos[1],'bx',label='Start')
+        
+        # add the targets to the environment
+        for i in range(len(TARGET_POS)):
+            t=Target(TARGET_POS[i][0],TARGET_POS[i][1],3)
+            t.show_target(ax,i)
+        
+        # add the obstacles to the environment
+        for i in range(len(OBSTACLE_POS_R)):
+            o=Obstacle(OBSTACLE_POS_R[i][0],OBSTACLE_POS_R[i][1],OBSTACLE_POS_R[i][2],ROU_C,ROU_S)
+            o.show_obstacle(ax)
+            
+        try:
+            # Check if the file is empty
+            if not os.path.exists(csv_file):
+                print("Path file is empty")
+                return
+
+            # Read data and filter invalid points
+            x_points = []
+            y_points = []
+            with open(csv_file, 'r') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if len(row) >= 2 and row[0] and row[1]:  # Make sure valid coordinates exist
+                        try:
+                            x = float(row[0])
+                            y = float(row[1])
+                            if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
+                                x_points.append(x)
+                                y_points.append(y)
+                        except ValueError:
+                            continue
+
+            # Check valid points
+            if len(x_points) < 2:
+                print(f"Only {len(x_points)} valid points, need at least 2")
+                return
+            
+            # Draw path details
+            plt.plot(x_points, y_points, 'b-', linewidth=1, alpha=0.7)
+            plt.plot(x_points[-1], y_points[-1], 'rs', markersize=12, label='End')   # 终点
+            
+            # Draw small arrows at the end of each line segment
+            # for i in range(len(x_points)-1):
+            #     plt.arrow(x_points[i], y_points[i], x_points[i+1]-x_points[i], y_points[i+1]-y_points[i], color='r', alpha=0.5, width=0.1, head_width=0.3, head_length=0.3)
+            
+            plt.title('USV Navigation Path with Environment')
+            plt.xlabel('X Coordinate')
+            plt.ylabel('Y Coordinate')
+            plt.legend(loc='upper right')
+            plt.grid(True, alpha=0.3)
+            plt.xlim(X_MIN, X_MAX)
+            plt.ylim(Y_MIN, Y_MAX)
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            print(f"Error drawing path: {str(e)}")
 
 
 # define the gym environment for the USV
@@ -384,10 +472,10 @@ class MyUsvEnv_Gym(gym.Env):
             "x_norm":Box(low=0.0, high=1.0, shape=(1,)),#x_norm
             "y_norm":Box(low=0.0, high=1.0, shape=(1,)),#y_norm
             "Rou_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Rou_o_norm
-            "Alpha_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
-            "Priority_vector":MultiBinary(len(TARGET_POS)),  # P
+            "Alpha_o_norm":Box(low=-1.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
+            "Priority_vector":MultiBinary(len(TARGET_POS)-1),  # P
             "rou_t_norm":Box(low=0.0, high=1.0, shape=(1,)),  # rou_t_norm
-            "alpha_t_norm":Box(low=0.0, high=1.0, shape=(1,2)),  # alpha_t_norm
+            "alpha_t_norm":Box(low=-1.0, high=1.0, shape=(1,2)),  # alpha_t_norm
         })
     
         self.step_counter = 0# the number of steps
@@ -418,7 +506,7 @@ class MyUsvEnv_Gym(gym.Env):
         rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])])
         alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])])
         
-        init_state = {
+        init_state = Dict({
             "x_norm": np.array([x_norm]),
             "y_norm": np.array([y_norm]),
             "Rou_o_norm": Rou_o_norm,
@@ -426,7 +514,7 @@ class MyUsvEnv_Gym(gym.Env):
             "Priority_vector": self.P,
             "rou_t_norm": rou_t_norm,
             "alpha_t_norm": alpha_t_norm,
-        }
+        })
         
         info = {}
         
@@ -500,7 +588,7 @@ class MyUsvEnv_Gym(gym.Env):
         
         info = {}
         
-        state={
+        state=Dict({
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
             "y_norm": np.array([self.normalize_x_y(self.current_pos[1])]),
             "Rou_o_norm": np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
@@ -508,7 +596,7 @@ class MyUsvEnv_Gym(gym.Env):
             "Priority_vector":self.P,
             "rou_t_norm": np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])]),
             "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])]),
-        }
+        })
         
         
         return state, reward, terminated,truncated, info
@@ -590,7 +678,7 @@ class MyUsvEnv_Gym(gym.Env):
             return False
     
     # visualize the environment
-    def visualize(self):
+    def visualize_env(self):
         # set the figure size
         plt.rcParams['figure.figsize'] = (6.0, 6.0)
         fig,ax=plt.subplots()
@@ -619,13 +707,103 @@ class MyUsvEnv_Gym(gym.Env):
         plt.grid(True, alpha=0.3)
         
         plt.show()
+       
+    # record the points of path,for drawing the path
+    def record_points(self,point,csv_file = "usv_path_points.csv"):
+        # Make sure point is a tuple or list containing x,y coordinates
+        if len(point) != 2:
+            raise ValueError("Point should be a tuple/list with (x,y) coordinates")
+        
+        try:
+            # Check if the file exists
+            file_exists = os.path.isfile(csv_file)
+            
+            # Open the file in append mode, creating it if it does not exist
+            with open(csv_file, 'a', newline='') as f:
+                writer = csv.writer(f)
+                # If the file does not exist or is empty, write the header
+                if not file_exists or os.stat(csv_file).st_size == 0:
+                    writer.writerow(['x', 'y'])
+                # Write current point
+                writer.writerow(point)
+                
+            
+        except Exception as e:
+            print(f"Error recording point: {e}")
+    
+    
+    # draw the path of the USV after done
+    def draw_path(self, csv_file="usv_path_points.csv"):
+        plt.rcParams['figure.figsize'] = (6.0, 6.0)
+        fig,ax=plt.subplots()
+        
+        # add the starting position of the USV to the environment
+        plt.plot(self.start_pos[0],self.start_pos[1],'bx',label='Start')
+        
+        # add the targets to the environment
+        for i in range(len(TARGET_POS)):
+            t=Target(TARGET_POS[i][0],TARGET_POS[i][1],3)
+            t.show_target(ax,i)
+        
+        # add the obstacles to the environment
+        for i in range(len(OBSTACLE_POS_R)):
+            o=Obstacle(OBSTACLE_POS_R[i][0],OBSTACLE_POS_R[i][1],OBSTACLE_POS_R[i][2],ROU_C,ROU_S)
+            o.show_obstacle(ax)
+            
+        try:
+            # Check if the file is empty
+            if not os.path.exists(csv_file):
+                print("Path file is empty")
+                return
 
+            # Read data and filter invalid points
+            x_points = []
+            y_points = []
+            with open(csv_file, 'r') as f:
+                reader = csv.reader(f)
+                next(reader)  # Skip header
+                for row in reader:
+                    if len(row) >= 2 and row[0] and row[1]:  # Make sure valid coordinates exist
+                        try:
+                            x = float(row[0])
+                            y = float(row[1])
+                            if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
+                                x_points.append(x)
+                                y_points.append(y)
+                        except ValueError:
+                            continue
+
+            # Check valid points
+            if len(x_points) < 2:
+                print(f"Only {len(x_points)} valid points, need at least 2")
+                return
+            
+            # Draw path details
+            plt.plot(x_points, y_points, 'b-', linewidth=1, alpha=0.7)
+            plt.plot(x_points[-1], y_points[-1], 'rs', markersize=12, label='End')   # 终点
+            
+            # Draw small arrows at the end of each line segment
+            # for i in range(len(x_points)-1):
+            #     plt.arrow(x_points[i], y_points[i], x_points[i+1]-x_points[i], y_points[i+1]-y_points[i], color='r', alpha=0.5, width=0.1, head_width=0.3, head_length=0.3)
+            
+            plt.title('USV Navigation Path with Environment')
+            plt.xlabel('X Coordinate')
+            plt.ylabel('Y Coordinate')
+            plt.legend(loc='upper right')
+            plt.grid(True, alpha=0.3)
+            plt.xlim(X_MIN, X_MAX)
+            plt.ylim(Y_MIN, Y_MAX)
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            print(f"Error drawing path: {str(e)}")
 
 
 # test
 # if __name__ == '__main__':
-#     env=MyUsvEnv()
-#     env.visualize()
+#     env=MyUsvEnv(record_flag=True)
+#     env.visualize_env()
 #     i=0
 #     obs=env.reset()
 #     # print(obs)
@@ -634,15 +812,18 @@ class MyUsvEnv_Gym(gym.Env):
 #         action=env.action_space.sample()
 #         obs,reward,done=env.step(action)
 #         print("step:",i)
-#         print("action:",action)
+#         # print("action:",action)
 #         position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
 #         print("position:",position)
-#         print("obs",obs)
-#         print("reward:",reward)
+#         # print("obs",obs)
+#         # print("reward:",reward)
 #         if done:
 #             break
-        # if i==100:
-        #     break
+#         if i==100:
+#             break
+#     env.draw_path("usv_path_points_1.csv")
+    # plt.show()
+       
     # env.observation_space.sample()
     # print(env.observation_space.sample())
     # obs=env.reset()

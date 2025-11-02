@@ -141,7 +141,11 @@ class MyUsvEnv():
         self.target_r=3.0 # radius of the target area
         self.P=np.zeros(len(TARGET_POS)-1)  # 
         self.target_index=0
-        self.record_flag=record_flag
+        
+        # Added file object properties
+        self.csv_file = None
+        self.csv_writer = None
+        self.record_flag = record_flag
         
     #define the reset function for the environment
     def reset(self):
@@ -188,25 +192,27 @@ class MyUsvEnv():
         
         #(2)Target reaching
         reward_t=0.0
+        done=False
         if np.array_equal(self.P,np.array([0.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)
             if rou_t<self.target_r:
                 self.P[0]=1.0
-                # print("Target{} Reached!".format(self.target_index))
+                print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
             if rou_t<self.target_r:
                 self.P[1]=1.0
-                # print("Target{} Reached!".format(self.target_index))
+                print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
-            if rou_t<self.target_r and self.is_done(self.current_pos):
-                # print("Target{} Reached!".format(self.target_index))
-                pass
+            if rou_t<self.target_r:####
+                print("Target{} Reached!".format(self.target_index))
+                # pass
+                done=True
             reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
             
         # (3)Shortest path
@@ -219,7 +225,7 @@ class MyUsvEnv():
         K_p=0.01
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
-        return reward
+        return reward,done
     
     #define the step function for the environment
     def step(self, action):
@@ -228,18 +234,18 @@ class MyUsvEnv():
         self.current_pos = self.calculate_next_pos(self.current_pos, action)
         self.check_pos(self.current_pos)
         
-        reward=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
+        reward,terminated=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
         
         # self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
         # done=self.is_done(self.current_pos)
-        terminated=self.is_done(self.current_pos)
+        # terminated=self.is_done(self.current_pos)
         
-        if self.step_counter >= 1000:
-            truncated=True
-        else:
-            truncated=False
-        
+        # if self.step_counter >= 2000:
+        #     truncated=True
+        # else:
+        #     truncated=False
+        truncated=False
         state={
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
             "y_norm": np.array([self.normalize_x_y(self.current_pos[1])]),
@@ -251,7 +257,7 @@ class MyUsvEnv():
         }
         
         if self.record_flag:
-            self.record_points(old_pos,"usv_path_points_1.csv")
+            self.record_points(self.current_pos,"usv_path_points_1.csv")
         
         # return state, reward, done
         return state, reward, terminated, truncated, {}
@@ -327,7 +333,7 @@ class MyUsvEnv():
     
     #check finish all targets
     def is_done(self,current_pos):
-        rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
+        rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)####
         if np.array_equal(self.P,np.array([1.0,1.0])) and rou_t<=self.target_r:
             return True
         else:
@@ -365,27 +371,37 @@ class MyUsvEnv():
         plt.show()
        
     # record the points of path,for drawing the path
-    def record_points(self,point,csv_file = "usv_path_points.csv"):
-        # Make sure point is a tuple or list containing x,y coordinates
+    def record_points(self, point, csv_file="usv_path_points_1.csv"):
         if len(point) != 2:
             raise ValueError("Point should be a tuple/list with (x,y) coordinates")
         
         try:
-            # Check if the file exists
-            file_exists = os.path.isfile(csv_file)
-            
-            # Open the file in append mode, creating it if it does not exist
-            with open(csv_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                # If the file does not exist or is empty, write the header
+            # 初始化文件写入器
+            if self.record_flag and self.csv_file is None:
+                file_exists = os.path.isfile(csv_file)
+                self.csv_file = open(csv_file, 'a', newline='')
+                self.csv_writer = csv.writer(self.csv_file)
                 if not file_exists or os.stat(csv_file).st_size == 0:
-                    writer.writerow(['x', 'y'])
-                # Write current point
-                writer.writerow(point)
-                
+                    self.csv_writer.writerow(['x', 'y'])
+                    self.csv_writer.writerow(self.start_pos)
+                    self.csv_file.flush()
             
+            # 写入数据
+            if self.record_flag:
+                self.csv_writer.writerow(point)
+                self.csv_file.flush()  # 立即刷新缓冲区
+                
         except Exception as e:
             print(f"Error recording point: {e}")
+            # 发生错误时关闭文件
+            if self.csv_file:
+                self.csv_file.close()
+                self.csv_file = None
+
+    def close_writer(self):  # 新增关闭方法
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
     
     
     # draw the path of the USV after done
@@ -436,7 +452,7 @@ class MyUsvEnv():
             
             # Draw path details
             plt.plot(x_points, y_points, 'b-', linewidth=1, alpha=0.7)
-            plt.plot(x_points[-1], y_points[-1], 'rs', markersize=12, label='End')   # 终点
+            plt.plot(x_points[-1], y_points[-1], 'rx', label='End')   # 终点
             
             # Draw small arrows at the end of each line segment
             # for i in range(len(x_points)-1):
@@ -819,18 +835,19 @@ class MyUsvEnv_Gym(gym.Env):
 #     while True:
 #         i+=1
 #         action=env.action_space.sample()
-#         obs,reward,done=env.step(action)
+#         obs,reward,terminated,truncated,_=env.step(action)
 #         print("step:",i)
 #         # print("action:",action)
 #         position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
 #         print("position:",position)
-#         # print("obs",obs)
-#         # print("reward:",reward)
-#         if done:
+#         print("obs",obs)
+#         print("reward:",reward)
+#         if terminated:
 #             break
-#         if i==100:
-#             break
+#         # if i==1000:
+#         #     break
 #     env.draw_path("usv_path_points_1.csv")
+#     env.close_writer()
     # plt.show()
        
     # env.observation_space.sample()

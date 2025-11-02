@@ -368,10 +368,10 @@ def evaluate_htd3(args, env, agent):
     """Evaluate the trained HTD3 agent"""
     
     # Load trained model
-    # model_path = os.path.join(args.output_dir, "best_model.pth")
-    # if not os.path.exists(model_path):
-    #     model_path = os.path.join(args.output_dir, "final_model.pth")
-    model_path = os.path.join(args.output_dir, "final_model.pth")
+    model_path = os.path.join(args.output_dir, "best_model.pth")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(args.output_dir, "final_model.pth")
+    # model_path = os.path.join(args.output_dir, "final_model.pth")
     # checkpoint = torch.load(model_path)
     # agent.Mu.load_state_dict(checkpoint['actor'])
     state_dict = torch.load(model_path,map_location=args.device)
@@ -398,9 +398,9 @@ def evaluate_htd3(args, env, agent):
             
             next_state_dict, reward, terminated, truncated, _ = env.step(action)
             
-            points=(float(next_state_dict["x_norm"]*MAX),float(next_state_dict["y_norm"]*MAX))
+            # points=(float(next_state_dict["x_norm"]*MAX),float(next_state_dict["y_norm"]*MAX))
             # print(points)
-            env.record_points(points)
+            # env.record_points(points)
             
             done = terminated or truncated
             
@@ -426,7 +426,7 @@ def evaluate_htd3(args, env, agent):
     print(f"Average Reward: {avg_reward:.2f}")
     print(f"Average Length: {avg_length:.2f}")
     # print(f"Success Rate: {success_rate:.1f}%")
-    env.draw_path("usv_path_points.csv")
+    env.draw_path("usv_path_points_1.csv")
 
 
 def main():
@@ -484,7 +484,7 @@ def main():
     # Initialize environment
     from my_USV_Env import MyUsvEnv
     env_train = MyUsvEnv(record_flag=False)
-    env_eval = MyUsvEnv(record_flag=False)
+    env_eval = MyUsvEnv(record_flag=True)#eval_episodes must be 1 for recording points
     
     # Initialize agent
     agent = HTD3(

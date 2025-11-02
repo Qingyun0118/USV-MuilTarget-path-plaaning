@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
-from my_USV_Env import MAX
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -122,7 +121,7 @@ class HTD3(nn.Module):
         policy_loss = -self.Q1(s_batch, actions).mean()
         return policy_loss
 
-    def soft_update(self, tau=0.005):
+    def soft_update(self, tau=0.001):
         """Soft update of target networks with parameter tau"""
         for target_param, param in zip(self.target_Q1.parameters(), self.Q1.parameters()):
             target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)

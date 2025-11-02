@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
-
+from my_USV_Env import MAX
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -266,7 +266,7 @@ def train_htd3(args, env, agent: HTD3):
         
         # Reset environment if episode done
         if done:
-            state_dict= env.reset()
+            state_dict= env.reset()#
             state = dict_state_to_tensor(state_dict, args.device)
             
             # Logging
@@ -280,12 +280,13 @@ def train_htd3(args, env, agent: HTD3):
             # Save best model
             if episode_reward >= training_info.max_episode_reward:
                 save_path = os.path.join(args.output_dir, "best_model.pth")
-                torch.save({
-                    'actor': agent.Mu.state_dict(),
-                    'critic1': agent.Q1.state_dict(), 
-                    'critic2': agent.Q2.state_dict(),
-                    'episode_reward': episode_reward
-                }, save_path)
+                # torch.save({
+                #     'actor': agent.Mu.state_dict(),
+                #     'critic1': agent.Q1.state_dict(), 
+                #     'critic2': agent.Q2.state_dict(),
+                #     'episode_reward': episode_reward
+                # }, save_path)
+                torch.save(agent.Mu.state_dict(), save_path)
         
         # Training after warmup
         if step > args.warmup_steps and step % args.update_frequency == 0:
@@ -352,12 +353,13 @@ def train_htd3(args, env, agent: HTD3):
     
     # Save final model
     final_save_path = os.path.join(args.output_dir, "final_model.pth")
-    torch.save({
-        'actor': agent.Mu.state_dict(),
-        'critic1': agent.Q1.state_dict(),
-        'critic2': agent.Q2.state_dict(),
-        'training_info': training_info.log
-    }, final_save_path)
+    # torch.save({
+    #     'actor': agent.Mu.state_dict(),
+    #     'critic1': agent.Q1.state_dict(),
+    #     'critic2': agent.Q2.state_dict(),
+    #     'training_info': training_info.log
+    # }, final_save_path)
+    torch.save(agent.Mu.state_dict(), final_save_path)
     
     print(f"Training completed. Models saved to {args.output_dir}")
 
@@ -366,12 +368,14 @@ def evaluate_htd3(args, env, agent):
     """Evaluate the trained HTD3 agent"""
     
     # Load trained model
-    model_path = os.path.join(args.output_dir, "best_model.pth")
-    if not os.path.exists(model_path):
-        model_path = os.path.join(args.output_dir, "final_model.pth")
-    
-    checkpoint = torch.load(model_path)
-    agent.Mu.load_state_dict(checkpoint['actor'])
+    # model_path = os.path.join(args.output_dir, "best_model.pth")
+    # if not os.path.exists(model_path):
+    #     model_path = os.path.join(args.output_dir, "final_model.pth")
+    model_path = os.path.join(args.output_dir, "final_model.pth")
+    # checkpoint = torch.load(model_path)
+    # agent.Mu.load_state_dict(checkpoint['actor'])
+    state_dict = torch.load(model_path,map_location=args.device)
+    agent.Mu.load_state_dict(state_dict)
     
     print("Loaded trained model for evaluation")
     
@@ -380,7 +384,7 @@ def evaluate_htd3(args, env, agent):
     episode_lengths = []
     
     for episode in range(args.eval_episodes):
-        state_dict, _ = env.reset()
+        state_dict= env.reset()
         state = dict_state_to_tensor(state_dict, args.device)
         
         episode_reward = 0
@@ -393,6 +397,11 @@ def evaluate_htd3(args, env, agent):
                 action = action_tensor.cpu().numpy()[0]
             
             next_state_dict, reward, terminated, truncated, _ = env.step(action)
+            
+            points=(float(next_state_dict["x_norm"]*MAX),float(next_state_dict["y_norm"]*MAX))
+            # print(points)
+            env.record_points(points)
+            
             done = terminated or truncated
             
             state = dict_state_to_tensor(next_state_dict, args.device)
@@ -400,8 +409,8 @@ def evaluate_htd3(args, env, agent):
             episode_length += 1
             
             # Render if needed
-            if args.render:
-                env.render()
+            # if args.render:
+            #     env.render()
         
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
@@ -411,12 +420,13 @@ def evaluate_htd3(args, env, agent):
     # Print evaluation results
     avg_reward = np.mean(episode_rewards)
     avg_length = np.mean(episode_lengths)
-    success_rate = np.mean([r > 0 for r in episode_rewards]) * 100
+    # success_rate = np.mean([r > 0 for r in episode_rewards]) * 100
     
     print(f"\nEvaluation Results:")
     print(f"Average Reward: {avg_reward:.2f}")
     print(f"Average Length: {avg_length:.2f}")
-    print(f"Success Rate: {success_rate:.1f}%")
+    # print(f"Success Rate: {success_rate:.1f}%")
+    env.draw_path("usv_path_points.csv")
 
 
 def main():
@@ -443,7 +453,7 @@ def main():
     
     # Algorithm parameters
     parser.add_argument("--gamma", default=0.99, type=float, help="Discount factor")
-    parser.add_argument("--tau", default=0.005, type=float, help="Target network update rate")
+    parser.add_argument("--tau", default=0.001, type=float, help="Target network update rate")
     parser.add_argument("--policy_noise", default=0.2, type=float, help="Policy noise")
     parser.add_argument("--noise_clip", default=0.5, type=float, help="Noise clipping")
     parser.add_argument("--exploration_noise", default=0.1, type=float, help="Exploration noise")
@@ -455,12 +465,12 @@ def main():
     # Logging and output
     parser.add_argument("--log_interval", default=1000, type=int, help="Logging interval")
     parser.add_argument("--output_dir", default="htd3_output", type=str, help="Output directory")
-    parser.add_argument("--seed", default=42, type=int, help="Random seed")
+    # parser.add_argument("--seed", default=42, type=int, help="Random seed")
     
     # Mode selection
     parser.add_argument("--do_train", action="store_true", help="Enable training")
     parser.add_argument("--do_eval", action="store_true", help="Enable evaluation")
-    parser.add_argument("--render", action="store_true", help="Render during evaluation")
+    # parser.add_argument("--render", action="store_true", help="Render during evaluation")
     
     args = parser.parse_args()
     
@@ -473,7 +483,8 @@ def main():
     
     # Initialize environment
     from my_USV_Env import MyUsvEnv
-    env = MyUsvEnv(record_flag=False)
+    env_train = MyUsvEnv(record_flag=False)
+    env_eval = MyUsvEnv(record_flag=False)
     
     # Initialize agent
     agent = HTD3(
@@ -486,12 +497,12 @@ def main():
     # Training
     if args.do_train:
         print("Starting HTD3 training...")
-        train_htd3(args, env, agent)
+        train_htd3(args, env_train, agent)
     
     # Evaluation
     if args.do_eval:
         print("Starting HTD3 evaluation...")
-        evaluate_htd3(args, env, agent)
+        evaluate_htd3(args, env_eval, agent)
     
     # env.close()
 

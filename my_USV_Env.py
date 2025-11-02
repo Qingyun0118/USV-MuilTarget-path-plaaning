@@ -186,9 +186,9 @@ class MyUsvEnv():
         for obstacle_pos in OBSTACLE_POS_R:
             rou_oi=np.sqrt((obstacle_pos[0]-current_pos[0])**2+(obstacle_pos[1]-current_pos[1])**2)
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
-                reward_oi+=0.0
+                reward_oi=0.0
             else:
-                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+                reward_oi = -self.calculate_normalize_Rou(current_pos, obstacle_pos)
         
         #(2)Target reaching
         reward_t=0.0
@@ -199,21 +199,21 @@ class MyUsvEnv():
                 self.P[0]=1.0
                 print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
             if rou_t<self.target_r:
                 self.P[1]=1.0
                 print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
             if rou_t<self.target_r:####
                 print("Target{} Reached!".format(self.target_index))
                 # pass
                 done=True
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)+1.0
             
         # (3)Shortest path
         reward_p=0.0
@@ -241,11 +241,11 @@ class MyUsvEnv():
         # done=self.is_done(self.current_pos)
         # terminated=self.is_done(self.current_pos)
         
-        # if self.step_counter >= 2000:
-        #     truncated=True
-        # else:
-        #     truncated=False
-        truncated=False
+        if self.step_counter >= 2000:
+            truncated=True
+        else:
+            truncated=False
+        # truncated=False
         state={
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
             "y_norm": np.array([self.normalize_x_y(self.current_pos[1])]),
@@ -826,28 +826,28 @@ class MyUsvEnv_Gym(gym.Env):
 
 
 # test
-# if __name__ == '__main__':
-#     env=MyUsvEnv(record_flag=True)
-#     env.visualize_env()
-#     i=0
-#     obs=env.reset()
-#     # print(obs)
-#     while True:
-#         i+=1
-#         action=env.action_space.sample()
-#         obs,reward,terminated,truncated,_=env.step(action)
-#         print("step:",i)
-#         # print("action:",action)
-#         position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
-#         print("position:",position)
-#         print("obs",obs)
-#         print("reward:",reward)
-#         if terminated:
-#             break
-#         # if i==1000:
-#         #     break
-#     env.draw_path("usv_path_points_1.csv")
-#     env.close_writer()
+if __name__ == '__main__':
+    env=MyUsvEnv(record_flag=True)
+    env.visualize_env()
+    i=0
+    obs=env.reset()
+    # print(obs)
+    while True:
+        i+=1
+        action=env.action_space.sample()
+        obs,reward,terminated,truncated,_=env.step(action)
+        print("step:",i)
+        # print("action:",action)
+        position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+        print("position:",position)
+        print("obs",obs)
+        print("reward:",reward)
+        if terminated:
+            break
+        # if i==1000:
+        #     break
+    env.draw_path("usv_path_points_1.csv")
+    env.close_writer()
     # plt.show()
        
     # env.observation_space.sample()

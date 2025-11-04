@@ -213,16 +213,16 @@ class MyUsvEnv():
                 print("Target{} Reached!".format(self.target_index))
                 # pass
                 done=True
-            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)+1.0
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
             
         # (3)Shortest path
         reward_p=0.0
         reward_p = -np.linalg.norm(current_pos - old_pos)
         
         #weigth the reward
-        K_oi=0.2
-        K_t=0.1
-        K_p=0.01
+        K_oi=2.0
+        K_t=1.0
+        K_p=0.10
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
@@ -241,7 +241,7 @@ class MyUsvEnv():
         # done=self.is_done(self.current_pos)
         # terminated=self.is_done(self.current_pos)
         
-        if self.step_counter >= 2000:
+        if self.step_counter >= 1000:
             truncated=True
         else:
             truncated=False

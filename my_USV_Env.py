@@ -474,7 +474,7 @@ class MyUsvEnv():
 
 # define the gym environment for the USV
 class MyUsvEnv_Gym(gym.Env):
-    def __init__(self):
+    def __init__(self, record_flag=False):
         """
         define the action space:
         rou:the relative distance between the current waypoint and the next waypoint
@@ -497,10 +497,10 @@ class MyUsvEnv_Gym(gym.Env):
             "x_norm":Box(low=0.0, high=1.0, shape=(1,)),#x_norm
             "y_norm":Box(low=0.0, high=1.0, shape=(1,)),#y_norm
             "Rou_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),)),  # Rou_o_norm
-            "Alpha_o_norm":Box(low=-1.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
+            "Alpha_o_norm":Box(low=0.0, high=1.0, shape=(len(OBSTACLE_POS_R),2)),  # Alpha_o_norm
             "Priority_vector":MultiBinary(len(TARGET_POS)-1),  # P
             "rou_t_norm":Box(low=0.0, high=1.0, shape=(1,)),  # rou_t_norm
-            "alpha_t_norm":Box(low=-1.0, high=1.0, shape=(1,2)),  # alpha_t_norm
+            "alpha_t_norm":Box(low=0.0, high=1.0, shape=(1,2)),  # alpha_t_norm
         })
     
         self.step_counter = 0# the number of steps
@@ -508,17 +508,21 @@ class MyUsvEnv_Gym(gym.Env):
         self.target_r=3.0 # radius of the target area
         self.P=np.zeros(len(TARGET_POS)-1)  # 
         self.target_index=0
-        self.render_flag=False # whether to render the environment
         
+        # Added file object properties
+        self.csv_file = None
+        self.csv_writer = None
+        self.record_flag = record_flag
+    
     #define the reset function for the environment
-    def reset(self, seed=None, options=None):
+    def reset(self,seed=None,options=None):
         super().reset(seed=seed)
         self.step_counter = 0
         self.current_pos = START_POS.copy()
         
         # Use the current point as a reference to calculate all relative relationships.
-        x_norm = self.normalize_x_y(self.current_pos[0])
-        y_norm = self.normalize_x_y(self.current_pos[1])
+        x_norm = np.array([self.normalize_x_y(self.current_pos[0])])
+        y_norm = np.array([self.normalize_x_y(self.current_pos[1])])
         
         # Correction: Pass the current point as the reference
         Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R])
@@ -531,18 +535,17 @@ class MyUsvEnv_Gym(gym.Env):
         rou_t_norm = np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])])
         alpha_t_norm = np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])])
         
-        init_state = Dict({
-            "x_norm": np.array([x_norm]),
-            "y_norm": np.array([y_norm]),
+        init_state = {
+            "x_norm": x_norm,
+            "y_norm": y_norm,
             "Rou_o_norm": Rou_o_norm,
             "Alpha_o_norm": Alpha_o_norm,
             "Priority_vector": self.P,
             "rou_t_norm": rou_t_norm,
             "alpha_t_norm": alpha_t_norm,
-        })
-        
+        }
+        # return init_state
         info = {}
-        
         return init_state, info
     
     # define the reward function for the environment
@@ -552,31 +555,34 @@ class MyUsvEnv_Gym(gym.Env):
         for obstacle_pos in OBSTACLE_POS_R:
             rou_oi=np.sqrt((obstacle_pos[0]-current_pos[0])**2+(obstacle_pos[1]-current_pos[1])**2)
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
-                reward_oi+=0.0
+                reward_oi=0.0
             else:
-                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+                reward_oi = -self.calculate_normalize_Rou(current_pos, obstacle_pos)
         
         #(2)Target reaching
         reward_t=0.0
+        done=False
         if np.array_equal(self.P,np.array([0.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[0][0])**2+(current_pos[1]-TARGET_POS[0][1])**2)
             if rou_t<self.target_r:
                 self.P[0]=1.0
                 print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[0])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,0.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[1][0])**2+(current_pos[1]-TARGET_POS[1][1])**2)
             if rou_t<self.target_r:
                 self.P[1]=1.0
                 print("Target{} Reached!".format(self.target_index))
                 self.target_index+=1
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[1])+self.sgn(self.target_r-rou_t)
         elif np.array_equal(self.P,np.array([1.0,1.0])):
             rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)
-            if rou_t<self.target_r:
+            if rou_t<self.target_r:####
                 print("Target{} Reached!".format(self.target_index))
-            reward_t+=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)
+                # pass
+                done=True
+            reward_t=-self.calculate_normalize_Rou(current_pos,TARGET_POS[2])+self.sgn(self.target_r-rou_t)+1.0
             
         # (3)Shortest path
         reward_p=0.0
@@ -588,7 +594,7 @@ class MyUsvEnv_Gym(gym.Env):
         K_p=0.01
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
-        return reward
+        return reward,done
     
     #define the step function for the environment
     def step(self, action):
@@ -597,23 +603,19 @@ class MyUsvEnv_Gym(gym.Env):
         self.current_pos = self.calculate_next_pos(self.current_pos, action)
         self.check_pos(self.current_pos)
         
-        # if np.sqrt((self.current_pos[0]-TARGET_POS[0][0])**2+(self.current_pos[1]-TARGET_POS[0][1])**2)<self.target_r:
-        #     P=np.array([1.0,0.0])
-        # elif np.sqrt((self.current_pos[0]-TARGET_POS[1][0])**2+(self.current_pos[1]-TARGET_POS[1][1])**2)<self.target_r:
-        #     P=np.array([1.0,1.0])
-        
-        reward=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
+        reward,terminated=self.calculate_reward(self.current_pos,old_pos)#calculate the reward before update the priority vector
         
         # self.P,self.target_index=self.update_priority_vector(self.current_pos)
         
-        # done=self.is_done()
-        terminated=self.is_done()
-        truncated=False
-        # reward=self.calculate_reward(self.current_pos,old_pos,P)
+        # done=self.is_done(self.current_pos)
+        # terminated=self.is_done(self.current_pos)
         
-        info = {}
-        
-        state=Dict({
+        if self.step_counter >= 2000:
+            truncated=True
+        else:
+            truncated=False
+        # truncated=False
+        state={
             "x_norm": np.array([self.normalize_x_y(self.current_pos[0])]),
             "y_norm": np.array([self.normalize_x_y(self.current_pos[1])]),
             "Rou_o_norm": np.array([self.calculate_normalize_Rou(self.current_pos, obs) for obs in OBSTACLE_POS_R]),
@@ -621,10 +623,12 @@ class MyUsvEnv_Gym(gym.Env):
             "Priority_vector":self.P,
             "rou_t_norm": np.array([self.calculate_normalize_Rou(self.current_pos, TARGET_POS[self.target_index])]),
             "alpha_t_norm": np.array([self.calculate_normalize_alpha(self.current_pos, TARGET_POS[self.target_index])]),
-        })
+        }
         
+        info={}
         
-        return state, reward, terminated,truncated, info
+        # return state, reward, done
+        return state, reward, terminated, truncated,info
 
     #define the normalize function for the state value
     def normalize_x_y(self, x):
@@ -696,8 +700,9 @@ class MyUsvEnv_Gym(gym.Env):
         return current_pos
     
     #check finish all targets
-    def is_done(self):
-        if np.array_equal(self.P,np.array([1.0,0.0])):
+    def is_done(self,current_pos):
+        rou_t=np.sqrt((current_pos[0]-TARGET_POS[2][0])**2+(current_pos[1]-TARGET_POS[2][1])**2)####
+        if np.array_equal(self.P,np.array([1.0,1.0])) and rou_t<=self.target_r:
             return True
         else:
             return False
@@ -732,29 +737,39 @@ class MyUsvEnv_Gym(gym.Env):
         plt.grid(True, alpha=0.3)
         
         plt.show()
-       
+    
     # record the points of path,for drawing the path
-    def record_points(self,point,csv_file = "usv_path_points.csv"):
-        # Make sure point is a tuple or list containing x,y coordinates
+    def record_points(self, point, csv_file="usv_path_points_1.csv"):
         if len(point) != 2:
             raise ValueError("Point should be a tuple/list with (x,y) coordinates")
         
         try:
-            # Check if the file exists
-            file_exists = os.path.isfile(csv_file)
-            
-            # Open the file in append mode, creating it if it does not exist
-            with open(csv_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                # If the file does not exist or is empty, write the header
+            # 初始化文件写入器
+            if self.record_flag and self.csv_file is None:
+                file_exists = os.path.isfile(csv_file)
+                self.csv_file = open(csv_file, 'a', newline='')
+                self.csv_writer = csv.writer(self.csv_file)
                 if not file_exists or os.stat(csv_file).st_size == 0:
-                    writer.writerow(['x', 'y'])
-                # Write current point
-                writer.writerow(point)
-                
+                    self.csv_writer.writerow(['x', 'y'])
+                    self.csv_writer.writerow(self.start_pos)
+                    self.csv_file.flush()
             
+            # 写入数据
+            if self.record_flag:
+                self.csv_writer.writerow(point)
+                self.csv_file.flush()  # 立即刷新缓冲区
+                
         except Exception as e:
             print(f"Error recording point: {e}")
+            # 发生错误时关闭文件
+            if self.csv_file:
+                self.csv_file.close()
+                self.csv_file = None
+
+    def close_writer(self):  # 新增关闭方法
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
     
     
     # draw the path of the USV after done
@@ -805,7 +820,7 @@ class MyUsvEnv_Gym(gym.Env):
             
             # Draw path details
             plt.plot(x_points, y_points, 'b-', linewidth=1, alpha=0.7)
-            plt.plot(x_points[-1], y_points[-1], 'rs', markersize=12, label='End')   # 终点
+            plt.plot(x_points[-1], y_points[-1], 'rx', label='End')   # 终点
             
             # Draw small arrows at the end of each line segment
             # for i in range(len(x_points)-1):
@@ -827,7 +842,7 @@ class MyUsvEnv_Gym(gym.Env):
 
 # test
 if __name__ == '__main__':
-    env=MyUsvEnv(record_flag=True)
+    env=MyUsvEnv_Gym()
     env.visualize_env()
     i=0
     obs=env.reset()
@@ -848,40 +863,3 @@ if __name__ == '__main__':
         #     break
     env.draw_path("usv_path_points_1.csv")
     env.close_writer()
-    # plt.show()
-       
-    # env.observation_space.sample()
-    # print(env.observation_space.sample())
-    # obs=env.reset()
-    # current_pos=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
-    # old_pos=current_pos.copy()
-    # P=obs['Priority_vector']
-    # print(obs)
-    # print(env.calculate_reward(current_pos,old_pos,P))
-    # action=env.action_space.sample()
-#     fig,ax=plt.subplots(figsize=(5,5))
-#     plt.xlim(0,100)
-#     plt.ylim(0,100)
-#     # ob1 = Obstacle(10, 10, 5, 1.5, 3.5)
-#     # ob2 = Obstacle(30, 20, 5, 1.5, 3.5)
-#     # ob3 = Obstacle(40, 50, 5, 1.5, 3.5)
-    
-#     # t1=Target(90,90,3)
-#     # t1.show_target(ax)
-#     # if ob1.is_overlapping(ob2):print("ob1 and ob2 are overlapping")
-#     # if ob1.is_overlapping(ob3):print("ob1 and ob3 are overlapping")
-#     # if ob2.is_overlapping(ob3):print("ob2 and ob3 are overlapping")
-#     # ob1.show_obstacle(ax)
-#     # ob2.show_obstacle(ax)
-#     # ob3.show_obstacle(ax)
-#     plt.plot(START_POS[0],START_POS[1],'bo')
-    
-#     for i in range(len(TARGET_POS)):
-#         t=Target(TARGET_POS[i][0],TARGET_POS[i][1],3)
-#         t.show_target(ax,i)
-    
-#     for i in range(len(OBSTACLE_POS_R)):
-#         o=Obstacle(OBSTACLE_POS_R[i][0],OBSTACLE_POS_R[i][1],OBSTACLE_POS_R[i][2],ROU_C,ROU_S)
-#         o.show_obstacle(ax)
-    
-#     plt.show()

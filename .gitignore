@@ -8,3 +8,5 @@ data/
 original results/
 *.zip
 *.pth
+*.npy
+models/

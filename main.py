@@ -57,29 +57,38 @@ def eval_policy(policy, env_name, seed, eval_episodes=10):
         eval_env.reset(seed=seed + 100)
 
     avg_reward = 0.
-    for _ in range(eval_episodes):
+    print(f"Starting evaluation for {env_name}, Total episodes: {eval_episodes} ...")
+    
+    for episode in range(eval_episodes):
         if env_name == "MyUsvEnv-Gym":
             state, _ = eval_env.reset()
         else:
             state = eval_env.reset()
         terminated = False
         truncated = False
-        
+        episode_reward=0.
+        step=0
         while not (terminated or truncated):
             # 状态预处理
             if env_name == "MyUsvEnv-Gym":
                 state_flat = flatten_state(state)
             else:
                 state_flat = state
-                
+            
+            step+=1
             action = policy.select_action(state_flat)
             
             if env_name == "MyUsvEnv-Gym":
                 state, reward, terminated, truncated, _ = eval_env.step(action)
             else:
                 state, reward, terminated, truncated, _ = eval_env.step(action)
-                
-            avg_reward += reward
+            
+            episode_reward += reward
+        
+        avg_reward += episode_reward
+        
+        # 打印每个评估回合的奖励，但保持环境打印信息的完整性
+        print(f"Evaluation episode {episode+1} complete, steps: {step}, reward: {episode_reward:.3f}")
 
     avg_reward /= eval_episodes
 
@@ -96,7 +105,7 @@ if __name__ == "__main__":
     parser.add_argument("--env", default="MyUsvEnv-Gym")          # OpenAI gym environment name
     parser.add_argument("--seed", default=0, type=int)              # Sets Gym, PyTorch and Numpy seeds
     parser.add_argument("--start_timesteps", default=25e3, type=int)# Time steps initial random policy is used
-    parser.add_argument("--eval_freq", default=5e3, type=int)       # How often (time steps) we evaluate
+    parser.add_argument("--eval_freq", default=5e4, type=int)       # How often (time steps) we evaluate
     parser.add_argument("--max_timesteps", default=1e6, type=int)   # Max time steps to run environment
     parser.add_argument("--expl_noise", default=0.1, type=float)    # Std of Gaussian exploration noise
     parser.add_argument("--batch_size", default=256, type=int)      # Batch size for both actor and critic
@@ -231,7 +240,18 @@ if __name__ == "__main__":
             episode_num += 1 
 
         # Evaluate episode
+        best_eval_reward = -float('inf')
         if (t + 1) % args.eval_freq == 0:
-            evaluations.append(eval_policy(policy, args.env, args.seed))
+            print(f"\n=== Starting evaluation at {t+1} (time steps: {t+1}) ===")
+            eval_reward = eval_policy(policy, args.env, args.seed)
+            evaluations.append(eval_reward)
             np.save(f"./results/{file_name}", evaluations)
-            if args.save_model: policy.save(f"./models/{file_name}")
+            #save current model
+            if args.save_model: 
+                policy.save(f"./models/{file_name}")
+                
+                if eval_reward > best_eval_reward:
+                    best_eval_reward = eval_reward
+                    policy.save(f"./models/{file_name}_best")
+            
+            print(f"=== Finished evaluation at {t+1} (time steps: {t+1}) ===\n")

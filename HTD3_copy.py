@@ -481,10 +481,12 @@ def main():
     print(f"Using device: {args.device}")
     
     # Initialize environment
-    from my_USV_Env import MyUsvEnv
-    env_train = MyUsvEnv(record_flag=False)
-    env_eval = MyUsvEnv(record_flag=True)#eval_episodes must be 1 for recording points
-    
+    from my_USV_Env import MyUsvEnv,MyUsvEnv_Gym
+    # env_train = MyUsvEnv(record_flag=False)
+    # env_eval = MyUsvEnv(record_flag=True)#eval_episodes must be 1 for recording points
+    env_train = MyUsvEnv_Gym(record_flag=False)
+    env_eval = MyUsvEnv_Gym(record_flag=True)#eval_episodes must be 1 for recording points
+
     # Initialize agent
     agent = HTD3(
         dim_state=args.dim_state,

@@ -1,12 +1,10 @@
 *.csv
 *.png
-noisemodel/
 __pycache__/
 .idea/
 .vscode/
-data/
-original results/
 *.zip
 *.pth
 *.npy
+*.dump
 models/

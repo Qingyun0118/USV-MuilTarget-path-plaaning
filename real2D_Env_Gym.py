@@ -47,7 +47,7 @@ class SeaEnv(gym.Env):
     def __init__(self):
         # """初始化环境"""
         # 状态空间：6维连续空间 [x, y, u, v, goal_x, goal_y] - 位置、海流速度和当前目标点
-        # self.observation_space = Box(low=0.0, high=40.0, shape=(6,))
+        # self.observation_space = Box(low=0.0, high=19.0, shape=(6,))
         self.observation_space = Box(low=np.array([0.0, 0.0, -10.0, -10.0, 0.0, 0.0]), high=np.array([40.0, 40.0, 10.0, 10.0, 40.0, 40.0]), dtype=np.float32)
         # 动作空间：8个离散方向
         self.action_space = Discrete(8)

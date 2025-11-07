@@ -219,11 +219,18 @@ class MyUsvEnv():
         reward_p=0.0
         reward_p = -np.linalg.norm(current_pos - old_pos)
         
+        # (4) stop penalty
+        reward_stop=0.0
+        if np.linalg.norm(current_pos - old_pos)<0.1:
+            reward_stop=-1.0
+        else:
+            reward_stop=0.0
+        
         #weigth the reward
-        K_oi=2.0
-        K_t=1.0
-        K_p=0.10
-        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
+        K_oi=0.25
+        K_t=0.15
+        K_p=0.02
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+reward_stop
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
     
@@ -241,7 +248,7 @@ class MyUsvEnv():
         # done=self.is_done(self.current_pos)
         # terminated=self.is_done(self.current_pos)
         
-        if self.step_counter >= 1000:
+        if self.step_counter >= 2000:
             truncated=True
         else:
             truncated=False

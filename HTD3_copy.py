@@ -458,7 +458,7 @@ def main():
     parser.add_argument("--exploration_noise", default=0.1, type=float, help="Exploration noise")
     
     # Evaluation parameters
-    parser.add_argument("--eval_episodes", default=10, type=int, help="Evaluation episodes")
+    parser.add_argument("--eval_episodes", default=1, type=int, help="Evaluation episodes")
     parser.add_argument("--max_episode_steps", default=1000, type=int, help="Max steps per episode")
     
     # Logging and output

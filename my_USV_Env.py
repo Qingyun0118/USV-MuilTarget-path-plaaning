@@ -226,10 +226,13 @@ class MyUsvEnv():
         reward_t_approach=np.arctan(old_dis-new_dis-10)
         
         #weigth the reward
-        K_oi=0.2
+        K_oi=0.4
         K_t=0.1
         K_p=0.01
-        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+reward_t_approach
+        K_t_approach=0.8
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+K_t_approach*reward_t_approach
+
+        reward = reward/(0.05*self.step_counter+1) if reward > 0 and self.step_counter > 50 else reward
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
     
@@ -247,7 +250,7 @@ class MyUsvEnv():
         # done=self.is_done(self.current_pos)
         # terminated=self.is_done(self.current_pos)
         
-        if self.step_counter >= 2000:
+        if self.step_counter >= 1000:
             truncated=True
         else:
             truncated=False

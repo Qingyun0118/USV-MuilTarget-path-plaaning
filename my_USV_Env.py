@@ -188,7 +188,7 @@ class MyUsvEnv():
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
                 reward_oi+=0.0
             else:
-                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)-1.0
         
         #(2)Target reaching
         reward_t=0.0
@@ -226,10 +226,10 @@ class MyUsvEnv():
         reward_t_approach=np.arctan(old_dis-new_dis-10)
         
         #weigth the reward
-        K_oi=0.4
+        K_oi=4.0
         K_t=0.1
-        K_p=0.01
-        K_t_approach=0.8
+        K_p=0.005
+        K_t_approach=0.5
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+K_t_approach*reward_t_approach
 
         reward = reward/(0.05*self.step_counter+1) if reward > 0 and self.step_counter > 50 else reward
@@ -467,7 +467,7 @@ class MyUsvEnv():
             # for i in range(len(x_points)-1):
             #     plt.arrow(x_points[i], y_points[i], x_points[i+1]-x_points[i], y_points[i+1]-y_points[i], color='r', alpha=0.5, width=0.1, head_width=0.3, head_length=0.3)
             
-            plt.title('USV Navigation Path with Environment')
+            plt.title('Multi-Target path-planning USV')
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
             plt.legend(loc='upper right')

@@ -392,7 +392,7 @@ def evaluate_htd3(args, env, agent):
         
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
-                action_tensor = agent.get_action(state.unsqueeze(0), explore=True,exploration_noise=0.0)
+                action_tensor = agent.get_action(state.unsqueeze(0), explore=False)
                 action = action_tensor.cpu().numpy()[0]
             
             next_state_dict, reward, terminated, truncated, _ = env.step(action)

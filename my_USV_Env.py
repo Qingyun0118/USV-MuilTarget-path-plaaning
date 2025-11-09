@@ -218,12 +218,18 @@ class MyUsvEnv():
         # (3)Shortest path
         reward_p=0.0
         reward_p = -np.linalg.norm(current_pos - old_pos)
+
+        # (4) Reward for approaching the target point
+        reward_t_approach=0.0
+        old_dis=np.sqrt((old_pos[0]-TARGET_POS[self.target_index][0])**2+(old_pos[1]-TARGET_POS[self.target_index][1])**2)
+        new_dis=np.sqrt((current_pos[0]-TARGET_POS[self.target_index][0])**2+(current_pos[1]-TARGET_POS[self.target_index][1])**2)
+        reward_t_approach=np.arctan(old_dis-new_dis-10)
         
         #weigth the reward
         K_oi=0.2
         K_t=0.1
         K_p=0.01
-        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+reward_t_approach
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
     

@@ -223,7 +223,7 @@ class MyUsvEnv():
         K_oi=0.2
         K_t=0.1
         K_p=0.01
-        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+reward_stop
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
     

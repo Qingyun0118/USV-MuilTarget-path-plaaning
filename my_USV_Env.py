@@ -186,9 +186,9 @@ class MyUsvEnv():
         for obstacle_pos in OBSTACLE_POS_R:
             rou_oi=np.sqrt((obstacle_pos[0]-current_pos[0])**2+(obstacle_pos[1]-current_pos[1])**2)
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
-                reward_oi=0.0
+                reward_oi+=0.0
             else:
-                reward_oi = -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
         
         #(2)Target reaching
         reward_t=0.0
@@ -219,17 +219,10 @@ class MyUsvEnv():
         reward_p=0.0
         reward_p = -np.linalg.norm(current_pos - old_pos)
         
-        # (4) stop penalty
-        reward_stop=0.0
-        if np.linalg.norm(current_pos - old_pos)<0.1:
-            reward_stop=-1.0
-        else:
-            reward_stop=0.0
-        
         #weigth the reward
-        K_oi=0.25
-        K_t=0.15
-        K_p=0.02
+        K_oi=0.2
+        K_t=0.1
+        K_p=0.01
         reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+reward_stop
         # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
@@ -562,9 +555,9 @@ class MyUsvEnv_Gym(gym.Env):
         for obstacle_pos in OBSTACLE_POS_R:
             rou_oi=np.sqrt((obstacle_pos[0]-current_pos[0])**2+(obstacle_pos[1]-current_pos[1])**2)
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
-                reward_oi=0.0
+                reward_oi+=0.0
             else:
-                reward_oi = -self.calculate_normalize_Rou(current_pos, obstacle_pos)
+                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
         
         #(2)Target reaching
         reward_t=0.0

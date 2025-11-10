@@ -188,7 +188,7 @@ class MyUsvEnv():
             if rou_oi>obstacle_pos[2]+ROU_C+ROU_S:
                 reward_oi+=0.0
             else:
-                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)-1.0
+                reward_oi += -self.calculate_normalize_Rou(current_pos, obstacle_pos)
         
         #(2)Target reaching
         reward_t=0.0
@@ -226,7 +226,7 @@ class MyUsvEnv():
         reward_t_approach=np.arctan(old_dis-new_dis-10)
         
         #weigth the reward
-        K_oi=4.0
+        K_oi=5.0
         K_t=0.1
         K_p=0.005
         K_t_approach=0.5

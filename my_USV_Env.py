@@ -146,7 +146,24 @@ class MyUsvEnv():
         self.csv_file = None
         self.csv_writer = None
         self.record_flag = record_flag
+        self.X, self.Y = np.meshgrid(np.arange(0,100, 1), np.arange(0, 100, 1))
+        self.U, self.V = self.current_data()
+    
+    @staticmethod
+    def current_data():
+        """
+        从NetCDF文件加载海流数据
         
+        Returns:
+            tuple: (U, V) - 经度和纬度方向的海流速度场
+        """
+        nc_obj = Dataset('data\chinasea_201801_c.nc')
+        uu = np.transpose(nc_obj.variables['u'][1, :,:])  # 经度方向速度
+        vv = np.transpose(nc_obj.variables['v'][1, :,:])  # 纬度方向速度
+        uu = uu[0:101, 0:101]  # 截取北部分量
+        vv = vv[0:101, 0:101]  # 截取东部分量
+        return uu, vv
+
     #define the reset function for the environment
     def reset(self):
         self.step_counter = 0
@@ -353,6 +370,9 @@ class MyUsvEnv():
         # set the figure size
         plt.rcParams['figure.figsize'] = (6.0, 6.0)
         fig,ax=plt.subplots()
+        
+        ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T, 
+            width=0.002, scale=20, color='blue', alpha=0.7)
         
         # add the starting position of the USV to the environment
         plt.plot(self.start_pos[0],self.start_pos[1],'bx')

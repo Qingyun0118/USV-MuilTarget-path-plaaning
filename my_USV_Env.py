@@ -28,7 +28,7 @@ class Obstacle():
     
     # draw the obstacle on the environment
     def show_obstacle(self, ax):
-        circle_ob = plt.Circle((self.x, self.y), self.radius_o, color='black', fill=False)
+        circle_ob = plt.Circle((self.x, self.y), self.radius_o, color='red', fill=True)
         ax.add_patch(circle_ob)
         circle_c= plt.Circle((self.x, self.y), self.radius_o+self.rou_c, color='red',linestyle='--',fill=False)
         ax.add_patch(circle_c)
@@ -72,11 +72,15 @@ START_POS = np.array([5.0,5.0]) # starting position of the USV
 
 # define the target positions
 OBSTACLE_POS_R=[
-    np.array([20.0,70.0,5.0]),
-    np.array([40.0,30.0,15.0]),
-    np.array([60.0,70.0,15.0]),
-    np.array([80.0,20.0,2.5]),
+    np.array([7.0,16.0,4.5]),
+    np.array([60.0,10.0,10.0]),
+    np.array([90.0,10.0,10.0]),
+    np.array([40.0,4.0,4.0]),
     np.array([90.0,90.0,5.0]),
+    np.array([45.0,65.0,5.0]),
+    np.array([42.0,47.0,4.0]),
+    np.array([92.0,64.0,4.0]),
+    np.array([86.0,35.0,4.0]),
 ]
 
 OBSTACLE_POS=[
@@ -157,11 +161,9 @@ class MyUsvEnv():
         Returns:
             tuple: (U, V) - 经度和纬度方向的海流速度场
         """
-        nc_obj = Dataset('data\chinasea_201801_c.nc')
-        uu = np.transpose(nc_obj.variables['u'][1, :,:])  # 经度方向速度
-        vv = np.transpose(nc_obj.variables['v'][1, :,:])  # 纬度方向速度
-        uu = uu[0:101, 0:101]  # 截取北部分量
-        vv = vv[0:101, 0:101]  # 截取东部分量
+        nc_obj = Dataset('data\globalsea_20250901.nc')
+        uu = nc_obj.variables['uo'][0, 0,:,:][1248:1348, 3600:3700]   # 经度方向速度
+        vv = nc_obj.variables['vo'][0, 0,:,:][1248:1348, 3600:3700]   # 纬度方向速度
         return uu, vv
 
     #define the reset function for the environment
@@ -375,7 +377,7 @@ class MyUsvEnv():
             width=0.002, scale=20, color='blue', alpha=0.7)
         
         # add the starting position of the USV to the environment
-        plt.plot(self.start_pos[0],self.start_pos[1],'bx')
+        plt.plot(self.start_pos[0],self.start_pos[1],'rx')
         
         # add the targets to the environment
         for i in range(len(TARGET_POS)):
@@ -871,24 +873,24 @@ class MyUsvEnv_Gym(gym.Env):
 
 # test
 if __name__ == '__main__':
-    env=MyUsvEnv_Gym()
+    env=MyUsvEnv()
     env.visualize_env()
-    i=0
-    obs=env.reset()
-    # print(obs)
-    while True:
-        i+=1
-        action=env.action_space.sample()
-        obs,reward,terminated,truncated,_=env.step(action)
-        print("step:",i)
-        # print("action:",action)
-        position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
-        print("position:",position)
-        print("obs",obs)
-        print("reward:",reward)
-        if terminated:
-            break
-        # if i==1000:
-        #     break
-    env.draw_path("usv_path_points_1.csv")
-    env.close_writer()
+    # i=0
+    # obs=env.reset()
+    # # print(obs)
+    # while True:
+    #     i+=1
+    #     action=env.action_space.sample()
+    #     obs,reward,terminated,truncated,_=env.step(action)
+    #     print("step:",i)
+    #     # print("action:",action)
+    #     position=np.array([obs['x_norm']*MAX,obs['y_norm']*MAX])
+    #     print("position:",position)
+    #     print("obs",obs)
+    #     print("reward:",reward)
+    #     if terminated:
+    #         break
+    #     # if i==1000:
+    #     #     break
+    # env.draw_path("usv_path_points_1.csv")
+    # env.close_writer()

@@ -268,15 +268,39 @@ class MyUsvEnv():
         new_dis=np.sqrt((current_pos[0]-TARGET_POS[self.target_index][0])**2+(current_pos[1]-TARGET_POS[self.target_index][1])**2)
         reward_t_approach=np.arctan(old_dis-new_dis-10)
         
+        # (5) 利用海流速度奖励
+        reward_flow=0.0
+        flow_u, flow_v = self.get_flow_velocity(old_pos)
+        flow_speed=np.sqrt(flow_u**2+flow_v**2)
+        
+        if np.linalg.norm(current_pos - old_pos) > 0:
+            movement_vector = current_pos - old_pos
+            movement_direction = movement_vector / np.linalg.norm(movement_vector)
+            
+        if flow_speed>0:
+            flow_direction=np.array([flow_u, flow_v]) / flow_speed
+            
+            cos_theta = np.dot(movement_direction, flow_direction)
+            
+            # if cos_theta > 0.5:  # 
+            #     reward_flow = 0.5 * flow_speed * cos_theta
+            # elif cos_theta <= 0.0:  # 
+            #     reward_flow = 0.3 * flow_speed * abs(cos_theta)
+            reward_flow = flow_speed * cos_theta
+            
         #weigth the reward
         K_oi=5.0
         K_t=0.1
         K_p=0.005
         K_t_approach=0.5
-        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+K_t_approach*reward_t_approach
-
+        K_flow=0.05
+        reward=K_oi*reward_oi+K_t*reward_t+K_p*reward_p+K_t_approach*reward_t_approach+K_flow*reward_flow
+        # print("reward_oi:",K_oi*reward_oi,
+        #       "reward_t:",K_t*reward_t,
+        #       "reward_p:",K_p*reward_p,
+        #       "reward_t_approach:",K_t_approach*reward_t_approach,
+        #       "reward_flow:",K_flow*reward_flow)
         reward = reward/(0.05*self.step_counter+1) if reward > 0 and self.step_counter > 50 else reward
-        # print("reward_oi:",reward_oi,"reward_t:",reward_t,"reward_p:",reward_p)
         return reward,done
     
     #define the step function for the environment

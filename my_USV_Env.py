@@ -273,6 +273,7 @@ class MyUsvEnv():
         flow_u, flow_v = self.get_flow_velocity(old_pos)
         flow_speed=np.sqrt(flow_u**2+flow_v**2)
         
+        movement_direction = np.array([0, 0]) 
         if np.linalg.norm(current_pos - old_pos) > 0:
             movement_vector = current_pos - old_pos
             movement_direction = movement_vector / np.linalg.norm(movement_vector)

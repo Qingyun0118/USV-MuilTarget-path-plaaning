@@ -434,7 +434,7 @@ def main():
     
     # Environment parameters
     parser.add_argument("--env", default="MyUsvEnv", type=str, help="Environment name")
-    parser.add_argument("--dim_state", default=22, type=int, help="State dimension")  # Based on USV env
+    parser.add_argument("--dim_state", default=34, type=int, help="State dimension")  # Based on USV env
     parser.add_argument("--dim_action", default=2, type=int, help="Action dimension")  # [rou, alpha]
     parser.add_argument("--max_action", default=25.0, type=float, help="Maximum action value")
     

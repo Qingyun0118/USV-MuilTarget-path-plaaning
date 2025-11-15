@@ -6,6 +6,8 @@ from gymnasium.spaces import Box,Dict,MultiBinary,Discrete
 from netCDF4 import Dataset
 import random
 import csv,os
+import math
+from scipy.interpolate import griddata
 
 # define the obstacles class
 class Obstacle():
@@ -152,6 +154,7 @@ class MyUsvEnv():
         self.record_flag = record_flag
         self.X, self.Y = np.meshgrid(np.arange(0,100, 1), np.arange(0, 100, 1))
         self.U, self.V = self.current_data()
+        self.timestep=0.5
     
     @staticmethod
     def current_data():
@@ -164,6 +167,25 @@ class MyUsvEnv():
         nc_obj = Dataset('data\globalsea_20250901.nc')
         uu = nc_obj.variables['uo'][0, 0,:,:][1248:1348, 3600:3700]   # 经度方向速度
         vv = nc_obj.variables['vo'][0, 0,:,:][1248:1348, 3600:3700]   # 纬度方向速度
+        
+        # 创建网格坐标
+        x_coords = np.arange(0, 100, 1.0)
+        y_coords = np.arange(0, 100, 1.0)
+        
+        # 遍历所有网格点
+        for i, x in enumerate(x_coords):
+            for j, y in enumerate(y_coords):
+                # 检查当前点是否在任一障碍物的影响范围内
+                for obstacle in OBSTACLE_POS_R:
+                    obs_x, obs_y, obs_radius = obstacle[0], obstacle[1], obstacle[2]
+                    # 计算到障碍物中心的距离
+                    distance = np.sqrt((x - obs_x)**2 + (y - obs_y)**2)
+                    # 如果在障碍物半径内，将海流速度置零
+                    if distance <= (obs_radius):
+                        uu[i, j] = 0.0  
+                        vv[i, j] = 0.0
+                        break  # 找到一个障碍物匹配即可，无需检查其他障碍物
+            
         return uu, vv
 
     #define the reset function for the environment
@@ -327,9 +349,51 @@ class MyUsvEnv():
     def calculate_next_pos(self, current_pos, action):
         rou=action[0]
         alpha=action[1]
-        current_pos[0]+=rou*np.cos(alpha)
-        current_pos[1]+=rou*np.sin(alpha)
+        # current_pos[0]+=rou*np.cos(alpha)
+        # current_pos[1]+=rou*np.sin(alpha)
+        
+        # 获取当前点的海流速度
+        flow_u, flow_v = self.get_flow_at_position(current_pos)
+        
+        current_pos[0] += rou*np.cos(alpha)+ flow_u*self.timestep
+        current_pos[1] += rou*np.sin(alpha)+ flow_v*self.timestep
+        
         return current_pos
+    
+    # get the flow velocity at the current position
+    def get_flow_velocity(self, position):
+        x = position[0]
+        y = position[1]
+        
+        # 使用双线性插值获取海流速度
+        x1 = math.floor(x)
+        y1 = math.floor(y)
+        
+        x2 = x1 + 1
+        y2 = y1 + 1
+        
+        # 获取四个网格点的海流速度
+        points = np.array([[x1, y1], [x1, y2], [x2, y1], [x2, y2]])
+        values_u = np.array([
+            self.U[y1, x1], self.U[y2, x1], 
+            self.U[y1, x2], self.U[y2, x2]
+        ])
+        values_v = np.array([
+            self.V[y1, x1], self.V[y2, x1],
+            self.V[y1, x2], self.V[y2, x2]
+        ])
+        
+        # 双线性插值
+        u = griddata(points, values_u, (x, y), method='linear')
+        v = griddata(points, values_v, (x, y), method='linear')
+        
+        # 处理可能的NaN值
+        if np.isnan(u):
+            u = 0.0
+        if np.isnan(v):
+            v = 0.0
+            
+        return u, v
     
     # update the priority vector
     def update_priority_vector(self, current_pos):

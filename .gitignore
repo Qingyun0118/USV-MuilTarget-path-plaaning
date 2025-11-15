@@ -8,3 +8,4 @@ __pycache__/
 *.npy
 *.dump
 models/
+globalsea_20250901.nc

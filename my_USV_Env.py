@@ -521,13 +521,13 @@ class MyUsvEnv():
         plt.show()
     
     # record the points of path,for drawing the path
-    def record_points(self, point, csv_file="usv_path_points_1.csv"):
+    def record_points(self, point, csv_file="usv_path_points.csv"):
         if len(point) != 2:
             raise ValueError("Point should be a tuple/list with (x,y) coordinates")
         
         try:
             # 初始化文件写入器
-            if self.record_flag and self.csv_file is None:
+            if self.csv_file is None:
                 file_exists = os.path.isfile(csv_file)
                 self.csv_file = open(csv_file, 'a', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
@@ -537,9 +537,9 @@ class MyUsvEnv():
                     self.csv_file.flush()
             
             # 写入数据
-            if self.record_flag:
-                self.csv_writer.writerow(point)
-                self.csv_file.flush()  # 立即刷新缓冲区
+            
+            self.csv_writer.writerow(point)
+            self.csv_file.flush()  # 立即刷新缓冲区
                 
         except Exception as e:
             print(f"Error recording point: {e}")
@@ -555,26 +555,34 @@ class MyUsvEnv():
     
     
     # draw the path of the USV after done
-    def draw_path(self, csv_file="usv_path_points.csv"):
+    def draw_path(self, csv_file="usv_path_points.csv", ifshow=True, ifsave=False, savePath=None, max_episode=1):
+        """绘制USV路径
+        Args:
+            csv_file: 基础文件路径
+            ifshow: 是否显示图像
+            ifsave: 是否保存图像
+            savePath: 保存路径
+            max_episode: episode数量，>1时绘制多个episode
+        """
         # set the figure size
         plt.rcParams['figure.figsize'] = (6.0, 7.0)
-        fig,ax=plt.subplots()
+        fig, ax = plt.subplots()
         
         # 设置背景色
         fig.patch.set_facecolor('white')
         ax.set_facecolor('#F5F5F5')  # 浅灰色背景
         
-        quiver=ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T, 
+        quiver = ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T, 
             width=0.002, scale=20, color='blue', alpha=0.3)
         
         # add the starting position of the USV to the environment
-        start_point = ax.plot(self.start_pos[0],self.start_pos[1],'r*',markersize=10,zorder=5)
+        start_point = ax.plot(self.start_pos[0], self.start_pos[1], 'r*', markersize=10, zorder=5)
         
         # add the targets to the environment
         target_points = []
         for i in range(len(TARGET_POS)):
-            t=Target(TARGET_POS[i][0],TARGET_POS[i][1],3)
-            target_point=t.show_target(ax,i)
+            t = Target(TARGET_POS[i][0], TARGET_POS[i][1], 3)
+            target_point = t.show_target(ax, i)
             target_points.append(target_point)
         
         # add the obstacles to the environment
@@ -584,77 +592,134 @@ class MyUsvEnv():
                         OBSTACLE_POS_R[i][2], ROU_C, ROU_S)
             obstacle_patch = o.show_obstacle(ax)
             obstacle_patches.append(obstacle_patch)
-            
+        
         try:
-            # Check if the file is empty
-            if not os.path.exists(csv_file):
-                print("Path file is empty")
-                return
+            # 颜色列表，用于多个episode时区分
+            colors = ['#FF6B35', '#4ECDC4', '#45B7D1', '#96CEB4', '#F7DC6F', 
+                    '#BB8FCE', '#85C1E9', '#F8C471', '#82E0AA', '#F1948A']
+            
+            paths_drawn = 0  # 记录成功绘制的路径数量
+            
+            for episode in range(1, max_episode + 1):
+                # 构建文件路径
+                if max_episode > 1:
+                    # 多个episode：使用带编号的文件名
+                    base_dir = os.path.dirname(csv_file)
+                    base_name = os.path.basename(csv_file)
+                    if '_episode_' in base_name:
+                        # 如果文件名已经包含episode信息，提取基础部分
+                        base_parts = base_name.split('_episode_')
+                        base_prefix = base_parts[0]
+                        episode_file = os.path.join(base_dir, f"{base_prefix}_episode_{episode}.csv")
+                    else:
+                        # 如果文件名不包含episode信息，直接添加
+                        base_without_ext = os.path.splitext(base_name)[0]
+                        episode_file = os.path.join(base_dir, f"{base_without_ext}_{episode}.csv")
+                else:
+                    # 单个episode：使用原始文件名
+                    episode_file = csv_file
+                
+                # 检查文件是否存在
+                if not os.path.exists(episode_file):
+                    print(f"Path file {episode_file} does not exist")
+                    continue
 
-            # Read data and filter invalid points
-            x_points = []
-            y_points = []
-            with open(csv_file, 'r') as f:
-                reader = csv.reader(f)
-                next(reader)  # Skip header
-                for row in reader:
-                    if len(row) >= 2 and row[0] and row[1]:  # Make sure valid coordinates exist
-                        try:
-                            x = float(row[0])
-                            y = float(row[1])
-                            if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
-                                x_points.append(x)
-                                y_points.append(y)
-                        except ValueError:
-                            continue
+                # 读取数据并过滤无效点
+                x_points = []
+                y_points = []
+                with open(episode_file, 'r') as f:
+                    reader = csv.reader(f)
+                    try:
+                        next(reader)  # Skip header
+                    except StopIteration:
+                        print(f"File {episode_file} is empty")
+                        continue
+                        
+                    for row in reader:
+                        if len(row) >= 2 and row[0] and row[1]:  # 确保有有效的坐标
+                            try:
+                                x = float(row[0])
+                                y = float(row[1])
+                                if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
+                                    x_points.append(x)
+                                    y_points.append(y)
+                            except ValueError:
+                                continue
 
-            # Check valid points
-            if len(x_points) < 2:
-                print(f"Only {len(x_points)} valid points, need at least 2")
+                # 检查有效点数量
+                if len(x_points) < 2:
+                    print(f"Only {len(x_points)} valid points in {episode_file}, need at least 2")
+                    continue
+                
+                # 选择颜色
+                color = colors[(episode - 1) % len(colors)] if max_episode > 1 else '#FF6B35'
+                
+                # 绘制路径细节
+                label = f'Episode {episode}' if max_episode > 1 else 'USV Path'
+                ax.plot(x_points, y_points, 
+                    color=color,
+                    linewidth=1.0,
+                    linestyle='-',
+                    marker='o',
+                    markersize=3 if max_episode > 1 else 4,
+                    markerfacecolor='white',
+                    markeredgecolor=color,
+                    markeredgewidth=1,
+                    zorder=4,
+                    label=label)
+                
+                # 绘制终点
+                plt.plot(x_points[-1], y_points[-1], 'rx', markersize=8, zorder=5)
+                
+                paths_drawn += 1
+            
+            if paths_drawn == 0:
+                print("No valid paths to draw")
                 return
             
-            # Draw path details
-            ax.plot(x_points, y_points, 
-                color='#FF6B35',     # 鲜艳的橙色
-                linewidth=1.0,        # 中等线宽
-                linestyle='-',        # 实线
-                marker='o',           # 圆形标记点
-                markersize=4,         # 小标记点
-                markerfacecolor='white',  # 标记点内部白色
-                markeredgecolor='#FF6B35', # 标记点边缘与路径同色
-                markeredgewidth=1,    # 标记点边缘宽度
-                zorder=4)             # 确保路径在障碍物之上
-            
-            plt.plot(x_points[-1], y_points[-1], 'rx', markersize=10,zorder=5)   # 终点
-            
-                    # 定义图例元素
+            # 定义图例元素
             legend_elements = [
-            Line2D([0], [0], marker='*', color='red', markeredgecolor='red',
-                   markersize=10, label='Start Point', linewidth=0),
-            Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
-            Patch(facecolor='red', edgecolor='red', label='Obstacle'),
-            Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
-            Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
-            Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
-            Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.0, linestyle='-')
+                Line2D([0], [0], marker='*', color='red', markeredgecolor='red',
+                    markersize=10, label='Start Point', linewidth=0),
+                Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
+                Patch(facecolor='red', edgecolor='red', label='Obstacle'),
+                Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
+                Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
+                Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
+                Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.2, linestyle='-'),
+                Line2D([0], [0], marker='x', color='red', markeredgecolor='red',
+                    markersize=10, label='End Point', linewidth=0),
             ]
             
-            # 将图例放在图像下方
+            # 添加图例
             ax.legend(handles=legend_elements, loc='upper center', 
-                 bbox_to_anchor=(0.5, -0.1), ncol=3, framealpha=0.9)
+                    bbox_to_anchor=(0.5, -0.1 if max_episode == 1 else -0.15), 
+                    ncol=3, framealpha=0.9)
             
-            plt.title('Multi-Target path-planning USV')
+            plt.title(f'Multi-Target USV Path Planning - {paths_drawn} Episode(s)')
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
             plt.grid(True, alpha=0.3)
             plt.xlim(X_MIN, X_MAX)
             plt.ylim(Y_MIN, Y_MAX)
+            
             # 调整布局，为底部图例腾出空间
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-            plt.show()
-
+            bottom_margin = 0.05 if max_episode == 1 else 0.1
+            plt.tight_layout(rect=[0, bottom_margin, 1, 0.95])
+            
+            if ifsave:
+                if max_episode > 1:
+                    save_filename = f"all_episodes_paths.png"
+                else:
+                    save_filename = f"{os.path.basename(csv_file).split('.')[0]}.png"
+                plt.savefig(os.path.join(savePath, save_filename), dpi=300, bbox_inches='tight')
+                print(f"Image saved to {os.path.join(savePath, save_filename)}")
+            if ifshow:
+                plt.show()
         except Exception as e:
             print(f"Error drawing path: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 
 # define the gym environment for the USV

@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
+from my_USV_Env import MAX
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -381,6 +382,8 @@ def evaluate_htd3(args, env, agent):
     # Evaluation loop
     episode_rewards = []
     episode_lengths = []
+    episod_Usv_pathLengths=[]
+    episod_Total_pathLengths=[]
     
     for episode in range(args.eval_episodes):
         state_dict= env.reset()
@@ -390,16 +393,23 @@ def evaluate_htd3(args, env, agent):
         episode_length = 0
         done = False
         
+        episod_Usv_pathLength=0.0
+        episod_Total_pathLength=0.0
+        
+        last_position = np.array([state_dict["x_norm"][0] * MAX, state_dict["y_norm"][0] * MAX])
+        
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
                 action_tensor = agent.get_action(state.unsqueeze(0), explore=False)
                 action = action_tensor.cpu().numpy()[0]
+                
+            episod_Usv_pathLength+=abs(action[0])
             
             next_state_dict, reward, terminated, truncated, _ = env.step(action)
             
-            # points=(float(next_state_dict["x_norm"]*MAX),float(next_state_dict["y_norm"]*MAX))
-            # print(points)
-            # env.record_points(points)
+            current_position = np.array([next_state_dict["x_norm"][0] * MAX, next_state_dict["y_norm"][0] * MAX])
+            episod_Total_pathLength+=np.linalg.norm(current_position - last_position)
+            last_position = current_position
             
             done = terminated or truncated
             
@@ -407,24 +417,28 @@ def evaluate_htd3(args, env, agent):
             episode_reward += reward
             episode_length += 1
             
-            # Render if needed
-            # if args.render:
-            #     env.render()
         
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
+        episod_Usv_pathLengths.append(episod_Usv_pathLength)
+        episod_Total_pathLengths.append(episod_Total_pathLength)
         
-        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}")
+        
+        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}")
     
     # Print evaluation results
-    avg_reward = np.mean(episode_rewards)
-    avg_length = np.mean(episode_lengths)
-    # success_rate = np.mean([r > 0 for r in episode_rewards]) * 100
+    if args.eval_episodes > 1:
+        avg_reward = np.mean(episode_rewards)
+        avg_length = np.mean(episode_lengths)
+        avg_Usv_pathLength = np.mean(episod_Usv_pathLengths)
+        avg_Total_pathLength = np.mean(episod_Total_pathLengths)
     
-    print(f"\nEvaluation Results:")
-    print(f"Average Reward: {avg_reward:.2f}")
-    print(f"Average Length: {avg_length:.2f}")
-    # print(f"Success Rate: {success_rate:.1f}%")
+        print(f"\nEvaluation Results:")
+        print(f"Average Reward: {avg_reward:.2f}")
+        print(f"Average Length: {avg_length:.2f}")
+        print(f"Average UsvPathLength: {avg_Usv_pathLength:.2f}")
+        print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
+        
     env.draw_path("usv_path_points_1.csv")
 
 

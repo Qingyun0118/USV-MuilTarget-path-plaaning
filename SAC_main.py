@@ -499,8 +499,8 @@ if __name__ == '__main__':
                         help='size of replay buffer (default: 10000000)')
     parser.add_argument('--cuda', action="store_true",
                         help='run on CUDA (default: False)')
-    parser.add_argument('--record', type=bool, default=False,
-                        help='Record trajectory (default: False)')
+    parser.add_argument('--record', type=bool, default=True,
+                        help='Record trajectory (default: True)')
     parser.add_argument('--max_episode_steps', type=int, default=1000,
                         help='Maximum steps per episode for evaluation (default: 1000)')
     parser.add_argument('--output_dir', default='sac_output', type=str,

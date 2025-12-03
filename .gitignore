@@ -9,3 +9,4 @@ __pycache__/
 *.dump
 models/
 globalsea_20250901.nc
+runs/

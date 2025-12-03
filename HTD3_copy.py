@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
+from my_USV_Env import MAX
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -377,29 +378,46 @@ def evaluate_htd3(args, env, agent):
     agent.Mu.load_state_dict(state_dict)
     
     print("Loaded trained model for evaluation")
-    
+    eval_dir = os.path.join(args.output_dir, "evaluation_results")
+    os.makedirs(eval_dir, exist_ok=True)
     # Evaluation loop
     episode_rewards = []
     episode_lengths = []
+    episod_Usv_pathLengths=[]
+    episod_Total_pathLengths=[]
     
     for episode in range(args.eval_episodes):
         state_dict= env.reset()
         state = dict_state_to_tensor(state_dict, args.device)
         
+
+        csv_file = os.path.join(eval_dir,f"usv_path_episode_{episode+1}.csv")
+        print(f"Recording points to {csv_file}")
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+            
         episode_reward = 0
         episode_length = 0
         done = False
         
+        episod_Usv_pathLength=0.0
+        episod_Total_pathLength=0.0
+        
+        last_position = np.array([state_dict["x_norm"][0] * MAX, state_dict["y_norm"][0] * MAX])
+        
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
-                action_tensor = agent.get_action(state.unsqueeze(0), explore=False)
+                action_tensor = agent.get_action(state.unsqueeze(0), explore=True)
                 action = action_tensor.cpu().numpy()[0]
+                
+            episod_Usv_pathLength+=abs(action[0])
             
             next_state_dict, reward, terminated, truncated, _ = env.step(action)
             
-            # points=(float(next_state_dict["x_norm"]*MAX),float(next_state_dict["y_norm"]*MAX))
-            # print(points)
-            # env.record_points(points)
+            current_position = np.array([next_state_dict["x_norm"][0] * MAX, next_state_dict["y_norm"][0] * MAX])
+            env.record_points(current_position,csv_file)
+            episod_Total_pathLength+=np.linalg.norm(current_position - last_position)
+            last_position = current_position
             
             done = terminated or truncated
             
@@ -407,25 +425,33 @@ def evaluate_htd3(args, env, agent):
             episode_reward += reward
             episode_length += 1
             
-            # Render if needed
-            # if args.render:
-            #     env.render()
         
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
+        episod_Usv_pathLengths.append(episod_Usv_pathLength)
+        episod_Total_pathLengths.append(episod_Total_pathLength)
+
+        env.close_writer()
         
-        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}")
+        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}")
     
     # Print evaluation results
-    avg_reward = np.mean(episode_rewards)
-    avg_length = np.mean(episode_lengths)
-    # success_rate = np.mean([r > 0 for r in episode_rewards]) * 100
+    if args.eval_episodes > 1:
+        avg_reward = np.mean(episode_rewards)
+        avg_length = np.mean(episode_lengths)
+        avg_Usv_pathLength = np.mean(episod_Usv_pathLengths)
+        avg_Total_pathLength = np.mean(episod_Total_pathLengths)
     
-    print(f"\nEvaluation Results:")
-    print(f"Average Reward: {avg_reward:.2f}")
-    print(f"Average Length: {avg_length:.2f}")
-    # print(f"Success Rate: {success_rate:.1f}%")
-    env.draw_path("usv_path_points_1.csv")
+        print(f"\nEvaluation Results:")
+        print(f"Average Reward: {avg_reward:.2f}")
+        print(f"Average Length: {avg_length:.2f}")
+        print(f"Average UsvPathLength: {avg_Usv_pathLength:.2f}")
+        print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
+        
+
+        
+    env.draw_path(csv_file.split('_10')[0], ifshow=True, ifsave=True, savePath=eval_dir, 
+              max_episode=args.eval_episodes)
 
 
 def main():
@@ -483,7 +509,7 @@ def main():
     # Initialize environment
     from my_USV_Env import MyUsvEnv,MyUsvEnv_Gym
     env_train = MyUsvEnv(record_flag=False)
-    env_eval = MyUsvEnv(record_flag=True)#eval_episodes must be 1 for recording points
+    env_eval = MyUsvEnv(record_flag=False)#eval_episodes must be 1 for recording points
     # env_train = MyUsvEnv_Gym(record_flag=False)
     # env_eval = MyUsvEnv_Gym(record_flag=True)#eval_episodes must be 1 for recording points
 

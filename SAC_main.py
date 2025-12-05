@@ -15,7 +15,8 @@ import gymnasium as gym
 import itertools
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
-from my_USV_Env import MyUsvEnv
+from my_USV_Env import MyUsvEnv,MAX
+from collections import defaultdict
 
 # Constants
 LOG_SIG_MAX = 2
@@ -214,9 +215,37 @@ class ReplayMemory:
             self.buffer = pickle.load(f)
             self.position = len(self.buffer) % self.capacity
 
+
+class TrainingInfo:
+    """Track training statistics"""
+    def __init__(self):
+        self.log = defaultdict(list)
+        self.episode_length = 0
+        self.episode_reward = 0
+        self.max_episode_reward = -float("inf")
+
+    def update(self, reward, done):
+        """Update episode statistics"""
+        self.episode_length += 1
+        self.episode_reward += reward
+        
+        if done:
+            self.log["episode_length"].append(self.episode_length)
+            self.log["episode_reward"].append(self.episode_reward)
+            
+            if self.episode_reward > self.max_episode_reward:
+                self.max_episode_reward = self.episode_reward
+            
+            # Reset for next episode
+            self.episode_length = 0
+            self.episode_reward = 0
+
+
 # Soft Actor-Critic Agent
-class SAC(object):
+class SAC(nn.Module):
     def __init__(self, num_inputs, action_space, args):
+        super().__init__()
+
         self.gamma = args.gamma
         self.tau = args.tau
         self.alpha = args.alpha
@@ -354,45 +383,45 @@ def flatten_state(state_dict):
     flat = np.concatenate([x, y, rou_o, alpha_o, priority, rou_t, alpha_t])
     return flat.astype(np.float32)
 
-# Environment wrapper to flatten states
-class FlattenEnv:
-    def __init__(self, env):
-        self.env = env
-        self.action_space = env.action_space
-        # Compute observation space dimension
-        sample_state = env.reset()
-        flat_dim = len(flatten_state(sample_state))
-        self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
-        # Set max episode steps if not defined
-        self._max_episode_steps = getattr(env, '_max_episode_steps', 1000)
+# # Environment wrapper to flatten states
+# class FlattenEnv:
+#     def __init__(self, env):
+#         self.env = env
+#         self.action_space = env.action_space
+#         # Compute observation space dimension
+#         sample_state = env.reset()
+#         flat_dim = len(flatten_state(sample_state))
+#         self.observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
+#         # Set max episode steps if not defined
+#         self._max_episode_steps = getattr(env, '_max_episode_steps', 1000)
 
-    def reset(self):
-        state_dict = self.env.reset()
-        return flatten_state(state_dict)
+#     def reset(self):
+#         state_dict = self.env.reset()
+#         return flatten_state(state_dict)
 
-    def step(self, action):
-        state_dict, reward, terminated, truncated, info = self.env.step(action)
-        flat_state = flatten_state(state_dict)
-        return flat_state, reward, terminated, truncated, info
+#     def step(self, action):
+#         state_dict, reward, terminated, truncated, info = self.env.step(action)
+#         flat_state = flatten_state(state_dict)
+#         return flat_state, reward, terminated, truncated, info
 
-    def seed(self, seed):
-        # Seed the action space for reproducible sampling
-        if hasattr(self.env.action_space, 'seed'):
-            self.env.action_space.seed(seed)
-        # If the environment has a seed method, call it
-        if hasattr(self.env, 'seed'):
-            self.env.seed(seed)
-        # Also seed numpy and random for any internal randomness
-        np.random.seed(seed)
-        random.seed(seed)
+#     def seed(self, seed):
+#         # Seed the action space for reproducible sampling
+#         if hasattr(self.env.action_space, 'seed'):
+#             self.env.action_space.seed(seed)
+#         # If the environment has a seed method, call it
+#         if hasattr(self.env, 'seed'):
+#             self.env.seed(seed)
+#         # Also seed numpy and random for any internal randomness
+#         np.random.seed(seed)
+#         random.seed(seed)
 
-    def render(self):
-        return self.env.render()
+#     def render(self):
+#         return self.env.render()
 
-    def close(self):
-        if hasattr(self.env, 'close'):
-            return self.env.close()
-        # else do nothing
+#     def close(self):
+#         if hasattr(self.env, 'close'):
+#             return self.env.close()
+#         # else do nothing
 
 def train_sac(args,env,agent:SAC):
 
@@ -403,13 +432,18 @@ def train_sac(args,env,agent:SAC):
     total_numsteps = 0
     updates = 0
     episode_rewards = []
-    best_reward = -float('inf')
+    training_info = TrainingInfo()
+
+    # state_dict= env.reset()
+    # state = dict_state_to_tensor(state_dict, args.device)
 
     for i_episode in itertools.count(1):
         episode_reward = 0
         episode_steps = 0
         done = False
-        state = env.reset()
+        # state = env.reset()
+        state_dict= env.reset()
+        state = flatten_state(state_dict)
 
         while not done:
             if args.start_steps > total_numsteps:
@@ -424,30 +458,31 @@ def train_sac(args,env,agent:SAC):
                     agent.update_parameters(memory, args.batch_size, updates)
                     updates += 1
 
-            next_state, reward, terminated, truncated, _ = env.step(action) # Step
+            next_state_dict, reward, terminated, truncated, _ = env.step(action) # Step
             done = terminated or truncated
+            next_state = flatten_state(next_state_dict)
+
             episode_steps += 1
             total_numsteps += 1
             episode_reward += reward
 
             # Ignore the "done" signal if it comes from hitting the time horizon.
             # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
-            mask = 1 if episode_steps == env._max_episode_steps else float(not done)
+            mask = 1 if episode_steps ==  args.max_episode_steps else float(not done)
 
             memory.push(state, action, reward, next_state, mask) # Append transition to memory
 
             state = next_state
+            training_info.update(reward, done)
 
 
         if total_numsteps > args.max_steps:
             break
 
         episode_rewards.append(episode_reward)
-        print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
+        print("Episode: {}, total numsteps: {}, episode steps: {}, Max Reward: {}, Current reward: {}".format(i_episode, total_numsteps, episode_steps, round(training_info.max_episode_reward, 2), round(episode_reward, 2)))
 
-        if episode_reward>=best_reward:
-            best_reward=episode_reward
-            print("Best_Reward:",best_reward)
+        if episode_reward>=training_info.max_episode_reward:
             best_model_path = os.path.join(args.output_dir, 'best_model.pth')
             agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
         
@@ -471,7 +506,7 @@ def train_sac(args,env,agent:SAC):
     print(f"Training completed. Models saved to {args.output_dir}")
 
 
-def evaluate_sac(args, agent):
+def evaluate_sac(args,env, agent):
     """
     Evaluate SAC agent and draw trajectory.
     Creates a new MyUsvEnv with record_flag=True for evaluation.
@@ -487,13 +522,13 @@ def evaluate_sac(args, agent):
     eval_dir = os.path.join(args.output_dir, "evaluation_results")
     os.makedirs(eval_dir, exist_ok=True)
 
-    # Create evaluation environment with recording enabled
-    raw_env = MyUsvEnv(record_flag=True)
-    # No need to wrap with FlattenEnv because we will flatten states manually
-    # but we can use FlattenEnv for consistency with training.
-    env = FlattenEnv(raw_env)
-    env.seed(args.seed)
-    env.action_space.seed(args.seed)
+    # # Create evaluation environment with recording enabled
+    # raw_env = MyUsvEnv(record_flag=True)
+    # # No need to wrap with FlattenEnv because we will flatten states manually
+    # # but we can use FlattenEnv for consistency with training.
+    # env = FlattenEnv(raw_env)
+    # env.seed(args.seed)
+    # env.action_space.seed(args.seed)
 
     episode_rewards = []
     episode_lengths = []
@@ -504,16 +539,21 @@ def evaluate_sac(args, agent):
         if os.path.exists(csv_file):
             os.remove(csv_file)
 
-        state_dict = raw_env.reset()
+        state_dict = env.reset()
         episode_reward = 0
         episode_length = 0
         done = False
 
         while not done and episode_length < args.max_episode_steps:
-            flat_state = flatten_state(state_dict)
-            action = agent.select_action(flat_state, evaluate=True)
-            state_dict, reward, terminated, truncated, _ = raw_env.step(action)
+            state = flatten_state(state_dict)
+            action = agent.select_action(state, evaluate=True)
+            next_state_dict, reward, terminated, truncated, _ = env.step(action)
+
+            current_position = np.array([next_state_dict["x_norm"][0] * MAX, next_state_dict["y_norm"][0] * MAX])
+            env.record_points(current_position,csv_file)
+
             done = terminated or truncated
+            state=flatten_state(next_state_dict)
             episode_reward += reward
             episode_length += 1
 
@@ -526,7 +566,7 @@ def evaluate_sac(args, agent):
         csv_file = os.path.join(eval_dir, f"usv_path_episode_1.csv")
     else:
         csv_file = os.path.join(eval_dir, "usv_path_episode_1.csv")  # base name
-    raw_env.draw_path(csv_file, ifshow=True, ifsave=True, savePath=eval_dir, max_episode=args.eval_episodes)
+    env.draw_path(csv_file, ifshow=True, ifsave=True, savePath=eval_dir, max_episode=args.eval_episodes)
 
     if args.eval_episodes > 1:
         avg_reward = np.mean(episode_rewards)
@@ -535,7 +575,7 @@ def evaluate_sac(args, agent):
         print(f"Average Reward: {avg_reward:.2f}")
         print(f"Average Length: {avg_length:.2f}")
 
-    raw_env.close_writer()
+    env.close_writer()
 
 
 def main():
@@ -608,16 +648,20 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Environment
-    raw_env = MyUsvEnv(record_flag=False)
-    env = FlattenEnv(raw_env)
-    env.seed(args.seed)
-    env.action_space.seed(args.seed)
+    env = MyUsvEnv(record_flag=False)
+    # env = FlattenEnv(raw_env)
+    # env.seed(args.seed)
+    # env.action_space.seed(args.seed)
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     # Agent
-    agent = SAC(env.observation_space.shape[0], env.action_space, args)
+    sample_state = env.reset()
+    flat_dim = len(flatten_state(sample_state))
+    # print(flatten_state(sample_state)) 
+    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
+    agent = SAC(observation_space.shape[0], env.action_space, args)
     
     # Training
     if args.do_train:
@@ -627,7 +671,7 @@ def main():
     # Evaluation
     if args.do_eval:
         print("Starting SAC evaluation...")
-        evaluate_sac(args, agent)
+        evaluate_sac(args,env, agent)
 
 # Main training function
 if __name__ == '__main__':

@@ -627,7 +627,7 @@ def main():
     # Evaluation
     if args.do_eval:
         print("Starting SAC evaluation...")
-        evaluate_sac(args, env, agent)
+        evaluate_sac(args, agent)
 
 # Main training function
 if __name__ == '__main__':
@@ -753,5 +753,5 @@ if __name__ == '__main__':
     # raw_env.close_writer()
 
     # Final evaluation after training if eval_episodes > 0
-    if args.eval_episodes > 0:
-        evaluate_sac(args, agent)
+    # if args.eval_episodes > 0:
+    #     evaluate_sac(args, agent)

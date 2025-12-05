@@ -56,19 +56,19 @@ def weights_init_(m):
         torch.nn.init.constant_(m.bias, 0)
 
 # Neural Network Architectures
-class ValueNetwork(nn.Module):
-    def __init__(self, num_inputs, hidden_dim):
-        super(ValueNetwork, self).__init__()
-        self.linear1 = nn.Linear(num_inputs, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, 1)
-        self.apply(weights_init_)
+# class ValueNetwork(nn.Module):
+#     def __init__(self, num_inputs, hidden_dim):
+#         super(ValueNetwork, self).__init__()
+#         self.linear1 = nn.Linear(num_inputs, hidden_dim)
+#         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
+#         self.linear3 = nn.Linear(hidden_dim, 1)
+#         self.apply(weights_init_)
 
-    def forward(self, state):
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
-        x = self.linear3(x)
-        return x
+#     def forward(self, state):
+#         x = F.relu(self.linear1(state))
+#         x = F.relu(self.linear2(x))
+#         x = self.linear3(x)
+#         return x
 
 class QNetwork(nn.Module):
     def __init__(self, num_inputs, num_actions, hidden_dim):
@@ -223,8 +223,9 @@ class SAC(object):
         self.policy_type = args.policy
         self.target_update_interval = args.target_update_interval
         self.automatic_entropy_tuning = args.automatic_entropy_tuning
-        self.device = torch.device("cuda" if args.cuda else "cpu")
-
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+        
         self.critic = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(device=self.device)
         self.critic_optim = Adam(self.critic.parameters(), lr=args.lr)
         self.critic_target = QNetwork(num_inputs, action_space.shape[0], args.hidden_size).to(self.device)
@@ -393,6 +394,82 @@ class FlattenEnv:
             return self.env.close()
         # else do nothing
 
+def train_sac(args,env,agent:SAC):
+
+    # Memory
+    memory = ReplayMemory(args.replay_size, args.seed)
+
+    # Training Loop
+    total_numsteps = 0
+    updates = 0
+    episode_rewards = []
+    best_reward = -float('inf')
+
+    for i_episode in itertools.count(1):
+        episode_reward = 0
+        episode_steps = 0
+        done = False
+        state = env.reset()
+
+        while not done:
+            if args.start_steps > total_numsteps:
+                action = env.action_space.sample()  # Sample random action
+            else:
+                action = agent.select_action(state)  # Sample action from policy
+
+            if len(memory) > args.batch_size:
+                # Number of updates per step in environment
+                for _ in range(args.updates_per_step):
+                    # Update parameters of all the networks
+                    agent.update_parameters(memory, args.batch_size, updates)
+                    updates += 1
+
+            next_state, reward, terminated, truncated, _ = env.step(action) # Step
+            done = terminated or truncated
+            episode_steps += 1
+            total_numsteps += 1
+            episode_reward += reward
+
+            # Ignore the "done" signal if it comes from hitting the time horizon.
+            # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
+            mask = 1 if episode_steps == env._max_episode_steps else float(not done)
+
+            memory.push(state, action, reward, next_state, mask) # Append transition to memory
+
+            state = next_state
+
+
+        if total_numsteps > args.max_steps:
+            break
+
+        episode_rewards.append(episode_reward)
+        print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
+
+        if episode_reward>=best_reward:
+            best_reward=episode_reward
+            print("Best_Reward:",best_reward)
+            best_model_path = os.path.join(args.output_dir, 'best_model.pth')
+            agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
+        
+        # Plot training progress periodically
+        if i_episode % args.log_interval == 0:
+            plt.figure(figsize=(10, 5))
+            plt.plot(episode_rewards, label='Episode Reward')
+            plt.xlabel('Episode')
+            plt.ylabel('Reward')
+            plt.title('Training Rewards')
+            plt.legend()
+            plt.grid(True)
+            plot_path = os.path.join(args.output_dir, f'training_progress.png')
+            plt.savefig(plot_path)
+            plt.close()
+    
+    # Save final model
+    final_save_path = os.path.join(args.output_dir, "final_model.pth")
+    agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=final_save_path)
+    
+    print(f"Training completed. Models saved to {args.output_dir}")
+
 
 def evaluate_sac(args, agent):
     """
@@ -461,31 +538,40 @@ def evaluate_sac(args, agent):
     raw_env.close_writer()
 
 
-# Main training function
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PyTorch Soft Actor-Critic Args for MyUsvEnv')
+def main():
+    """Main function for SAC training and evaluation"""
+    parser = argparse.ArgumentParser(description='SAC for Multi-objective Path Planning')
+    
+    # Environment parameters
     parser.add_argument('--env-name', default="MyUsvEnv",
                         help='Environment name (default: MyUsvEnv)')
+    parser.add_argument('--seed', type=int, default=123456, metavar='N',
+                        help='random seed (default: 123456)')
+    
+    parser.add_argument('--eval', type=bool, default=False,
+                        help='Evaluates a policy a policy every 10 episode (default: False)')
+    
+    # Algorithm parameters
     parser.add_argument('--policy', default="Gaussian",
                         help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
-    parser.add_argument('--eval', type=bool, default=True,
-                        help='Evaluates a policy a policy every 10 episode (default: True)')
     parser.add_argument('--gamma', type=float, default=0.99, metavar='G',
                         help='discount factor for reward (default: 0.99)')
     parser.add_argument('--tau', type=float, default=0.005, metavar='G',
                         help='target smoothing coefficient(τ) (default: 0.005)')
-    parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
-                        help='learning rate (default: 0.0003)')
     parser.add_argument('--alpha', type=float, default=0.2, metavar='G',
                         help='Temperature parameter α determines the relative importance of the entropy\
                                 term against the reward (default: 0.2)')
     parser.add_argument('--automatic_entropy_tuning', type=bool, default=False, metavar='G',
                         help='Automaically adjust α (default: False)')
-    parser.add_argument('--seed', type=int, default=123456, metavar='N',
-                        help='random seed (default: 123456)')
+
+    # Learning rates
+    parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
+                        help='learning rate (default: 0.0003)')
+    
+    # Training parameters
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size (default: 256)')
-    parser.add_argument('--num_steps', type=int, default=500000, metavar='N',
+    parser.add_argument('--max_steps', type=int, default=500000, metavar='N',
                         help='maximum number of steps (default: 500000)')
     parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                         help='hidden size (default: 256)')
@@ -497,29 +583,32 @@ if __name__ == '__main__':
                         help='Value target update per no. of updates per step (default: 1)')
     parser.add_argument('--replay_size', type=int, default=1000000, metavar='N',
                         help='size of replay buffer (default: 10000000)')
-    parser.add_argument('--cuda', action="store_true",
-                        help='run on CUDA (default: False)')
-    parser.add_argument('--record', type=bool, default=True,
-                        help='Record trajectory (default: True)')
+    
+    # Evaluation parameters
     parser.add_argument('--max_episode_steps', type=int, default=1000,
                         help='Maximum steps per episode for evaluation (default: 1000)')
     parser.add_argument('--output_dir', default='sac_output', type=str,
                         help='Output directory for models and plots (default: sac_output)')
-    parser.add_argument('--eval_episodes', type=int, default=10,
-                        help='Number of episodes for final evaluation (default: 10)')
-    parser.add_argument('--log_interval', type=int, default=100,
-                        help='Logging interval for plotting (default: 100)')
+    parser.add_argument('--eval_episodes', type=int, default=1,
+                        help='Number of episodes for final evaluation (default: 1)')
+    
+    # Logging and output
+    parser.add_argument('--log_interval', type=int, default=1,
+                        help='Logging interval for plotting (default: 1)')
+    
+    # Mode selection
     parser.add_argument('--do_train', action='store_true',
-                        help='Enable training (default: True if not --do_eval)')
+                        help='Enable training ')
     parser.add_argument('--do_eval', action='store_true',
-                        help='Enable evaluation only (default: False)')
+                        help='Enable evaluation only')
+    
     args = parser.parse_args()
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Environment
-    raw_env = MyUsvEnv(record_flag=args.record)
+    raw_env = MyUsvEnv(record_flag=False)
     env = FlattenEnv(raw_env)
     env.seed(args.seed)
     env.action_space.seed(args.seed)
@@ -529,120 +618,139 @@ if __name__ == '__main__':
 
     # Agent
     agent = SAC(env.observation_space.shape[0], env.action_space, args)
-
+    
+    # Training
+    if args.do_train:
+        print("Starting SAC training...")
+        train_sac(args, env, agent)
+    
+    # Evaluation
     if args.do_eval:
-        # Evaluation only mode
-        evaluate_sac(args, agent)
-        env.close()
-        raw_env.close_writer()
-        exit(0)
+        print("Starting SAC evaluation...")
+        evaluate_sac(args, env, agent)
+
+# Main training function
+if __name__ == '__main__':
+    main()
+    
+
+
+
+    
+
+    # if args.do_eval:
+    #     # Evaluation only mode
+    #     evaluate_sac(args, agent)
+    #     env.close()
+    #     raw_env.close_writer()
+    #     exit(0)
 
     # Tensorboard
-    writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-                                                              args.policy, "autotune" if args.automatic_entropy_tuning else ""))
+    # writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
+                                                            #   args.policy, "autotune" if args.automatic_entropy_tuning else ""))
 
-    # Memory
-    memory = ReplayMemory(args.replay_size, args.seed)
+    # # Memory
+    # memory = ReplayMemory(args.replay_size, args.seed)
 
-    # Training Loop
-    total_numsteps = 0
-    updates = 0
-    episode_rewards = []
-    best_avg_reward = -float('inf')
+    # # Training Loop
+    # total_numsteps = 0
+    # updates = 0
+    # episode_rewards = []
+    # best_avg_reward = -float('inf')
 
-    for i_episode in itertools.count(1):
-        episode_reward = 0
-        episode_steps = 0
-        done = False
-        state = env.reset()
+    # for i_episode in itertools.count(1):
+    #     episode_reward = 0
+    #     episode_steps = 0
+    #     done = False
+    #     state = env.reset()
 
-        while not done:
-            if args.start_steps > total_numsteps:
-                action = env.action_space.sample()  # Sample random action
-            else:
-                action = agent.select_action(state)  # Sample action from policy
+    #     while not done:
+    #         if args.start_steps > total_numsteps:
+    #             action = env.action_space.sample()  # Sample random action
+    #         else:
+    #             action = agent.select_action(state)  # Sample action from policy
 
-            if len(memory) > args.batch_size:
-                # Number of updates per step in environment
-                for i in range(args.updates_per_step):
-                    # Update parameters of all the networks
-                    critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.update_parameters(memory, args.batch_size, updates)
+    #         if len(memory) > args.batch_size:
+    #             # Number of updates per step in environment
+    #             for i in range(args.updates_per_step):
+    #                 # Update parameters of all the networks
+    #                 critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.update_parameters(memory, args.batch_size, updates)
 
-                    writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-                    writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-                    writer.add_scalar('loss/policy', policy_loss, updates)
-                    writer.add_scalar('loss/entropy_loss', ent_loss, updates)
-                    writer.add_scalar('entropy_temprature/alpha', alpha, updates)
-                    updates += 1
+    #                 writer.add_scalar('loss/critic_1', critic_1_loss, updates)
+    #                 writer.add_scalar('loss/critic_2', critic_2_loss, updates)
+    #                 writer.add_scalar('loss/policy', policy_loss, updates)
+    #                 writer.add_scalar('loss/entropy_loss', ent_loss, updates)
+    #                 writer.add_scalar('entropy_temprature/alpha', alpha, updates)
+    #                 updates += 1
 
-            next_state, reward, terminated, truncated, _ = env.step(action) # Step
-            done = terminated or truncated
-            episode_steps += 1
-            total_numsteps += 1
-            episode_reward += reward
+    #         next_state, reward, terminated, truncated, _ = env.step(action) # Step
+    #         done = terminated or truncated
+    #         episode_steps += 1
+    #         total_numsteps += 1
+    #         episode_reward += reward
 
-            # Ignore the "done" signal if it comes from hitting the time horizon.
-            # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
-            mask = 1 if episode_steps == env._max_episode_steps else float(not done)
+    #         # Ignore the "done" signal if it comes from hitting the time horizon.
+    #         # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
+    #         mask = 1 if episode_steps == env._max_episode_steps else float(not done)
 
-            memory.push(state, action, reward, next_state, mask) # Append transition to memory
+    #         memory.push(state, action, reward, next_state, mask) # Append transition to memory
 
-            state = next_state
+    #         state = next_state
 
-        if total_numsteps > args.num_steps:
-            break
+    #     if total_numsteps > args.num_steps:
+    #         break
 
-        writer.add_scalar('reward/train', episode_reward, i_episode)
-        episode_rewards.append(episode_reward)
-        print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
+    #     writer.add_scalar('reward/train', episode_reward, i_episode)
+    #     episode_rewards.append(episode_reward)
+    #     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
 
-        # Plot training progress periodically
-        if i_episode % args.log_interval == 0:
-            plt.figure(figsize=(10, 5))
-            plt.plot(episode_rewards, label='Episode Reward')
-            plt.xlabel('Episode')
-            plt.ylabel('Reward')
-            plt.title('Training Rewards')
-            plt.legend()
-            plt.grid(True)
-            plot_path = os.path.join(args.output_dir, f'training_rewards_episode_{i_episode}.png')
-            plt.savefig(plot_path)
-            plt.close()
-            print(f"Saved training rewards plot to {plot_path}")
+    #     # Plot training progress periodically
+    #     if i_episode % args.log_interval == 0:
+    #         plt.figure(figsize=(10, 5))
+    #         plt.plot(episode_rewards, label='Episode Reward')
+    #         plt.xlabel('Episode')
+    #         plt.ylabel('Reward')
+    #         plt.title('Training Rewards')
+    #         plt.legend()
+    #         plt.grid(True)
+    #         plot_path = os.path.join(args.output_dir, f'training_rewards_episode_{i_episode}.png')
+    #         plt.savefig(plot_path)
+    #         plt.close()
+    #         print(f"Saved training rewards plot to {plot_path}")
 
-        if i_episode % 10 == 0 and args.eval is True:
-            avg_reward = 0.
-            episodes = 10
-            for _  in range(episodes):
-                state = env.reset()
-                episode_reward = 0
-                done = False
-                while not done:
-                    action = agent.select_action(state, evaluate=True)
+    #     if i_episode % 10 == 0 and args.eval is True:
+    #         avg_reward = 0.
+    #         episodes = 10
+    #         for _  in range(episodes):
+    #             state = env.reset()
+    #             episode_reward = 0
+    #             done = False
+    #             while not done:
+    #                 action = agent.select_action(state, evaluate=True)
 
-                    next_state, reward, terminated, truncated, _ = env.step(action)
-                    done = terminated or truncated
-                    episode_reward += reward
+    #                 next_state, reward, terminated, truncated, _ = env.step(action)
+    #                 done = terminated or truncated
+    #                 episode_reward += reward
 
-                    state = next_state
-                avg_reward += episode_reward
-            avg_reward /= episodes
+    #                 state = next_state
+    #             avg_reward += episode_reward
+    #         avg_reward /= episodes
 
-            writer.add_scalar('avg_reward/test', avg_reward, i_episode)
+    #         writer.add_scalar('avg_reward/test', avg_reward, i_episode)
 
-            # Save best model
-            if avg_reward > best_avg_reward:
-                best_avg_reward = avg_reward
-                best_model_path = os.path.join(args.output_dir, 'best_model.pth')
-                agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
-                print(f"New best model saved with average reward {avg_reward:.2f}")
+    #         # Save best model
+    #         if avg_reward > best_avg_reward:
+    #             best_avg_reward = avg_reward
+    #             best_model_path = os.path.join(args.output_dir, 'best_model.pth')
+    #             agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
+    #             print(f"New best model saved with average reward {avg_reward:.2f}")
 
-            print("----------------------------------------")
-            print("Test Episodes: {}, Avg. Reward: {}".format(episodes, round(avg_reward, 2)))
-            print("----------------------------------------")
+    #         print("----------------------------------------")
+    #         print("Test Episodes: {}, Avg. Reward: {}".format(episodes, round(avg_reward, 2)))
+    #         print("----------------------------------------")
 
-    env.close()
-    raw_env.close_writer()
+    # env.close()
+    # raw_env.close_writer()
 
     # Final evaluation after training if eval_episodes > 0
     if args.eval_episodes > 0:

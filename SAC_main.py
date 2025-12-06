@@ -491,7 +491,7 @@ def train_sac(args,env,agent:SAC):
         episode_rewards.append(episode_reward)
         # Log episode reward
         writer.add_scalar('reward/episode', episode_reward, i_episode)
-        
+        writer.add_scalar('steps/episode', episode_steps, i_episode)
         print("Episode: {}, total numsteps: {}, episode steps: {}, Current reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
 
         if episode_reward>=training_info.max_episode_reward:
@@ -525,12 +525,15 @@ def evaluate_sac(args,env, agent):
     Creates a new MyUsvEnv with record_flag=True for evaluation.
     """
     # Load best model if exists
-    best_model_path = os.path.join(args.output_dir, 'best_model.pth')
-    if os.path.exists(best_model_path):
-        agent.load_checkpoint(best_model_path, evaluate=True)
-        print(f"Loaded best model from {best_model_path}")
+    if args.eval_model == 'best':
+        model_path = os.path.join(args.output_dir, 'best_model.pth')
     else:
-        print("No best model found, using current agent weights.")
+        model_path = os.path.join(args.output_dir, 'final_model.pth')
+    if os.path.exists(model_path):
+        agent.load_checkpoint(model_path, evaluate=True)
+        print(f"Loaded model from {model_path}")
+    else:
+        print("No model found, using current agent weights.")
 
     eval_dir = os.path.join(args.output_dir, "evaluation_results")
     os.makedirs(eval_dir, exist_ok=True)
@@ -624,8 +627,8 @@ def main():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=256, metavar='N',
                         help='batch size (default: 256)')
-    parser.add_argument('--max_steps', type=int, default=500000, metavar='N',
-                        help='maximum number of steps (default: 500000)')
+    parser.add_argument('--max_steps', type=int, default=100000, metavar='N',
+                        help='maximum number of steps (default: 100000)')
     parser.add_argument('--hidden_size', type=int, default=256, metavar='N',
                         help='hidden size (default: 256)')
     parser.add_argument('--updates_per_step', type=int, default=1, metavar='N',
@@ -644,6 +647,8 @@ def main():
                         help='Output directory for models and plots (default: sac_output)')
     parser.add_argument('--eval_episodes', type=int, default=1,
                         help='Number of episodes for final evaluation (default: 1)')
+    parser.add_argument('--eval_model', default='best', type=str,
+                        help='Model to be evaluated (default: best)')
     
     # Logging and output
     # parser.add_argument('--log_interval', type=int, default=1,

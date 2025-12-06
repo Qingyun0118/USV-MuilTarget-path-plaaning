@@ -425,6 +425,12 @@ def flatten_state(state_dict):
 
 def train_sac(args,env,agent:SAC):
 
+    # TensorBoard writer
+    writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
+                                                              args.policy, "autotune" if args.automatic_entropy_tuning else ""))
+    print(f"TensorBoard logs saved to "+'runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
+                                                              args.policy, "autotune" if args.automatic_entropy_tuning else ""))
+
     # Memory
     memory = ReplayMemory(args.replay_size, args.seed)
 
@@ -434,14 +440,10 @@ def train_sac(args,env,agent:SAC):
     episode_rewards = []
     training_info = TrainingInfo()
 
-    # state_dict= env.reset()
-    # state = dict_state_to_tensor(state_dict, args.device)
-
     for i_episode in itertools.count(1):
         episode_reward = 0
         episode_steps = 0
         done = False
-        # state = env.reset()
         state_dict= env.reset()
         state = flatten_state(state_dict)
 
@@ -455,7 +457,15 @@ def train_sac(args,env,agent:SAC):
                 # Number of updates per step in environment
                 for _ in range(args.updates_per_step):
                     # Update parameters of all the networks
-                    agent.update_parameters(memory, args.batch_size, updates)
+                    qf1_loss, qf2_loss, policy_loss, alpha_loss, alpha = agent.update_parameters(memory, args.batch_size, updates)
+                    
+                    # Log losses to TensorBoard
+                    writer.add_scalar('loss/qf1', qf1_loss, updates)
+                    writer.add_scalar('loss/qf2', qf2_loss, updates)
+                    writer.add_scalar('loss/policy', policy_loss, updates)
+                    writer.add_scalar('loss/alpha', alpha_loss, updates)
+                    writer.add_scalar('alpha/value', alpha, updates)
+                    
                     updates += 1
 
             next_state_dict, reward, terminated, truncated, _ = env.step(action) # Step
@@ -480,29 +490,33 @@ def train_sac(args,env,agent:SAC):
             break
 
         episode_rewards.append(episode_reward)
-        print("Episode: {}, total numsteps: {}, episode steps: {}, Max Reward: {}, Current reward: {}".format(i_episode, total_numsteps, episode_steps, round(training_info.max_episode_reward, 2), round(episode_reward, 2)))
+        # Log episode reward
+        writer.add_scalar('reward/episode', episode_reward, i_episode)
+        
+        print("Episode: {}, total numsteps: {}, episode steps: {}, Current reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
 
         if episode_reward>=training_info.max_episode_reward:
             best_model_path = os.path.join(args.output_dir, 'best_model.pth')
             agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
         
         # Plot training progress periodically
-        if i_episode % args.log_interval == 0:
-            plt.figure(figsize=(10, 5))
-            plt.plot(episode_rewards, label='Episode Reward')
-            plt.xlabel('Episode')
-            plt.ylabel('Reward')
-            plt.title('Training Rewards')
-            plt.legend()
-            plt.grid(True)
-            plot_path = os.path.join(args.output_dir, f'training_progress.png')
-            plt.savefig(plot_path)
-            plt.close()
+        # if i_episode % args.log_interval == 0:
+        #     plt.figure(figsize=(10, 5))
+        #     plt.plot(episode_rewards, label='Episode Reward')
+        #     plt.xlabel('Episode')
+        #     plt.ylabel('Reward')
+        #     plt.title('Training Rewards')
+        #     plt.legend()
+        #     plt.grid(True)
+        #     plot_path = os.path.join(args.output_dir, f'training_progress.png')
+        #     plt.savefig(plot_path)
+        #     plt.close()
     
     # Save final model
     final_save_path = os.path.join(args.output_dir, "final_model.pth")
     agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=final_save_path)
     
+    writer.close()
     print(f"Training completed. Models saved to {args.output_dir}")
 
 
@@ -633,8 +647,8 @@ def main():
                         help='Number of episodes for final evaluation (default: 1)')
     
     # Logging and output
-    parser.add_argument('--log_interval', type=int, default=1,
-                        help='Logging interval for plotting (default: 1)')
+    # parser.add_argument('--log_interval', type=int, default=1,
+    #                     help='Logging interval for plotting (default: 1)')
     
     # Mode selection
     parser.add_argument('--do_train', action='store_true',
@@ -677,125 +691,3 @@ def main():
 if __name__ == '__main__':
     main()
     
-
-
-
-    
-
-    # if args.do_eval:
-    #     # Evaluation only mode
-    #     evaluate_sac(args, agent)
-    #     env.close()
-    #     raw_env.close_writer()
-    #     exit(0)
-
-    # Tensorboard
-    # writer = SummaryWriter('runs/{}_SAC_{}_{}_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env_name,
-                                                            #   args.policy, "autotune" if args.automatic_entropy_tuning else ""))
-
-    # # Memory
-    # memory = ReplayMemory(args.replay_size, args.seed)
-
-    # # Training Loop
-    # total_numsteps = 0
-    # updates = 0
-    # episode_rewards = []
-    # best_avg_reward = -float('inf')
-
-    # for i_episode in itertools.count(1):
-    #     episode_reward = 0
-    #     episode_steps = 0
-    #     done = False
-    #     state = env.reset()
-
-    #     while not done:
-    #         if args.start_steps > total_numsteps:
-    #             action = env.action_space.sample()  # Sample random action
-    #         else:
-    #             action = agent.select_action(state)  # Sample action from policy
-
-    #         if len(memory) > args.batch_size:
-    #             # Number of updates per step in environment
-    #             for i in range(args.updates_per_step):
-    #                 # Update parameters of all the networks
-    #                 critic_1_loss, critic_2_loss, policy_loss, ent_loss, alpha = agent.update_parameters(memory, args.batch_size, updates)
-
-    #                 writer.add_scalar('loss/critic_1', critic_1_loss, updates)
-    #                 writer.add_scalar('loss/critic_2', critic_2_loss, updates)
-    #                 writer.add_scalar('loss/policy', policy_loss, updates)
-    #                 writer.add_scalar('loss/entropy_loss', ent_loss, updates)
-    #                 writer.add_scalar('entropy_temprature/alpha', alpha, updates)
-    #                 updates += 1
-
-    #         next_state, reward, terminated, truncated, _ = env.step(action) # Step
-    #         done = terminated or truncated
-    #         episode_steps += 1
-    #         total_numsteps += 1
-    #         episode_reward += reward
-
-    #         # Ignore the "done" signal if it comes from hitting the time horizon.
-    #         # (https://github.com/openai/spinningup/blob/master/spinup/algos/sac/sac.py)
-    #         mask = 1 if episode_steps == env._max_episode_steps else float(not done)
-
-    #         memory.push(state, action, reward, next_state, mask) # Append transition to memory
-
-    #         state = next_state
-
-    #     if total_numsteps > args.num_steps:
-    #         break
-
-    #     writer.add_scalar('reward/train', episode_reward, i_episode)
-    #     episode_rewards.append(episode_reward)
-    #     print("Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(i_episode, total_numsteps, episode_steps, round(episode_reward, 2)))
-
-    #     # Plot training progress periodically
-    #     if i_episode % args.log_interval == 0:
-    #         plt.figure(figsize=(10, 5))
-    #         plt.plot(episode_rewards, label='Episode Reward')
-    #         plt.xlabel('Episode')
-    #         plt.ylabel('Reward')
-    #         plt.title('Training Rewards')
-    #         plt.legend()
-    #         plt.grid(True)
-    #         plot_path = os.path.join(args.output_dir, f'training_rewards_episode_{i_episode}.png')
-    #         plt.savefig(plot_path)
-    #         plt.close()
-    #         print(f"Saved training rewards plot to {plot_path}")
-
-    #     if i_episode % 10 == 0 and args.eval is True:
-    #         avg_reward = 0.
-    #         episodes = 10
-    #         for _  in range(episodes):
-    #             state = env.reset()
-    #             episode_reward = 0
-    #             done = False
-    #             while not done:
-    #                 action = agent.select_action(state, evaluate=True)
-
-    #                 next_state, reward, terminated, truncated, _ = env.step(action)
-    #                 done = terminated or truncated
-    #                 episode_reward += reward
-
-    #                 state = next_state
-    #             avg_reward += episode_reward
-    #         avg_reward /= episodes
-
-    #         writer.add_scalar('avg_reward/test', avg_reward, i_episode)
-
-    #         # Save best model
-    #         if avg_reward > best_avg_reward:
-    #             best_avg_reward = avg_reward
-    #             best_model_path = os.path.join(args.output_dir, 'best_model.pth')
-    #             agent.save_checkpoint(args.env_name, suffix='best', ckpt_path=best_model_path)
-    #             print(f"New best model saved with average reward {avg_reward:.2f}")
-
-    #         print("----------------------------------------")
-    #         print("Test Episodes: {}, Avg. Reward: {}".format(episodes, round(avg_reward, 2)))
-    #         print("----------------------------------------")
-
-    # env.close()
-    # raw_env.close_writer()
-
-    # Final evaluation after training if eval_episodes > 0
-    # if args.eval_episodes > 0:
-    #     evaluate_sac(args, agent)

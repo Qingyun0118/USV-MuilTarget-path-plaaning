@@ -339,7 +339,8 @@ def train_htd3(args, env, agent: HTD3):
             writer.add_scalar('Loss/Q1_Loss',value_loss1,episode)
             writer.add_scalar('Loss/Q2_Loss',value_loss2,episode)
             writer.add_scalar('Loss/Q2_Loss-Q1_Loss',value_loss2-value_loss1,episode)
-            writer.add_scalar('Reward/episode',episode_reward,episode)
+            writer.add_scalar('reward/episode',episode_reward,episode)
+            writer.add_scalar('steps/episode', episode_length,episode)
             # Plot losses
             # if training_info.log["value_loss1"]:
                 # plt.figure(figsize=(12, 4))

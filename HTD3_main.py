@@ -12,6 +12,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import itertools
 from my_USV_Env import MAX
+from torch.utils.tensorboard import SummaryWriter
+import datetime
+from my_USV_Env import MyUsvEnv
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -235,11 +238,14 @@ def train_htd3(args, env, agent: HTD3):
     # Experience replay buffer
     replay_buffer = ReplayBuffer(maxsize=args.buffer_size)
     training_info = TrainingInfo()
-    
+    writer = SummaryWriter('runs/{}_TD3_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env,
+                                                            ))
+    print(f"TensorBoard logs saved to "+'runs/{}_TD3_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env,
+                                                            ))
     # Training loop
     state_dict= env.reset()
     state = dict_state_to_tensor(state_dict, args.device)
-    
+    episode=0
     for step in range(args.max_steps):
         # Action selection with exploration
         if step < args.warmup_steps:
@@ -266,6 +272,7 @@ def train_htd3(args, env, agent: HTD3):
         
         # Reset environment if episode done
         if done:
+            episode+=1
             state_dict= env.reset()#
             state = dict_state_to_tensor(state_dict, args.device)
             
@@ -329,27 +336,31 @@ def train_htd3(args, env, agent: HTD3):
         
         # Logging and visualization
         if step % args.log_interval == 0 and step > args.warmup_steps:
+            writer.add_scalar('Loss/Q1_Loss',value_loss1,episode)
+            writer.add_scalar('Loss/Q2_Loss',value_loss2,episode)
+            writer.add_scalar('Loss/Q2_Loss-Q1_Loss',value_loss2-value_loss1,episode)
+            writer.add_scalar('Reward/episode',episode_reward,episode)
             # Plot losses
-            if training_info.log["value_loss1"]:
-                plt.figure(figsize=(12, 4))
+            # if training_info.log["value_loss1"]:
+                # plt.figure(figsize=(12, 4))
                 
-                plt.subplot(1, 2, 1)
-                plt.plot(training_info.log["value_loss1"], label='Q1 Loss')
-                plt.plot(training_info.log["value_loss2"], label='Q2 Loss')
-                plt.xlabel('Training Steps')
-                plt.ylabel('Value Loss')
-                plt.legend()
-                plt.title('Critic Losses')
+                # plt.subplot(1, 2, 1)
+                # plt.plot(training_info.log["value_loss1"], label='Q1 Loss')
+                # plt.plot(training_info.log["value_loss2"], label='Q2 Loss')
+                # plt.xlabel('Training Steps')
+                # plt.ylabel('Value Loss')
+                # plt.legend()
+                # plt.title('Critic Losses')
                 
-                plt.subplot(1, 2, 2)
-                plt.plot(training_info.log["episode_reward"])
-                plt.xlabel('Episode')
-                plt.ylabel('Episode Reward')
-                plt.title('Training Progress')
+                # plt.subplot(1, 2, 2)
+                # plt.plot(training_info.log["episode_reward"])
+                # plt.xlabel('Episode')
+                # plt.ylabel('Episode Reward')
+                # plt.title('Training Progress')
                 
-                plt.tight_layout()
-                plt.savefig(f"{args.output_dir}/training_progress.png", dpi=150, bbox_inches="tight")
-                plt.close()
+                # plt.tight_layout()
+                # plt.savefig(f"{args.output_dir}/training_progress.png", dpi=150, bbox_inches="tight")
+                # plt.close()
     
     # Save final model
     final_save_path = os.path.join(args.output_dir, "final_model.pth")
@@ -460,8 +471,8 @@ def main():
     
     # Environment parameters
     parser.add_argument("--env", default="MyUsvEnv", type=str, help="Environment name")
-    parser.add_argument("--dim_state", default=34, type=int, help="State dimension")  # Based on USV env
-    parser.add_argument("--dim_action", default=2, type=int, help="Action dimension")  # [rou, alpha]
+    # parser.add_argument("--dim_state", default=34, type=int, help="State dimension")  # Based on USV env
+    # parser.add_argument("--dim_action", default=2, type=int, help="Action dimension")  # [rou, alpha]
     parser.add_argument("--max_action", default=25.0, type=float, help="Maximum action value")
     
     # Training parameters
@@ -507,16 +518,15 @@ def main():
     print(f"Using device: {args.device}")
     
     # Initialize environment
-    from my_USV_Env import MyUsvEnv
-    env_train = MyUsvEnv(record_flag=False)
-    env_eval = MyUsvEnv(record_flag=False)#eval_episodes must be 1 for recording points
-    # env_train = MyUsvEnv_Gym(record_flag=False)
-    # env_eval = MyUsvEnv_Gym(record_flag=True)#eval_episodes must be 1 for recording points
+    env = MyUsvEnv(record_flag=False)
 
     # Initialize agent
+    sample_state = env.reset()
+    flat_dim = len(dict_state_to_tensor(sample_state,args.device))
+    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
     agent = HTD3(
-        dim_state=args.dim_state,
-        dim_action=args.dim_action, 
+        dim_state=observation_space.shape[0],
+        dim_action=env.action_space.shape[0], 
         max_action=args.max_action,
         num_targets=3  # Based on your USV environment
     ).to(args.device)  # Now this should work since HTD3 inherits from nn.Module
@@ -524,12 +534,12 @@ def main():
     # Training
     if args.do_train:
         print("Starting HTD3 training...")
-        train_htd3(args, env_train, agent)
+        train_htd3(args, env, agent)
     
     # Evaluation
     if args.do_eval:
         print("Starting HTD3 evaluation...")
-        evaluate_htd3(args, env_eval, agent)
+        evaluate_htd3(args, env, agent)
     
     # env.close()
 

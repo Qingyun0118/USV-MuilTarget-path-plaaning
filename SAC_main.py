@@ -13,7 +13,6 @@ import argparse
 import datetime
 import gymnasium as gym
 import itertools
-import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 from my_USV_Env import MyUsvEnv,MAX
 from collections import defaultdict
@@ -667,8 +666,8 @@ def main():
     # env.seed(args.seed)
     # env.action_space.seed(args.seed)
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    # torch.manual_seed(args.seed)
+    # np.random.seed(args.seed)
 
     # Agent
     sample_state = env.reset()

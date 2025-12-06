@@ -573,17 +573,14 @@ def evaluate_sac(args,env, agent):
             state=flatten_state(next_state_dict)
             episode_reward += reward
             episode_length += 1
+            env.close_writer()
 
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}")
 
     # Draw path for the last episode (or all episodes)
-    if args.eval_episodes == 1:
-        csv_file = os.path.join(eval_dir, f"usv_path_episode_1.csv")
-    else:
-        csv_file = os.path.join(eval_dir, "usv_path_episode_1.csv")  # base name
-    env.draw_path(csv_file, ifshow=True, ifsave=True, savePath=eval_dir, max_episode=args.eval_episodes)
+    env.draw_path(csv_file.split('_10')[0], ifshow=True, ifsave=True, savePath=eval_dir, max_episode=args.eval_episodes)
 
     if args.eval_episodes > 1:
         avg_reward = np.mean(episode_rewards)
@@ -592,7 +589,7 @@ def evaluate_sac(args,env, agent):
         print(f"Average Reward: {avg_reward:.2f}")
         print(f"Average Length: {avg_length:.2f}")
 
-    env.close_writer()
+    
 
 
 def main():

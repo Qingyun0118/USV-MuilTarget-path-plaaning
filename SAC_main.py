@@ -556,12 +556,13 @@ def evaluate_sac(args,env, agent):
             os.remove(csv_file)
 
         state_dict = env.reset()
+        state = flatten_state(state_dict)
         episode_reward = 0
         episode_length = 0
         done = False
 
         while not done and episode_length < args.max_episode_steps:
-            state = flatten_state(state_dict)
+            
             action = agent.select_action(state, evaluate=True)
             next_state_dict, reward, terminated, truncated, _ = env.step(action)
 

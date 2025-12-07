@@ -321,7 +321,8 @@ class MyUsvEnv():
                  use_random_shapes=True,
                  fixed_start_pos=None,
                  fixed_targets=None,
-                 fixed_obstacles=None):
+                 fixed_obstacles=None,
+                 current_type="file"):
         """
         初始化USV环境
         
@@ -340,6 +341,7 @@ class MyUsvEnv():
             fixed_start_pos: 固定起始位置 (可选)
             fixed_targets: 固定目标位置列表 (可选)
             fixed_obstacles: 固定障碍物配置列表 (可选)
+            current_type: 洋流生成方式 ("file" 或 "generated")
         """
         # 保存参数
         self.num_targets = num_targets
@@ -353,6 +355,7 @@ class MyUsvEnv():
         self.rou_c = rou_c
         self.rou_s = rou_s
         self.use_random_shapes = use_random_shapes
+        self.current_type = current_type
         
         # 设置随机种子
         if seed is not None:
@@ -399,6 +402,7 @@ class MyUsvEnv():
         self.X, self.Y = np.meshgrid(np.arange(0, 100, 1), np.arange(0, 100, 1))
         self.U, self.V = self._load_current_data()
         self.timestep = 0.5
+        self.current_time = 0.0
     
     def _generate_environment(self):
         """生成环境配置（起始位置、目标、障碍物）"""
@@ -587,7 +591,11 @@ class MyUsvEnv():
         return targets
     
     def _load_current_data(self):
-        """从NetCDF文件加载海流数据"""
+        """加载或生成海流数据"""
+        if self.current_type == "generated":
+            return self._generate_current_data()
+        
+        # 默认为 "file" 模式
         try:
             nc_obj = Dataset('data/globalsea_20250901.nc')
             uu = nc_obj.variables['uo'][0, 0, :, :][1248:1348, 3600:3700]
@@ -612,6 +620,95 @@ class MyUsvEnv():
                         break
         
         return uu, vv
+
+    def _generate_current_data(self, t=0):
+        """根据公式生成海流数据"""
+        x_coords = np.arange(0, 100, 1.0)
+        y_coords = np.arange(0, 100, 1.0)
+        
+        uu = np.zeros((100, 100))
+        vv = np.zeros((100, 100))
+        
+        for i, x in enumerate(x_coords):
+            for j, y in enumerate(y_coords):
+                # 检查障碍物
+                in_obstacle = False
+                for obs in self.obstacles:
+                    if obs.is_point_in_obstacle([x, y]):
+                        in_obstacle = True
+                        break
+                
+                if in_obstacle:
+                    uu[i, j] = 0.0
+                    vv[i, j] = 0.0
+                else:
+                    u, v = self._calculate_analytic_current(x, y, t)
+                    uu[i, j] = u
+                    vv[i, j] = v
+                    
+        return uu, vv
+
+    def _calculate_analytic_current(self, x, y, t):
+        """计算解析海流速度"""
+        # 将环境坐标 (0-100) 映射到论文公式的有效范围
+        # x方向映射到 [-10, 10]
+        # y方向映射到 [-2, 2] 以覆盖整个区域
+        scale_factor_x = 0.2
+        scale_factor_y = 0.04  # 减小y方向的缩放因子，使流场在y方向上更宽
+        offset = 50.0
+        
+        x_mapped = (x - offset) * scale_factor_x
+        y_mapped = (y - offset) * scale_factor_y
+
+        # 参数设置 (参考 Formula 5)
+        B0 = 1.2
+        epsilon = 0.3
+        omega = 0.4
+        beta = np.pi / 2
+        k = 0.84
+        c = 0.12
+        
+        # 计算 B(t)
+        Bt = B0 + epsilon * np.cos(omega * t + beta)
+        
+        # 中间变量 (使用映射后的坐标)
+        X_term = k * (x_mapped - c * t)
+        Y_term = y_mapped - Bt * np.cos(X_term)
+        
+        sin_X = np.sin(X_term)
+        cos_X = np.cos(X_term)
+        
+        D_sq = 1 + k**2 * Bt**2 * sin_X**2
+        D = np.sqrt(D_sq)
+        
+        A = Y_term / D
+        
+        # 计算 sech^2(A)
+        # sech(x) = 1/cosh(x)
+        # 防止溢出
+        try:
+            cosh_A = np.cosh(A)
+            sech2_A = 1.0 / (cosh_A**2)
+        except OverflowError:
+            sech2_A = 0.0
+            
+        # u = sech^2(A) * (1/D)
+        # 论文公式 (6): v_cx = - dPsi/dy = sech^2(A)/D
+        u = sech2_A / D
+        
+        # v calculation
+        # dN/dx = k * Bt * sin(X_term)
+        # dD/dx = (k^3 * Bt^2 * sin(X_term) * cos(X_term)) / D
+        # dA/dx = (dN/dx * D - N * dD/dx) / D^2
+        
+        dN_dx = k * Bt * sin_X
+        dD_dx = (k**3 * Bt**2 * sin_X * cos_X) / D
+        dA_dx = (dN_dx * D - Y_term * dD_dx) / D_sq
+        
+        # 论文公式 (6): v_cy = dPsi/dx = -sech^2(A) * dA/dx
+        v = -sech2_A * dA_dx
+        
+        return u, v
     
     def reset(self, seed=None):
         """重置环境"""
@@ -624,6 +721,7 @@ class MyUsvEnv():
             self.U, self.V = self._load_current_data()
         
         self.step_counter = 0
+        self.current_time = 0.0
         self.current_pos = self.start_pos.copy()
         self.usv.update_position(self.current_pos[0], self.current_pos[1], heading=0.0)
         
@@ -753,6 +851,7 @@ class MyUsvEnv():
     def step(self, action):
         """执行一步动作"""
         self.step_counter += 1
+        self.current_time += self.timestep
         old_pos = self.current_pos.copy()
         
         # 计算新位置
@@ -858,6 +957,10 @@ class MyUsvEnv():
         x = position[0]
         y = position[1]
         
+        if self.current_type == "generated":
+            # 使用解析公式计算当前时间的海流
+            return self._calculate_analytic_current(x, y, self.current_time)
+            
         x1 = math.floor(x)
         y1 = math.floor(y)
         
@@ -909,7 +1012,7 @@ class MyUsvEnv():
         
         return False
     
-    def visualize_env(self, show_usv=True):
+    def visualize_env(self, show_usv=True, time_step=None):
         """可视化环境"""
         plt.rcParams['figure.figsize'] = (8.0, 9.0)
         fig, ax = plt.subplots()
@@ -917,8 +1020,14 @@ class MyUsvEnv():
         fig.patch.set_facecolor('white')
         ax.set_facecolor('#F5F5F5')
         
+        # 如果指定了时间步，重新计算该时刻的海流
+        if time_step is not None and self.current_type == "generated":
+            U, V = self._generate_current_data(t=time_step)
+        else:
+            U, V = self.U, self.V
+            
         # 绘制海流
-        quiver = ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T,
+        quiver = ax.quiver(self.X, self.Y, U[:100, :100].T, V[:100, :100].T,
                           width=0.002, scale=20, color='blue', alpha=0.3)
         
         # 绘制起始位置
@@ -962,6 +1071,82 @@ class MyUsvEnv():
         plt.grid(True, alpha=0.3)
         plt.tight_layout(rect=[0, 0.08, 1, 0.95])
         plt.show()
+
+    def animate_currents(self, duration=20, interval=200, save_path="currents_animation.gif"):
+        """
+        以动画形式可视化海流随时间的变化
+        
+        Args:
+            duration: 动画持续时间（仿真时间单位）
+            interval: 帧间隔（毫秒）
+            save_path: 保存路径
+        """
+        from matplotlib.animation import FuncAnimation
+        
+        if self.current_type != "generated":
+            print("警告：仅在 'generated' 模式下支持海流动画")
+            return
+
+        plt.rcParams['figure.figsize'] = (8.0, 9.0)
+        fig, ax = plt.subplots()
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('#F5F5F5')
+        
+        # 初始化绘图元素
+        # 绘制障碍物
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
+            
+        # 绘制目标
+        for i, target in enumerate(self.targets):
+            target.show_target(ax, i)
+            
+        # 绘制起始位置
+        ax.plot(self.start_pos[0], self.start_pos[1], 'r*', markersize=15, zorder=5)
+        
+        # 初始化海流 Quiver
+        # 先计算初始时刻的海流
+        U0, V0 = self._generate_current_data(t=0)
+        quiver = ax.quiver(self.X, self.Y, U0[:100, :100].T, V0[:100, :100].T,
+                          width=0.002, scale=20, color='blue', alpha=0.3)
+        
+        # 设置标题和标签
+        title = ax.set_title(f'Time-Varying Currents (t=0.00)')
+        ax.set_xlabel('X Coordinate')
+        ax.set_ylabel('Y Coordinate')
+        ax.set_xlim(X_MIN, X_MAX)
+        ax.set_ylim(Y_MIN, Y_MAX)
+        ax.grid(True, alpha=0.3)
+        
+        # 动画更新函数
+        def update(frame):
+            t = frame * self.timestep
+            U, V = self._generate_current_data(t=t)
+            
+            # 更新 Quiver 数据
+            # quiver.set_UVC 需要展平的数组或者与 X, Y 形状匹配的数组
+            # 注意：matplotlib quiver 的 U, V 通常对应 X, Y 的网格
+            # 这里 self.X, self.Y 是 meshgrid 生成的
+            # self.U, self.V 是 (100, 100)
+            # 需要注意转置问题，与 visualize_env 保持一致
+            quiver.set_UVC(U[:100, :100].T, V[:100, :100].T)
+            
+            title.set_text(f'Time-Varying Currents (t={t:.2f})')
+            return quiver, title
+            
+        # 计算帧数
+        frames = int(duration / self.timestep)
+        
+        anim = FuncAnimation(fig, update, frames=frames, interval=interval, blit=False)
+        
+        try:
+            anim.save(save_path, writer='pillow')
+            print(f"动画已保存至 {save_path}")
+        except Exception as e:
+            print(f"保存动画失败: {e}")
+            print("请确保安装了 pillow (pip install pillow) 或其他动画写入器")
+            
+        plt.close()
     
     def record_points(self, point, csv_file="usv_path_points.csv", heading=None):
         """记录路径点和航向
@@ -1314,37 +1499,52 @@ if __name__ == '__main__':
     
     # env3.visualize_env()
     
+    # print("\n" + "=" * 60)
+    # print("测试4: 运行简单的仿真")
+    # print("=" * 60)
+    
+    # env4 = MyUsvEnv(
+    #     num_targets=3,
+    #     num_obstacles=9,
+    #     seed=123,
+    #     record_flag=True,
+    #     use_random_shapes=True  
+    # )
+    
+    # obs = env4.reset()
+    # print(f"初始状态: x={obs['x_norm'][0]:.3f}, y={obs['y_norm'][0]:.3f}")
+    # env4.visualize_env()
+    # total_reward = 0
+    # for i in range(5000):
+    #     action = env4.action_space.sample()
+    #     obs, reward, terminated, truncated, info = env4.step(action)
+    #     total_reward += reward
+        
+    #     if terminated:
+    #         print(f"在第 {i+1} 步完成所有目标!")
+    #         break
+    #     if truncated:
+    #         print(f"在第 {i+1} 步超时")
+    #         break
+    
+    # print(f"总奖励: {total_reward:.2f}")
+    # env4.close_writer()
+    
+    # # 绘制路径
+    # if os.path.exists("usv_path_points_test.csv"):
+    #     env4.draw_path("usv_path_points_test.csv")
+
     print("\n" + "=" * 60)
-    print("测试4: 运行简单的仿真")
+    print("测试5: 测试海流随时间变化的可视化")
     print("=" * 60)
     
-    env4 = MyUsvEnv(
+    env5 = MyUsvEnv(
         num_targets=3,
         num_obstacles=9,
         seed=123,
-        record_flag=True,
-        use_random_shapes=True  
+        current_type="generated"
     )
     
-    obs = env4.reset()
-    print(f"初始状态: x={obs['x_norm'][0]:.3f}, y={obs['y_norm'][0]:.3f}")
-    env4.visualize_env()
-    total_reward = 0
-    for i in range(5000):
-        action = env4.action_space.sample()
-        obs, reward, terminated, truncated, info = env4.step(action)
-        total_reward += reward
-        
-        if terminated:
-            print(f"在第 {i+1} 步完成所有目标!")
-            break
-        if truncated:
-            print(f"在第 {i+1} 步超时")
-            break
-    
-    print(f"总奖励: {total_reward:.2f}")
-    env4.close_writer()
-    
-    # 绘制路径
-    if os.path.exists("usv_path_points_test.csv"):
-        env4.draw_path("usv_path_points_test.csv")
+    # 生成海流变化动画
+    print("正在生成海流变化动画...")
+    env5.animate_currents(duration=20, save_path="currents_animation.gif")

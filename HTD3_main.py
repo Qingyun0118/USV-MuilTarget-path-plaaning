@@ -11,10 +11,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
-from my_USV_Env import MAX
+from my_USV_Env import MAX, MyUsvEnv
 from torch.utils.tensorboard import SummaryWriter
 import datetime
-from my_USV_Env import MyUsvEnv
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -205,13 +204,28 @@ class TrainingInfo:
 
 
 def dict_state_to_tensor(state_dict, device):
-    """Convert state dictionary to tensor for neural network input"""
+    """Convert state dictionary to tensor for neural network input
+    
+    State components:
+    - x_norm: (1,) normalized x position
+    - y_norm: (1,) normalized y position
+    - heading_norm: (2,) sin and cos of heading angle
+    - Rou_o_norm: (num_obstacles,) normalized distances to obstacles
+    - Alpha_o_norm: (num_obstacles, 2) sin/cos angles to obstacles
+    - Priority_vector: (num_targets-1,) target priority
+    - rou_t_norm: (1,) normalized distance to current target
+    - alpha_t_norm: (1, 2) sin/cos angle to current target
+    """
     # Extract and flatten all components
     components = []
     
     # Normalized position
     components.extend(state_dict["x_norm"])
     components.extend(state_dict["y_norm"])
+    
+    # Heading information (new in updated environment)
+    if "heading_norm" in state_dict:
+        components.extend(state_dict["heading_norm"])
     
     # Obstacle information
     components.extend(state_dict["Rou_o_norm"].flatten())
@@ -382,27 +396,32 @@ def evaluate_htd3(args, env, agent):
     model_path = os.path.join(args.output_dir, "best_model.pth")
     if not os.path.exists(model_path):
         model_path = os.path.join(args.output_dir, "final_model.pth")
-    # model_path = os.path.join(args.output_dir, "final_model.pth")
-    # checkpoint = torch.load(model_path)
-    # agent.Mu.load_state_dict(checkpoint['actor'])
-    state_dict = torch.load(model_path,map_location=args.device)
+    
+    state_dict = torch.load(model_path, map_location=args.device)
     agent.Mu.load_state_dict(state_dict)
     
     print("Loaded trained model for evaluation")
     eval_dir = os.path.join(args.output_dir, "evaluation_results")
     os.makedirs(eval_dir, exist_ok=True)
+    
     # Evaluation loop
     episode_rewards = []
     episode_lengths = []
-    episod_Usv_pathLengths=[]
-    episod_Total_pathLengths=[]
+    episod_Usv_pathLengths = []
+    episod_Total_pathLengths = []
+    collision_counts = []
     
     for episode in range(args.eval_episodes):
-        state_dict= env.reset()
-        state = dict_state_to_tensor(state_dict, args.device)
+        # Reset environment with optional new seed for each episode
+        if args.randomize_eval:
+            eval_seed = args.seed + episode if args.seed is not None else None
+            env_state_dict = env.reset(seed=eval_seed)
+        else:
+            env_state_dict = env.reset()
         
-
-        csv_file = os.path.join(eval_dir,f"usv_path_episode_{episode+1}.csv")
+        state = dict_state_to_tensor(env_state_dict, args.device)
+        
+        csv_file = os.path.join(eval_dir, f"usv_path_episode_{episode+1}.csv")
         print(f"Recording points to {csv_file}")
         if os.path.exists(csv_file):
             os.remove(csv_file)
@@ -410,24 +429,33 @@ def evaluate_htd3(args, env, agent):
         episode_reward = 0
         episode_length = 0
         done = False
+        collision_count = 0
         
-        episod_Usv_pathLength=0.0
-        episod_Total_pathLength=0.0
+        episod_Usv_pathLength = 0.0
+        episod_Total_pathLength = 0.0
         
-        last_position = np.array([state_dict["x_norm"][0] * MAX, state_dict["y_norm"][0] * MAX])
+        last_position = np.array([env_state_dict["x_norm"][0] * MAX, env_state_dict["y_norm"][0] * MAX])
         
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
                 action_tensor = agent.get_action(state.unsqueeze(0), explore=True)
                 action = action_tensor.cpu().numpy()[0]
                 
-            episod_Usv_pathLength+=abs(action[0])
+            episod_Usv_pathLength += abs(action[0])
             
-            next_state_dict, reward, terminated, truncated, _ = env.step(action)
+            next_state_dict, reward, terminated, truncated, info = env.step(action)
+            
+            # Track collisions
+            if info.get("collision", False):
+                collision_count += 1
             
             current_position = np.array([next_state_dict["x_norm"][0] * MAX, next_state_dict["y_norm"][0] * MAX])
-            env.record_points(current_position,csv_file)
-            episod_Total_pathLength+=np.linalg.norm(current_position - last_position)
+            
+            # Get current heading for recording
+            current_heading = env.usv.heading
+            env.record_points(current_position, csv_file, heading=current_heading)
+            
+            episod_Total_pathLength += np.linalg.norm(current_position - last_position)
             last_position = current_position
             
             done = terminated or truncated
@@ -435,16 +463,18 @@ def evaluate_htd3(args, env, agent):
             state = dict_state_to_tensor(next_state_dict, args.device)
             episode_reward += reward
             episode_length += 1
-            
         
         episode_rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         episod_Usv_pathLengths.append(episod_Usv_pathLength)
         episod_Total_pathLengths.append(episod_Total_pathLength)
+        collision_counts.append(collision_count)
 
         env.close_writer()
         
-        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}")
+        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, "
+              f"UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}, "
+              f"Collisions={collision_count}")
     
     # Print evaluation results
     if args.eval_episodes > 1:
@@ -452,17 +482,20 @@ def evaluate_htd3(args, env, agent):
         avg_length = np.mean(episode_lengths)
         avg_Usv_pathLength = np.mean(episod_Usv_pathLengths)
         avg_Total_pathLength = np.mean(episod_Total_pathLengths)
+        avg_collisions = np.mean(collision_counts)
     
         print(f"\nEvaluation Results:")
         print(f"Average Reward: {avg_reward:.2f}")
         print(f"Average Length: {avg_length:.2f}")
         print(f"Average UsvPathLength: {avg_Usv_pathLength:.2f}")
         print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
-        
-
-        
-    env.draw_path(csv_file.split('_10')[0], ifshow=True, ifsave=True, savePath=eval_dir, 
-              max_episode=args.eval_episodes)
+        print(f"Average Collisions: {avg_collisions:.2f}")
+    
+    # Draw path with USV shapes
+    base_csv_file = os.path.join(eval_dir, "usv_path_episode_")
+    env.draw_path(base_csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
+                  max_episode=args.eval_episodes, show_usv_shape=args.show_usv_shape,
+                  usv_interval=args.usv_interval)
 
 
 def main():
@@ -471,9 +504,18 @@ def main():
     
     # Environment parameters
     parser.add_argument("--env", default="MyUsvEnv", type=str, help="Environment name")
-    # parser.add_argument("--dim_state", default=34, type=int, help="State dimension")  # Based on USV env
-    # parser.add_argument("--dim_action", default=2, type=int, help="Action dimension")  # [rou, alpha]
     parser.add_argument("--max_action", default=25.0, type=float, help="Maximum action value")
+    
+    # New environment configuration parameters
+    parser.add_argument("--num_targets", default=3, type=int, help="Number of targets")
+    parser.add_argument("--num_obstacles", default=5, type=int, help="Number of obstacles")
+    parser.add_argument("--seed", default=None, type=int, help="Random seed for environment generation")
+    parser.add_argument("--usv_length", default=3.0, type=float, help="USV length")
+    parser.add_argument("--usv_width", default=1.5, type=float, help="USV width")
+    parser.add_argument("--target_radius", default=3.0, type=float, help="Target area radius")
+    parser.add_argument("--use_random_shapes", action="store_true", help="Use random obstacle shapes")
+    parser.add_argument("--obstacle_radius_min", default=3.0, type=float, help="Minimum obstacle radius")
+    parser.add_argument("--obstacle_radius_max", default=10.0, type=float, help="Maximum obstacle radius")
     
     # Training parameters
     parser.add_argument("--max_steps", default=100000, type=int, help="Total training steps")
@@ -497,16 +539,17 @@ def main():
     # Evaluation parameters
     parser.add_argument("--eval_episodes", default=1, type=int, help="Evaluation episodes")
     parser.add_argument("--max_episode_steps", default=1000, type=int, help="Max steps per episode")
+    parser.add_argument("--randomize_eval", action="store_true", help="Randomize environment for each eval episode")
+    parser.add_argument("--show_usv_shape", action="store_true", default=True, help="Show USV shape in path visualization")
+    parser.add_argument("--usv_interval", default=5, type=int, help="Interval for drawing USV shapes on path")
     
     # Logging and output
     parser.add_argument("--log_interval", default=1000, type=int, help="Logging interval")
     parser.add_argument("--output_dir", default="htd3_output", type=str, help="Output directory")
-    # parser.add_argument("--seed", default=42, type=int, help="Random seed")
     
     # Mode selection
     parser.add_argument("--do_train", action="store_true", help="Enable training")
     parser.add_argument("--do_eval", action="store_true", help="Enable evaluation")
-    # parser.add_argument("--render", action="store_true", help="Render during evaluation")
     
     args = parser.parse_args()
     
@@ -517,31 +560,61 @@ def main():
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {args.device}")
     
-    # Initialize environment
-    env = MyUsvEnv(record_flag=False)
+    # Set random seeds for reproducibility
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(args.seed)
+    
+    # Initialize environment with new parameters
+    env = MyUsvEnv(
+        num_targets=args.num_targets,
+        num_obstacles=args.num_obstacles,
+        seed=args.seed,
+        record_flag=False,
+        usv_length=args.usv_length,
+        usv_width=args.usv_width,
+        target_radius=args.target_radius,
+        obstacle_radius_range=(args.obstacle_radius_min, args.obstacle_radius_max),
+        use_random_shapes=args.use_random_shapes
+    )
+    
+    # Print environment info
+    env_info = env.get_environment_info()
+    print(f"\nEnvironment Configuration:")
+    print(f"  Targets: {env_info['num_targets']}")
+    print(f"  Obstacles: {env_info['num_obstacles']}")
+    print(f"  Seed: {env_info['seed']}")
+    print(f"  Start Position: {env_info['start_pos']}")
+    print(f"  USV Size: {env_info['usv_size']}")
+    print()
 
     # Initialize agent
     sample_state = env.reset()
-    flat_dim = len(dict_state_to_tensor(sample_state,args.device))
+    flat_dim = len(dict_state_to_tensor(sample_state, args.device))
     observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
+    
+    print(f"State dimension: {flat_dim}")
+    print(f"Action dimension: {env.action_space.shape[0]}")
+    
     agent = HTD3(
         dim_state=observation_space.shape[0],
-        dim_action=env.action_space.shape[0], 
+        dim_action=env.action_space.shape[0],
         max_action=args.max_action,
-        num_targets=3  # Based on your USV environment
-    ).to(args.device)  # Now this should work since HTD3 inherits from nn.Module
+        num_targets=args.num_targets
+    ).to(args.device)
     
     # Training
     if args.do_train:
-        print("Starting HTD3 training...")
+        print("\nStarting HTD3 training...")
         train_htd3(args, env, agent)
     
     # Evaluation
     if args.do_eval:
-        print("Starting HTD3 evaluation...")
+        print("\nStarting HTD3 evaluation...")
         evaluate_htd3(args, env, agent)
-    
-    # env.close()
 
 
 if __name__ == "__main__":

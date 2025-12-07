@@ -800,7 +800,7 @@ class MyUsvEnv():
         }
         
         if self.record_flag:
-            self.record_points(self.current_pos, "usv_path_points_1.csv", heading=self.usv.heading)
+            self.record_points(self.current_pos, "usv_path_points_test.csv", heading=self.usv.heading)
         
         return state, reward, terminated, truncated, {"collision": collision}
     
@@ -1163,8 +1163,8 @@ class MyUsvEnv():
                      bbox_to_anchor=(0.5, -0.08 if max_episode == 1 else -0.12),
                      ncol=4, framealpha=0.9)
             
-            plt.title(f'Multi-Target USV Path Planning - {paths_drawn} Episode(s)\n'
-                     f'(USV Shape Visualization)')
+            plt.title(f'Multi-Target USV Path Planning \n'
+                     f'(Targets: {self.num_targets}, Obstacles: {self.num_obstacles}, Seed: {self.seed})')
             plt.xlabel('X Coordinate')
             plt.ylabel('Y Coordinate')
             plt.grid(True, alpha=0.3)
@@ -1246,91 +1246,91 @@ ROU_S = 3.5
 
 # test
 if __name__ == '__main__':
-    print("=" * 60)
-    print("测试1: 使用随机种子生成环境")
-    print("=" * 60)
+    # print("=" * 60)
+    # print("测试1: 使用随机种子生成环境")
+    # print("=" * 60)
     
-    # 创建带有随机种子的环境
-    env = MyUsvEnv(
-        num_targets=4,
-        num_obstacles=6,
-        seed=42,
-        record_flag=False,
-        usv_length=3.0,
-        usv_width=1.5,
-        use_random_shapes=True
-    )
+    # # 创建带有随机种子的环境
+    # env = MyUsvEnv(
+    #     num_targets=4,
+    #     num_obstacles=6,
+    #     seed=42,
+    #     record_flag=False,
+    #     usv_length=3.0,
+    #     usv_width=1.5,
+    #     use_random_shapes=True
+    # )
     
-    # 显示环境信息
-    info = env.get_environment_info()
-    print(f"目标数量: {info['num_targets']}")
-    print(f"障碍物数量: {info['num_obstacles']}")
-    print(f"随机种子: {info['seed']}")
-    print(f"起始位置: {info['start_pos']}")
-    print(f"USV尺寸: {info['usv_size']}")
-    print("\n目标位置:")
-    for i, t in enumerate(info['targets']):
-        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
-    print("\n障碍物信息:")
-    for i, o in enumerate(info['obstacles']):
-        print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
+    # # 显示环境信息
+    # info = env.get_environment_info()
+    # print(f"目标数量: {info['num_targets']}")
+    # print(f"障碍物数量: {info['num_obstacles']}")
+    # print(f"随机种子: {info['seed']}")
+    # print(f"起始位置: {info['start_pos']}")
+    # print(f"USV尺寸: {info['usv_size']}")
+    # print("\n目标位置:")
+    # for i, t in enumerate(info['targets']):
+    #     print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
+    # print("\n障碍物信息:")
+    # for i, o in enumerate(info['obstacles']):
+    #     print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
     
-    # 可视化环境
-    env.visualize_env()
+    # # 可视化环境
+    # env.visualize_env()
     
-    print("\n" + "=" * 60)
-    print("测试2: 使用相同种子重新生成环境（应该相同）")
-    print("=" * 60)
+    # print("\n" + "=" * 60)
+    # print("测试2: 使用相同种子重新生成环境（应该相同）")
+    # print("=" * 60)
     
-    env2 = MyUsvEnv(
-        num_targets=4,
-        num_obstacles=6,
-        seed=42,
-        use_random_shapes=True
-    )
+    # env2 = MyUsvEnv(
+    #     num_targets=4,
+    #     num_obstacles=6,
+    #     seed=42,
+    #     use_random_shapes=True
+    # )
     
-    info2 = env2.get_environment_info()
-    print(f"起始位置: {info2['start_pos']}")
-    print("目标位置:")
-    for i, t in enumerate(info2['targets']):
-        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f})")
+    # info2 = env2.get_environment_info()
+    # print(f"起始位置: {info2['start_pos']}")
+    # print("目标位置:")
+    # for i, t in enumerate(info2['targets']):
+    #     print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f})")
     
-    print("\n" + "=" * 60)
-    print("测试3: 使用不同种子生成环境")
-    print("=" * 60)
+    # print("\n" + "=" * 60)
+    # print("测试3: 使用不同种子生成环境")
+    # print("=" * 60)
     
-    env3 = MyUsvEnv(
-        num_targets=3,
-        num_obstacles=5,
-        seed=123,
-        use_random_shapes=True
-    )
+    # env3 = MyUsvEnv(
+    #     num_targets=3,
+    #     num_obstacles=5,
+    #     seed=123,
+    #     use_random_shapes=True
+    # )
     
-    info3 = env3.get_environment_info()
-    print(f"起始位置: {info3['start_pos']}")
-    print("目标位置:")
-    for i, t in enumerate(info3['targets']):
-        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f})")
+    # info3 = env3.get_environment_info()
+    # print(f"起始位置: {info3['start_pos']}")
+    # print("目标位置:")
+    # for i, t in enumerate(info3['targets']):
+    #     print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f})")
     
-    env3.visualize_env()
+    # env3.visualize_env()
     
     print("\n" + "=" * 60)
     print("测试4: 运行简单的仿真")
     print("=" * 60)
     
     env4 = MyUsvEnv(
-        num_targets=2,
-        num_obstacles=3,
-        seed=456,
+        num_targets=3,
+        num_obstacles=9,
+        seed=123,
         record_flag=True,
-        use_random_shapes=False  # 只使用圆形障碍物
+        use_random_shapes=True  
     )
     
     obs = env4.reset()
     print(f"初始状态: x={obs['x_norm'][0]:.3f}, y={obs['y_norm'][0]:.3f}")
-    
+    env4.visualize_env()
     total_reward = 0
-    for i in range(100):
+    for i in range(5000):
         action = env4.action_space.sample()
         obs, reward, terminated, truncated, info = env4.step(action)
         total_reward += reward
@@ -1346,5 +1346,5 @@ if __name__ == '__main__':
     env4.close_writer()
     
     # 绘制路径
-    if os.path.exists("usv_path_points_1.csv"):
-        env4.draw_path("usv_path_points_1.csv")
+    if os.path.exists("usv_path_points_test.csv"):
+        env4.draw_path("usv_path_points_test.csv")

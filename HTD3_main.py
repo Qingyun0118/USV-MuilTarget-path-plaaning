@@ -15,6 +15,7 @@ from my_USV_Env import MAX
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 from my_USV_Env import MyUsvEnv
+from usv_evaluation import MultiObjectiveEvaluator
 
 class QNet(nn.Module):
     """Q-network (critic) for HTD3 algorithm."""
@@ -396,6 +397,14 @@ def evaluate_htd3(args, env, agent):
     episode_lengths = []
     episod_Usv_pathLengths=[]
     episod_Total_pathLengths=[]
+    # Multi-objective metrics
+    episode_path_lengths = []
+    episode_smoothness = []
+    episode_economic_costs = []
+    episode_safety = []
+    
+    # Create evaluator
+    evaluator = MultiObjectiveEvaluator(env=env, usv_length=10.0, usv_speed=6.0, fuel_consumption=1.0)
     
     for episode in range(args.eval_episodes):
         state_dict= env.reset()
@@ -415,6 +424,8 @@ def evaluate_htd3(args, env, agent):
         episod_Total_pathLength=0.0
         
         last_position = np.array([state_dict["x_norm"][0] * MAX, state_dict["y_norm"][0] * MAX])
+        # Collect path points for multi-objective evaluation
+        path_points = [last_position.copy()]
         
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
@@ -429,6 +440,7 @@ def evaluate_htd3(args, env, agent):
             env.record_points(current_position,csv_file)
             episod_Total_pathLength+=np.linalg.norm(current_position - last_position)
             last_position = current_position
+            path_points.append(current_position.copy())
             
             done = terminated or truncated
             
@@ -441,10 +453,18 @@ def evaluate_htd3(args, env, agent):
         episode_lengths.append(episode_length)
         episod_Usv_pathLengths.append(episod_Usv_pathLength)
         episod_Total_pathLengths.append(episod_Total_pathLength)
-
+        
+        # Compute multi-objective metrics
+        metrics = evaluator.evaluate(path_points)
+        episode_path_lengths.append(metrics['path_length'])
+        episode_smoothness.append(metrics['smoothness'])
+        episode_economic_costs.append(metrics['economic_cost'])
+        episode_safety.append(metrics['safety'])
+        
         env.close_writer()
         
         print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}")
+        print(f"  Multi-objective: L0={metrics['path_length']:.2f}, θ0={metrics['smoothness']:.2f}°, E0={metrics['economic_cost']:.2f}, D_safe={metrics['safety']:.2f}")
     
     # Print evaluation results
     if args.eval_episodes > 1:
@@ -452,16 +472,36 @@ def evaluate_htd3(args, env, agent):
         avg_length = np.mean(episode_lengths)
         avg_Usv_pathLength = np.mean(episod_Usv_pathLengths)
         avg_Total_pathLength = np.mean(episod_Total_pathLengths)
+        avg_path_length = np.mean(episode_path_lengths)
+        avg_smoothness = np.mean(episode_smoothness)
+        avg_economic_cost = np.mean(episode_economic_costs)
+        avg_safety = np.mean(episode_safety)
     
         print(f"\nEvaluation Results:")
         print(f"Average Reward: {avg_reward:.2f}")
         print(f"Average Length: {avg_length:.2f}")
         print(f"Average UsvPathLength: {avg_Usv_pathLength:.2f}")
         print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
+        print(f"Average Path Length (L0): {avg_path_length:.2f}")
+        print(f"Average Smoothness (θ0): {avg_smoothness:.2f}°")
+        print(f"Average Economic Cost (E0): {avg_economic_cost:.2f}")
+        print(f"Average Safety (D_safe): {avg_safety:.2f}")
         
-
+    # Save multi-objective results to a CSV file
+    results_file = os.path.join(eval_dir, "multi_objective_results.csv")
+    with open(results_file, 'w', newline='') as f:
+        import csv
+        writer = csv.writer(f)
+        writer.writerow(['Episode', 'Reward', 'Length', 'UsvPathLength', 'TotalPathLength',
+                         'PathLength', 'Smoothness', 'EconomicCost', 'Safety'])
+        for i in range(args.eval_episodes):
+            writer.writerow([i+1, episode_rewards[i], episode_lengths[i],
+                             episod_Usv_pathLengths[i], episod_Total_pathLengths[i],
+                             episode_path_lengths[i], episode_smoothness[i],
+                             episode_economic_costs[i], episode_safety[i]])
+    print(f"Multi-objective results saved to {results_file}")
         
-    env.draw_path(csv_file.split('_10')[0], ifshow=True, ifsave=True, savePath=eval_dir, 
+    env.draw_path(csv_file.split('_10')[0], ifshow=True, ifsave=True, savePath=eval_dir,
               max_episode=args.eval_episodes)
 
 

@@ -152,8 +152,14 @@ class USV:
     def get_bounding_radius(self):
         """获取包围圆半径"""
         return max(self.length, self.width) / 2 * 1.2
+
+    def is_colliding_with(self, geometry):
+        """检测USV是否与给定几何体碰撞"""
+        if self.polygon is None:
+            return False
+        return self.polygon.intersects(geometry)
     
-    def step(self, throttle, rudder_angle):  
+    def step(self, throttle, rudder_angle):
         """  
         动力学步进  
         """  

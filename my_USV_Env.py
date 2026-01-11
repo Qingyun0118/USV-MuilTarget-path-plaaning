@@ -13,251 +13,13 @@ from matplotlib.lines import Line2D
 from shapely.geometry import Polygon, LineString, Point, box as shapely_box
 from shapely.affinity import rotate, translate
 from enum import Enum 
+from USV import USV
 
 # 障碍物形状枚举
 class ObstacleShape(Enum):
     CIRCLE = "circle"
     RECTANGLE = "rectangle"
     POLYGON = "polygon"
-
-class USV:  
-    """  
-    USV类  
-    基于 qLPV 结构的非线性动力学模型（经数值稳定性调整）  
-    以及扇形多线传感器模型。  
-    """  
-    def __init__(self, x, y, heading=0.0, length=3.0, width=1.5):  
-        # 几何参数  
-        self.x = x  
-        self.y = y  
-        self.heading = heading # 弧度  
-        self.length = length  
-        self.width = width  
-          
-        # 动力学状态  
-        self.u = 0.0  # 纵向速度 (m/s)  
-        self.v = 0.0  # 横向速度 (m/s)  
-        self.r = 0.0  # 艏摇角速度 (rad/s)  
-          
-        # 物理限制 (防止数值爆炸)  
-        self.max_u = 15.0       # 最大纵向速度  
-        self.max_v = 2.0        # 最大横向漂移速度  
-        self.max_r = np.pi      # 最大转速 (rad/s)  
-          
-        # 调整后的 qLPV 参数 (Stable Tuned)  
-        # 相比原文献，降低了耦合项权重，增加了阻尼，保证仿真不发散  
-        self.params = {  
-            # --- 纵向 (Surge) ---  
-            'a11': 0.95,    # 惯性 (1.0 = 无阻力)  
-            'a12': -0.01,   # 二次阻力系数  
-            'a13': -0.1,    # v*r 耦合项 (科里奥利力影响)  
-            'a14': -0.05,   # r^2 耦合项  
-            'b11': 0.5,     # 推力增益  
-              
-            # --- 横向 (Sway) ---  
-            'a21': -0.05,   # u*r 耦合项  
-            'a22': 0.80,    # 横向阻尼 (较大，船很难横向滑行)  
-            'a23': -0.2,    # |v|v 阻力  
-            'a24': 0.0,     # r 耦合  
-            'a25': 0.0,     # |r|r  
-            'b21': 0.01,    # 推力产生的微小横向分量  
-              
-            # --- 转向 (Yaw) ---  
-            'a31': -0.05,   # u*r 阻尼  
-            'a32': -0.05,   # v 影响  
-            'a33': 0.0,     # |v|v  
-            'a34': 0.90,    # 转动惯性  
-            'a35': -0.1,    # |r|r 阻力  
-            'b31': 0.8      # 舵效 (转向力矩)  
-        }  
-          
-        # 传感器参数  
-        self.sensor_range = 15.0  
-        self.sensor_fov = np.radians(120)  
-        self.num_detection_lines = 13  
-        self.sensor_readings = [self.sensor_range] * self.num_detection_lines  
-          
-        self.polygon = None  
-        self._update_polygon()  
-  
-    def _update_polygon(self):  
-        """更新USV几何形状，增加NaN检查防止报错"""  
-        # 安全检查：如果坐标发散，重置或报错  
-        if np.isnan(self.x) or np.isinf(self.x):  
-            self.x = 0  
-            self.y = 0  
-            self.u = 0  
-            print("Warning: USV state reset due to NaN")  
-  
-        half_length = self.length / 2  
-        half_width = self.width / 2  
-          
-        vertices = [  
-            (half_length, 0),  
-            (half_length * 0.3, half_width),  
-            (-half_length, half_width * 0.8),  
-            (-half_length, -half_width * 0.8),  
-            (half_length * 0.3, -half_width),  
-        ]  
-          
-        poly = Polygon(vertices)  
-        # 这里的 rotate 和 translate 必须保证输入是有效数值  
-        try:  
-            poly = rotate(poly, self.heading, origin=(0, 0), use_radians=True)  
-            poly = translate(poly, self.x, self.y)  
-            self.polygon = poly  
-        except Exception as e:  
-            print(f"Error updating polygon: {e}")  
-            # 创建一个默认的小框防止程序完全崩溃  
-            self.polygon = Polygon([(self.x,self.y), (self.x+1, self.y), (self.x, self.y+1)])  
-  
-    def step(self, throttle, rudder_angle, dt=0.05):  
-        """  
-        动力学步进  
-        """  
-        p = self.params  
-          
-        # 计算推力  
-        T_thrust = throttle * 10.0 # 假设最大推力  
-          
-        # 三角函数  
-        cos_delta = np.cos(rudder_angle)  
-        sin_delta = np.sin(rudder_angle)  
-          
-        u_k, v_k, r_k = self.u, self.v, self.r  
-        abs_u, abs_v, abs_r = abs(u_k), abs(v_k), abs(r_k)  
-          
-        # --- 1. Surge (纵向) ---  
-        # 增加阻尼项和惯性，降低耦合项权重  
-        u_next = (p['a11'] * u_k +   
-                  p['a12'] * abs_u * u_k +   
-                  p['a13'] * v_k * r_k +   
-                  p['a14'] * r_k**2 +   
-                  p['b11'] * T_thrust * cos_delta)  
-          
-        # --- 2. Sway (横向) ---  
-        # 横向阻力通常很大  
-        v_next = (p['a21'] * u_k * r_k +   
-                  p['a22'] * v_k +   
-                  p['a23'] * abs_v * v_k +   
-                  p['b21'] * T_thrust * sin_delta)   
-          
-        # --- 3. Yaw (转向) ---  
-        r_next = (p['a31'] * u_k * r_k +   
-                  p['a32'] * v_k +   
-                  p['a34'] * r_k +   
-                  p['a35'] * abs_r * r_k +   
-                  p['b31'] * T_thrust * sin_delta) # 舵效与推力相关  
-  
-        # --- 关键修复：数值限幅 (Clipping) ---  
-        # 物理世界中船速不可能无限增加，强制截断以防止溢出  
-        self.u = np.clip(u_next, -self.max_u/2, self.max_u) # 倒车速度慢一点  
-        self.v = np.clip(v_next, -self.max_v, self.max_v)  
-        self.r = np.clip(r_next, -self.max_r, self.max_r)  
-          
-        # --- 运动学更新 ---  
-        # 将局部速度转换到全局坐标系  
-        x_dot = self.u * np.cos(self.heading) - self.v * np.sin(self.heading)  
-        y_dot = self.u * np.sin(self.heading) + self.v * np.cos(self.heading)  
-          
-        self.x += x_dot * dt  
-        self.y += y_dot * dt  
-        self.heading += self.r * dt  
-          
-        # 归一化航向 [-pi, pi]  
-        self.heading = (self.heading + np.pi) % (2 * np.pi) - np.pi  
-          
-        self._update_polygon()  
-  
-    def detect_obstacles(self, obstacles):  
-        """传感器探测逻辑"""  
-        self.sensor_readings = []  
-          
-        angles = np.linspace(  
-            self.heading - self.sensor_fov / 2,  
-            self.heading + self.sensor_fov / 2,  
-            self.num_detection_lines  
-        )  
-          
-        start_point = Point(self.x, self.y)  
-          
-        for angle in angles:  
-            end_x = self.x + self.sensor_range * np.cos(angle)  
-            end_y = self.y + self.sensor_range * np.sin(angle)  
-            ray = LineString([(self.x, self.y), (end_x, end_y)])  
-              
-            min_dist = self.sensor_range  
-              
-            for obs in obstacles:  
-                if ray.intersects(obs):  
-                    intersection = ray.intersection(obs)  
-                    # 处理不同类型的交集结果  
-                    if intersection.is_empty:  
-                        continue  
-                      
-                    dist = self.sensor_range # 默认最大  
-                      
-                    if intersection.geom_type == 'Point':  
-                        dist = start_point.distance(intersection)  
-                    elif intersection.geom_type == 'MultiPoint':  
-                        # 找最近的点  
-                        dists = [start_point.distance(p) for p in intersection.geoms]  
-                        dist = min(dists)  
-                    elif intersection.geom_type in ['LineString', 'MultiLineString', 'GeometryCollection']:  
-                        dist = start_point.distance(intersection)  
-                      
-                    if dist < min_dist:  
-                        min_dist = dist  
-              
-            self.sensor_readings.append(min_dist)  
-              
-        return self.sensor_readings  
-  
-    def get_vertices(self):  
-        if self.polygon is None: return []  
-        return list(self.polygon.exterior.coords)[:-1]  
-  
-    def show_usv(self, ax, color='blue', alpha=0.7, label=None, show_sensor=True):  
-        if self.polygon is None: return  
-  
-        # 1. 绘制传感器  
-        if show_sensor:  
-            # 背景扇形  
-            wedge = Wedge((self.x, self.y), self.sensor_range,   
-                          np.degrees(self.heading - self.sensor_fov/2),  
-                          np.degrees(self.heading + self.sensor_fov/2),  
-                          color='cyan', alpha=0.1)  
-            ax.add_patch(wedge)  
-              
-            # 探测线  
-            angles = np.linspace(  
-                self.heading - self.sensor_fov / 2,  
-                self.heading + self.sensor_fov / 2,  
-                self.num_detection_lines  
-            )  
-            for i, dist in enumerate(self.sensor_readings):  
-                angle = angles[i]  
-                end_x = self.x + dist * np.cos(angle)  
-                end_y = self.y + dist * np.sin(angle)  
-                  
-                line_color = 'red' if dist < self.sensor_range - 0.1 else 'green'  
-                ax.plot([self.x, end_x], [self.y, end_y], color=line_color, alpha=0.3, linewidth=1)  
-                  
-                if dist < self.sensor_range - 0.1:  
-                    ax.plot(end_x, end_y, 'ro', markersize=2)  
-  
-        # 2. 绘制USV本体  
-        vertices = self.get_vertices()  
-        patch = MplPolygon(vertices, closed=True, facecolor=color,   
-                           edgecolor='darkblue', alpha=alpha, label=label, zorder=6)  
-        ax.add_patch(patch)  
-          
-        # 3. 绘制船头方向  
-        arrow_len = self.length * 0.8  
-        ax.arrow(self.x, self.y,   
-                 arrow_len * np.cos(self.heading),   
-                 arrow_len * np.sin(self.heading),  
-                 head_width=0.5, fc='darkblue', ec='darkblue', zorder=7)
 
 
 # define the obstacles class with multiple shapes
@@ -481,7 +243,7 @@ class MyUsvEnv():
                  fixed_start_pos=None,
                  fixed_targets=None,
                  fixed_obstacles=None,
-                 current_type="file"):
+                 current_type="generated"):
         """
         初始化USV环境
         
@@ -533,21 +295,35 @@ class MyUsvEnv():
         self._generate_environment()
         
         # 定义动作空间
-        # rou: 相对距离 [-ROU_MAX, ROU_MAX]
-        # alpha: 相对航向角 [-pi, pi]
-        self.action_space = Box(low=np.array([-ROU_MAX, -pi]), high=np.array([ROU_MAX, pi]))
+        # Action: [Throttle, Rudder]  
+        # Throttle: [0, 1] -> 映射到网络输出 [-1, 1]  
+        # Rudder: [-pi/4, pi/4] -> 映射到网络输出 [-1, 1] 
+        self.action_space = Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
         
         # 定义观察空间
-        self.observation_space = {
-            "x_norm": Box(low=0.0, high=1.0, shape=(1,)),
-            "y_norm": Box(low=0.0, high=1.0, shape=(1,)),
-            "heading_norm": Box(low=-1.0, high=1.0, shape=(2,)),  # sin, cos of heading
-            "Rou_o_norm": Box(low=0.0, high=1.0, shape=(self.num_obstacles,)),
-            "Alpha_o_norm": Box(low=-1.0, high=1.0, shape=(self.num_obstacles, 2)),
-            "Priority_vector": MultiBinary(self.num_targets - 1) if self.num_targets > 1 else MultiBinary(1),
-            "rou_t_norm": Box(low=0.0, high=1.0, shape=(1,)),
-            "alpha_t_norm": Box(low=-1.0, high=1.0, shape=(1, 2)),
-        }
+        # 自身信息 (o_usv): [x_norm, y_norm, u_norm, v_norm, r_norm, heading_sin, heading_cos]  
+        # x, y 归一化到 [0, 1]  
+        # u, v, r 归一化 (假设最大速度 10m/s, 最大角速度 pi/3 rad/s)  
+        # self_state_dim = 7   
+          
+        # # 相对目标信息 (o_relative): [dx_norm, dy_norm, dist_norm]   
+        # rel_target_dim = 3  
+          
+        # # 海流信息 (o_current): [flow_u_norm, flow_v_norm, flow_angle_sin, flow_angle_cos]  
+        # current_info_dim = 4  
+          
+        # # 探测器信息 (o_detector): [d_1, ..., d_Nd] (归一化)  
+        # detector_dim = self.usv.num_detection_lines  
+
+        # self.observation_space = Dict({  
+        #     "o_usv":      Box(low=-1.0, high=1.0, shape=(self_state_dim,), dtype=np.float32),  
+        #     "o_relative": Box(low=-1.0, high=1.0, shape=(rel_target_dim,), dtype=np.float32),  
+        #     "o_current":  Box(low=-np.inf, high=np.inf, shape=(current_info_dim,), dtype=np.float32),  
+        #     "o_detector": Box(low=0.0,  high=1.0, shape=(detector_dim,), dtype=np.float32) 
+        # }) 
+
+        total_dim = 7 + 3 + 4 + self.usv.num_detection_lines  
+        self.observation_space = Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32) 
         
         self.step_counter = 0
         self.P = np.zeros(max(1, self.num_targets - 1))
@@ -560,9 +336,94 @@ class MyUsvEnv():
         # 海流数据
         self.X, self.Y = np.meshgrid(np.arange(0, 100, 1), np.arange(0, 100, 1))
         self.U, self.V = self._load_current_data()
-        self.timestep = 0.5
+        self.dt = 0.05
         self.current_time = 0.0
+
+    def _get_observation(self):  
+            """  
+            计算观测值  
+            """  
+            # --- 1. 获取基础数据 ---  
+            # 自身位置与航向  
+            x, y = self.usv.x, self.usv.y  
+            heading = self.usv.heading  
+            
+            # 动力学状态 (体坐标系)  
+            u, v, r = self.usv.u, self.usv.v, self.usv.r  
+            
+            # 当前目标  
+            if self.target_index < len(self.targets):  
+                target = self.targets[self.target_index]  
+                tx, ty = target.x, target.y  
+                t_radius = target.radius_t # 通信半径/到达半径  
+            else:  
+                # 所有目标完成，设为当前位置或 0  
+                tx, ty = x, y  
+                t_radius = 0.0  
     
+            # 获取海流 (全局坐标系)  
+            flow_u, flow_v = self.get_flow_velocity(x, y, self.current_time)  
+            
+            # --- 2. 构建观测向量 (归一化处理) ---  
+            
+            # Part 1: USV 自身信息 (o_usv)  
+            # 范围归一化：位置 / 100, 速度 / max_speed  
+            o_usv = np.array([  
+                x / X_MAX,  
+                y / Y_MAX,  
+                u / self.usv.max_u,  
+                v / self.usv.max_v,  
+                r / self.usv.max_r,  
+                np.sin(heading),  
+                np.cos(heading)  
+            ], dtype=np.float32)  
+            
+            # Part 2: 相对目标信息 (o_relative)  
+            dx = tx - x  
+            dy = ty - y  
+            dist = np.sqrt(dx**2 + dy**2)  
+            
+            # # 通信标志位 (论文中提到 o_comm takes 0 or 1)  
+            # # 此处假设 target.radius_t 即为通信范围  
+            # comm_flag = 1.0 if dist <= t_radius else 0.0  
+            
+            # 归一化距离 (用对角线长度)  
+            max_dist = np.sqrt(X_MAX**2 + Y_MAX**2)  
+            
+            o_relative = np.array([  
+                dx / max_dist,  
+                dy / max_dist,  
+                dist / max_dist,   
+            ], dtype=np.float32)  
+            
+            # Part 3: 海流信息 (o_current)  
+            # 计算流速大小和流向角度  
+            flow_speed = np.sqrt(flow_u**2 + flow_v**2)  
+            flow_angle = np.arctan2(flow_v, flow_u)   
+            
+            o_current = np.array([  
+                flow_u , # 也可以只给 u, v  
+                flow_v ,  
+                np.sin(flow_angle),      
+                np.cos(flow_angle)  
+            ], dtype=np.float32)  
+            
+            # Part 4: 探测器信息 (o_detector)  
+            # 直接使用 USV 的传感器读数，归一化到 [0, 1]  
+            # self.usv.sensor_readings 存储的是实际距离  
+            readings = np.array(self.usv.sensor_readings, dtype=np.float32)  
+            o_detector = readings / self.usv.sensor_range  
+            
+            # # --- 3. 返回字典 ---  
+            # return {  
+            #     "o_usv": o_usv,  
+            #     "o_relative": o_relative,  
+            #     "o_current": o_current,  
+            #     "o_detector": o_detector  
+            # }
+            return np.concatenate([o_usv, o_relative, o_current, o_detector])#扁平化输出
+
+
     def _generate_environment(self):
         """生成环境配置（起始位置、目标、障碍物）"""
         # 首先生成障碍物（因为起始位置需要避开障碍物）
@@ -876,249 +737,128 @@ class MyUsvEnv():
             np.random.seed(seed)
             random.seed(seed)
             self.rng = np.random.RandomState(seed)
-            self._generate_environment()
-            self.U, self.V = self._load_current_data()
         
         self.step_counter = 0
         self.current_time = 0.0
-        self.current_pos = self.start_pos.copy()
-        self.usv.update_position(self.current_pos[0], self.current_pos[1], heading=0.0)
-        
-        # 重置优先级向量
-        self.P = np.zeros(max(1, self.num_targets - 1))
+
+        self._generate_environment()
+        self.U, self.V = self._load_current_data()
+
         self.target_index = 0
         
-        # 计算初始状态
-        x_norm = self.normalize_x_y(self.current_pos[0])
-        y_norm = self.normalize_x_y(self.current_pos[1])
-        heading_norm = np.array([np.sin(self.usv.heading), np.cos(self.usv.heading)])
-        
-        Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) 
-                              for obs in self.obstacles])
-        Alpha_o_norm = np.array([self.calculate_normalize_alpha(self.current_pos, obs) 
-                                for obs in self.obstacles])
-        
-        if len(self.targets) > 0:
-            rou_t_norm = np.array([self.calculate_normalize_Rou(
-                self.current_pos, self.targets[self.target_index])])
-            alpha_t_norm = np.array([self.calculate_normalize_alpha(
-                self.current_pos, self.targets[self.target_index])])
-        else:
-            rou_t_norm = np.array([0.0])
-            alpha_t_norm = np.array([[0.0, 0.0]])
-        
-        init_state = {
-            "x_norm": np.array([x_norm]),
-            "y_norm": np.array([y_norm]),
-            "heading_norm": heading_norm,
-            "Rou_o_norm": Rou_o_norm,
-            "Alpha_o_norm": Alpha_o_norm,
-            "Priority_vector": self.P,
-            "rou_t_norm": rou_t_norm,
-            "alpha_t_norm": alpha_t_norm,
-        }
-        
-        return init_state
+        return self._get_observation()
     
-    def calculate_reward(self, current_pos, old_pos):
+    def calculate_reward(self, old_pos, action):
         """计算奖励"""
-        reward_oi = 0.0
-        collision = False
-        
-        # (1) 安全避障奖励
-        for obs in self.obstacles:
-            dist = obs.distance_to_point(current_pos)
-            
-            # 检查USV是否与障碍物碰撞
-            if self.usv.is_colliding_with(obs.geometry):
-                reward_oi += -10.0
-                collision = True
-            elif self.usv.is_colliding_with(obs.danger_zone):
-                reward_oi += -5.0
-            elif self.usv.is_colliding_with(obs.safety_zone):
-                # 在安全区域内，给予负奖励
-                max_dist = obs.get_bounding_radius()
-                reward_oi += -1.0 * (1.0 - dist / max_dist)
-        
-        # (2) 目标到达奖励
-        reward_t = 0.0
-        done = False
-        
-        if len(self.targets) > 0 and self.target_index < len(self.targets):
-            current_target = self.targets[self.target_index]
-            rou_t = np.sqrt((current_pos[0] - current_target.x)**2 + 
-                           (current_pos[1] - current_target.y)**2)
-            
-            if rou_t < self.target_radius:
-                # 到达目标
-                reward_t += 10.0
-                print(f"目标 {self.target_index} 已到达!")
-                
-                if self.target_index < len(self.P):
-                    self.P[self.target_index] = 1.0
-                
-                self.target_index += 1
-                
-                if self.target_index >= len(self.targets):
-                    done = True
-                    reward_t += 50.0  # 完成所有目标的额外奖励
-            else:
-                # 距离目标的归一化奖励
-                reward_t = -self.calculate_normalize_Rou(current_pos, current_target)
-        
-        # (3) 路径长度惩罚
-        reward_p = -np.linalg.norm(current_pos - old_pos) * 0.01
-        
-        # (4) 接近目标奖励
-        reward_approach = 0.0
-        if len(self.targets) > 0 and self.target_index < len(self.targets):
-            current_target = self.targets[self.target_index]
-            old_dist = np.sqrt((old_pos[0] - current_target.x)**2 + 
-                              (old_pos[1] - current_target.y)**2)
-            new_dist = np.sqrt((current_pos[0] - current_target.x)**2 + 
-                              (current_pos[1] - current_target.y)**2)
-            reward_approach = np.arctan(old_dist - new_dist - 10)
-        
-        # (5) 海流利用奖励
-        reward_flow = 0.0
-        flow_u, flow_v = self.get_flow_velocity(old_pos)
-        flow_speed = np.sqrt(flow_u**2 + flow_v**2)
-        
-        if np.linalg.norm(current_pos - old_pos) > 0 and flow_speed > 0:
-            movement_vector = current_pos - old_pos
-            movement_direction = movement_vector / np.linalg.norm(movement_vector)
-            flow_direction = np.array([flow_u, flow_v]) / flow_speed
-            cos_theta = np.dot(movement_direction, flow_direction)
-            reward_flow = flow_speed * cos_theta
-        
-        # 权重
-        K_oi = 5.0
-        K_t = 0.1
-        K_p = 0.005
-        K_approach = 0.5
-        K_flow = 0.05
-        
-        reward = (K_oi * reward_oi + K_t * reward_t + K_p * reward_p + 
-                 K_approach * reward_approach + K_flow * reward_flow)
-        
-        # 时间衰减
-        if reward > 0 and self.step_counter > 50:
-            reward = reward / (0.05 * self.step_counter + 1)
-        
-        return reward, done, collision
+        reward = 0.0  
+        terminated = False  
+        self.collision_flag = False  
+          
+        current_pos = np.array([self.usv.x, self.usv.y])  
+          
+        # A. 碰撞惩罚 (使用 Shapely 检测)  
+        for obs in self.obstacles:  
+            # 安全区域检测  
+            if self.usv.is_colliding_with(obs.safety_zone):  
+                # 进入警戒区  
+                reward -= 0.5  
+                if self.usv.is_colliding_with(obs.geometry):  
+                    # 发生碰撞  
+                    reward -= 100.0  
+                    self.collision_flag = True  
+                    terminated = True # 碰撞结束  
+                    break  
+          
+        # B. 目标奖励  
+        if self.target_index < len(self.targets):  
+            target = self.targets[self.target_index]  
+            dist = np.linalg.norm(current_pos - np.array([target.x, target.y]))  
+              
+            # 到达判定 (USV进入目标半径)  
+            if dist < target.radius_t:  
+                reward += 50.0  
+                print(f"Target {self.target_index} Reached!")  
+                self.target_index += 1  
+                if self.target_index >= len(self.targets):  
+                    terminated = True # 全部完成  
+                    reward += 100.0  
+            else:  
+                # 引导奖励 (Shaping Reward)  
+                # 1. 距离递减奖励  
+                old_dist = np.linalg.norm(old_pos - np.array([target.x, target.y]))  
+                reward += (old_dist - dist) * 10.0   
+                  
+                # 2. 惩罚时间消耗  
+                reward -= 0.1  
+                  
+        # C. 动作惩罚 (平滑控制)  
+        # 惩罚过大的舵角变化或激烈的动作  
+        reward -= 0.01 * (action[1]**2)  
+          
+        return reward, terminated 
     
     def step(self, action):
         """执行一步动作"""
         self.step_counter += 1
-        self.current_time += self.timestep
-        old_pos = self.current_pos.copy()
+        self.current_time += self.dt
+
+         # 1. 动作映射 (Action Mapping)  
+        # 将 [-1, 1] 映射到物理范围  
+        # 油门: [-1, 1] -> [0, 1]  
+        throttle = float((action[0] + 1.0) / 2.0)  
+        throttle = np.clip(throttle, 0.0, 1.0)  
+          
+        # 舵角: [-1, 1] -> [-45deg, 45deg] (弧度)  
+        max_rudder = np.radians(45)  
+        rudder = float(action[1] * max_rudder) 
+
+        # 2. 动力学更新 (USV Dynamics)  
+        # 注意：USV.step 内部计算了推力产生的位移  
+        old_pos = np.array([self.usv.x, self.usv.y])  
+        self.usv.step(throttle, rudder) 
         
-        # 计算新位置
-        self.current_pos = self.calculate_next_pos(self.current_pos, action)
-        self.check_pos(self.current_pos)
+        # 3. 叠加海流影响 (Environment Effect)  
+        # USV模型计算的是相对水的速度，需要加上水流速度  
+        flow_u, flow_v = self.get_flow_velocity(self.usv.x, self.usv.y, self.current_time)  
+        # 直接更新位置 (Euler 积分)  
+        self.usv.x += flow_u * self.dt  
+        self.usv.y += flow_v * self.dt
+        # # 强制更新几何体 (因为手动修改了x,y)  
+        # self.usv.update_position(self.usv.x, self.usv.y) 
+        # 边界限制
+        self.usv.x = np.clip(self.usv.x, X_MIN, X_MAX)
+        self.usv.y = np.clip(self.usv.y, Y_MIN, Y_MAX)
         
-        # 更新USV位置和航向
-        new_heading = action[1]  # 使用动作中的角度作为新航向
-        self.usv.update_position(self.current_pos[0], self.current_pos[1], new_heading)
-        
-        # 计算奖励
-        reward, terminated, collision = self.calculate_reward(self.current_pos, old_pos)
-        
-        # 检查是否超时
-        truncated = self.step_counter >= 1000
-        
-        # 构建状态
-        x_norm = self.normalize_x_y(self.current_pos[0])
-        y_norm = self.normalize_x_y(self.current_pos[1])
-        heading_norm = np.array([np.sin(self.usv.heading), np.cos(self.usv.heading)])
-        
-        Rou_o_norm = np.array([self.calculate_normalize_Rou(self.current_pos, obs) 
-                              for obs in self.obstacles])
-        Alpha_o_norm = np.array([self.calculate_normalize_alpha(self.current_pos, obs) 
-                                for obs in self.obstacles])
-        
-        if len(self.targets) > 0 and self.target_index < len(self.targets):
-            rou_t_norm = np.array([self.calculate_normalize_Rou(
-                self.current_pos, self.targets[self.target_index])])
-            alpha_t_norm = np.array([self.calculate_normalize_alpha(
-                self.current_pos, self.targets[self.target_index])])
-        else:
-            rou_t_norm = np.array([0.0])
-            alpha_t_norm = np.array([[0.0, 0.0]])
-        
-        state = {
-            "x_norm": np.array([x_norm]),
-            "y_norm": np.array([y_norm]),
-            "heading_norm": heading_norm,
-            "Rou_o_norm": Rou_o_norm,
-            "Alpha_o_norm": Alpha_o_norm,
-            "Priority_vector": self.P,
-            "rou_t_norm": rou_t_norm,
-            "alpha_t_norm": alpha_t_norm,
-        }
+        # 更新当前位置
+        self.current_pos = np.array([self.usv.x, self.usv.y])
+
+        # 4. 传感器探测 (Sensing)
+        # 提取障碍物的几何体列表供 USV 探测  
+        obs_geoms = [obs.geometry for obs in self.obstacles]  
+        self.usv.detect_obstacles(obs_geoms)
+         # 5. 奖励计算与状态判断  
+        reward, terminated = self.calculate_reward(old_pos, action)  
+        truncated = self.step_counter >= 2000  
+          
+        info = {  
+            "collision": self.collision_flag,  
+            "target_reached": self.target_index,  
+            "flow": (flow_u, flow_v)  
+        }  
         
         if self.record_flag:
             self.record_points(self.current_pos, "usv_path_points_test.csv", heading=self.usv.heading)
         
-        return state, reward, terminated, truncated, {"collision": collision}
+        return self._get_observation(), reward, terminated, truncated, info 
     
-    def normalize_x_y(self, x):
-        """归一化坐标"""
-        return x / MAX
-    
-    def calculate_normalize_Rou(self, current_pos, target):
-        """计算归一化距离"""
-        if isinstance(target, (Obstacle, Target)):
-            actual_distance = np.sqrt((target.x - current_pos[0])**2 + 
-                                      (target.y - current_pos[1])**2)
-        elif isinstance(target, (list, np.ndarray)):
-            actual_distance = np.sqrt((target[0] - current_pos[0])**2 + 
-                                      (target[1] - current_pos[1])**2)
-        else:
-            actual_distance = 0.0
-        
-        max_possible_distance = np.sqrt(X_MAX**2 + Y_MAX**2)
-        return actual_distance / max_possible_distance
-    
-    def calculate_normalize_alpha(self, current_pos, target):
-        """计算归一化角度（正弦和余弦）"""
-        if isinstance(target, (Obstacle, Target)):
-            dx = target.x - current_pos[0]
-            dy = target.y - current_pos[1]
-        elif isinstance(target, (list, np.ndarray)):
-            dx = target[0] - current_pos[0]
-            dy = target[1] - current_pos[1]
-        else:
-            dx, dy = 0.0, 0.0
-        
-        alpha = np.arctan2(dy, dx)
-        return np.array([np.sin(alpha), np.cos(alpha)])
-    
-    def sgn(self, x):
-        return 1 if x >= 0 else 0
-    
-    def calculate_next_pos(self, current_pos, action):
-        """计算下一个位置"""
-        rou = action[0]
-        alpha = action[1]
-        
-        # 获取海流速度
-        flow_u, flow_v = self.get_flow_velocity(current_pos)
-        
-        new_pos = current_pos.copy()
-        new_pos[0] += rou * np.cos(alpha) + flow_u * self.timestep
-        new_pos[1] += rou * np.sin(alpha) + flow_v * self.timestep
-        
-        return new_pos
-    
-    def get_flow_velocity(self, position):
+    def get_flow_velocity(self, x, y, t=None):
         """获取指定位置的海流速度"""
-        x = position[0]
-        y = position[1]
-        
+        if t is None:
+            t = self.current_time
+
         if self.current_type == "generated":
             # 使用解析公式计算当前时间的海流
-            return self._calculate_analytic_current(x, y, self.current_time)
+            return self._calculate_analytic_current(x, y, t)
             
         x1 = math.floor(x)
         y1 = math.floor(y)
@@ -1148,28 +888,6 @@ class MyUsvEnv():
             v = 0.0
         
         return u, v
-    
-    def check_pos(self, current_pos):
-        """检查并限制位置在边界内"""
-        if current_pos[0] < X_MIN:
-            current_pos[0] = X_MIN
-        elif current_pos[0] > X_MAX:
-            current_pos[0] = X_MAX
-        if current_pos[1] < Y_MIN:
-            current_pos[1] = Y_MIN
-        elif current_pos[1] > Y_MAX:
-            current_pos[1] = Y_MAX
-        return current_pos
-    
-    def is_done(self, current_pos):
-        """检查是否完成所有目标"""
-        if len(self.targets) == 0:
-            return True
-        
-        if self.target_index >= len(self.targets):
-            return True
-        
-        return False
     
     def visualize_env(self, show_usv=True, time_step=None):
         """可视化环境"""
@@ -1279,7 +997,7 @@ class MyUsvEnv():
         
         # 动画更新函数
         def update(frame):
-            t = frame * self.timestep
+            t = frame * self.dt
             U, V = self._generate_current_data(t=t)
             
             # 更新 Quiver 数据
@@ -1294,7 +1012,7 @@ class MyUsvEnv():
             return quiver, title
             
         # 计算帧数
-        frames = int(duration / self.timestep)
+        frames = int(duration / self.dt)
         
         anim = FuncAnimation(fig, update, frames=frames, interval=interval, blit=False)
         
@@ -1346,7 +1064,7 @@ class MyUsvEnv():
             self.csv_file = None
     
     def draw_path(self, csv_file="usv_path_points.csv", ifshow=True, ifsave=False,
-                  savePath=None, max_episode=1, show_usv_shape=True, usv_interval=5):
+                  savePath=None, max_episode=1, show_usv_shape=False, usv_interval=50):
         """绘制USV路径
         
         Args:
@@ -1498,7 +1216,7 @@ class MyUsvEnv():
                 Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
                 Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
                 Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
-                Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.5, linestyle='-'),
+                Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.5, linestyle='--'),
                 MplPolygon([(0, 0)], closed=True, facecolor='red', edgecolor='darkblue',
                           alpha=0.9, label='End USV'),
             ]
@@ -1588,8 +1306,74 @@ ROU_C = 1.5
 ROU_S = 3.5
 
 
+def test_usv_running_and_plot():
+    """
+    测试函数：测试USV在环境中的运行情况，并绘制路线图
+    """
+    print("\n" + "=" * 60)
+    print("测试: USV运行与路径绘制")
+    print("=" * 60)
+    
+    # 路径记录文件 (与 step 函数中硬编码的文件名一致)
+    path_file = "usv_path_points_test.csv"
+    
+    # 清理旧的路径文件
+    if os.path.exists(path_file):
+        try:
+            os.remove(path_file)
+        except Exception:
+            pass
+
+    # 1. 初始化环境，开启记录模式
+    env = MyUsvEnv(
+        num_targets=3,
+        num_obstacles=5,
+        seed=2024,
+        record_flag=True,
+        use_random_shapes=True,
+        current_type="generated"
+    )
+    
+    # 2. 重置环境
+    obs = env.reset()
+    print("环境初始化完成")
+    
+    # 3. 运行仿真
+    max_steps = 2000
+    total_reward = 0
+    
+    print(f"开始运行仿真 (最大步数: {max_steps})...")
+    
+    for step in range(max_steps):
+        # 随机动作: 油门[0,1], 舵角[-1,1]
+        # action = np.array([
+        #     np.random.uniform(0.0, 1.0),
+        #     np.random.uniform(-1.0, 1.0)
+        # ], dtype=np.float32)
+        action=env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        total_reward += reward
+        
+        if terminated or truncated:
+            print(f"仿真结束 (步数: {step+1})")
+            break
+            
+    print(f"总奖励: {total_reward:.2f}")
+    
+    # 4. 关闭记录器
+    env.close_writer()
+    
+    # 5. 绘制路径
+    if os.path.exists(path_file):
+        print(f"正在绘制路径图...")
+        env.draw_path(csv_file=path_file, ifshow=True, ifsave=True, savePath=".")
+    else:
+        print(f"错误: 未找到路径文件 {path_file}")
+
+
 # test
 if __name__ == '__main__':
+    test_usv_running_and_plot()
     # print("=" * 60)
     # print("测试1: 使用随机种子生成环境")
     # print("=" * 60)
@@ -1708,55 +1492,3 @@ if __name__ == '__main__':
     # print("正在生成海流变化动画...")
     # env5.animate_currents(duration=20, save_path="currents_animation.gif")
     # 创建环境 (障碍物)  
-    obstacle1 = Point(15, 5).buffer(2.0) # 圆形障碍物  
-    obstacle2 = Polygon([(20, 10), (25, 10), (25, 15), (20, 15)]) # 矩形障碍物  
-    env_obstacles = [obstacle1, obstacle2]  
-      
-    # 初始化USV  
-    usv = USV(x=0, y=0, heading=np.radians(30))  
-      
-    # 模拟循环  
-    fig, ax = plt.subplots(figsize=(10, 8))  
-      
-    # 简单的开环控制输入序列  
-    # 时间步 0-50: 加速  
-    # 时间步 50-100: 左转  
-      
-    path_x, path_y = [], []  
-      
-    for t in range(100):  
-        # 控制输入  
-        throttle = 0.8  
-        rudder = 0.0  
-        if t > 40:  
-            rudder = np.radians(15) # 向左打舵 (根据模型定义，正值可能向左或向右，需根据坐标系确认)  
-              
-        # 1. 动力学步进  
-        usv.step(throttle, rudder, dt=0.05)  
-          
-        # 2. 传感器探测  
-        readings = usv.detect_obstacles(env_obstacles)  
-          
-        path_x.append(usv.x)  
-        path_y.append(usv.y)  
-      
-    # 绘图  
-    ax.set_xlim(-5, 35)  
-    ax.set_ylim(-5, 25)  
-    ax.set_aspect('equal')  
-      
-    # 绘制障碍物  
-    from shapely.plotting import plot_polygon  
-    for obs in env_obstacles:  
-        plot_polygon(obs, ax=ax, facecolor='gray', edgecolor='black')  
-      
-    # 绘制轨迹  
-    ax.plot(path_x, path_y, 'k--', label='Trajectory')  
-      
-    # 绘制最终状态的USV和传感器  
-    usv.show_usv(ax, label='USV')  
-      
-    plt.title("USV Simulation: Nonlinear Dynamics & Sector Sensor")  
-    plt.legend()  
-    plt.grid(True)  
-    plt.show()

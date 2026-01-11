@@ -311,7 +311,7 @@ if __name__ == '__main__':
     writer=SummaryWriter('usvTest_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
       
     # 初始化USV  
-    usv = USV(x=0, y=0, heading=np.radians(30),mass=100)  
+    usv = USV(x=0, y=0, heading=np.radians(30),mass=20,inertia=100)  
       
     # 模拟循环  
     fig, ax = plt.subplots(figsize=(10, 8))  
@@ -327,8 +327,8 @@ if __name__ == '__main__':
         throttle = 0.2
         rudder = 0.0  
         if t > 50:  
-            throttle = 0.0
-        #     rudder = np.radians(15) # 向左打舵 (根据模型定义，正值可能向左或向右，需根据坐标系确认)  
+            # throttle = 0.0
+            rudder = np.radians(15) # 向左打舵 (根据模型定义，正值可能向左或向右，需根据坐标系确认)  
               
         # 1. 动力学步进  
         usv.step(throttle, rudder)  

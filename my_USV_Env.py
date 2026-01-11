@@ -125,7 +125,7 @@ class Obstacle():
         """绘制障碍物"""
         if self.shape == ObstacleShape.CIRCLE:
             circle_ob = plt.Circle((self.x, self.y), self.radius_o, 
-                                   color='red', fill=True, label=label_obstacle, zorder=3)
+                                   color='gray', fill=True, label=label_obstacle, zorder=3)
             ax.add_patch(circle_ob)
             circle_c = plt.Circle((self.x, self.y), self.radius_o + self.rou_c, 
                                   color='red', linestyle='--', fill=False, 
@@ -140,7 +140,7 @@ class Obstacle():
             # 绘制矩形障碍物
             vertices = list(self.geometry.exterior.coords)[:-1]
             rect_patch = MplPolygon(vertices, closed=True, 
-                                    facecolor='red', edgecolor='darkred',
+                                    facecolor='gray',
                                     label=label_obstacle, zorder=3)
             ax.add_patch(rect_patch)
             
@@ -162,7 +162,7 @@ class Obstacle():
             # 绘制多边形障碍物
             vertices = list(self.geometry.exterior.coords)[:-1]
             poly_patch = MplPolygon(vertices, closed=True,
-                                    facecolor='red', edgecolor='darkred',
+                                    facecolor='gray',
                                     label=label_obstacle, zorder=3)
             ax.add_patch(poly_patch)
             
@@ -440,7 +440,7 @@ class MyUsvEnv():
         
         # 创建USV对象
         self.usv = USV(self.start_pos[0], self.start_pos[1],
-                       heading=0.0, length=self.usv_length, width=self.usv_width)
+                       heading=self.rng.uniform(0.0,360.0), length=self.usv_length, width=self.usv_width)
         
         # 生成目标（需要避开障碍物和起始位置）
         if self.fixed_targets is not None:
@@ -889,7 +889,7 @@ class MyUsvEnv():
         
         return u, v
     
-    def visualize_env(self, show_usv=True, time_step=None):
+    def visualize_env(self, time_step=None):
         """可视化环境"""
         plt.rcParams['figure.figsize'] = (8.0, 9.0)
         fig, ax = plt.subplots()
@@ -911,8 +911,7 @@ class MyUsvEnv():
         ax.plot(self.start_pos[0], self.start_pos[1], 'r*', markersize=15, zorder=5)
         
         # 绘制USV
-        if show_usv:
-            self.usv.show_usv(ax, color='blue', alpha=0.7)
+        self.usv.show_usv(ax, color='blue', alpha=0.7)
         
         # 绘制目标
         for i, target in enumerate(self.targets):
@@ -1046,7 +1045,7 @@ class MyUsvEnv():
                 self.csv_writer = csv.writer(self.csv_file)
                 if not file_exists or os.stat(csv_file).st_size == 0:
                     self.csv_writer.writerow(['x', 'y', 'heading'])
-                    self.csv_writer.writerow([self.start_pos[0], self.start_pos[1], 0.0])
+                    self.csv_writer.writerow([self.start_pos[0], self.start_pos[1], self.usv.heading])
                     self.csv_file.flush()
             
             self.csv_writer.writerow([point[0], point[1], heading])
@@ -1085,11 +1084,6 @@ class MyUsvEnv():
         # 绘制海流
         quiver = ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T,
                           width=0.002, scale=20, color='blue', alpha=0.3)
-        
-        # 绘制起始位置（使用USV形状）
-        start_usv = USV(self.start_pos[0], self.start_pos[1], heading=0.0,
-                       length=self.usv_length, width=self.usv_width)
-        start_usv.show_usv(ax, color='green', alpha=0.8)
         
         # 绘制目标
         for i, target in enumerate(self.targets):
@@ -1172,7 +1166,7 @@ class MyUsvEnv():
                 ax.plot(x_points, y_points,
                        color=color,
                        linewidth=1.5,
-                       linestyle='-',
+                       linestyle='--',
                        alpha=0.7,
                        zorder=4,
                        label=label)
@@ -1197,9 +1191,19 @@ class MyUsvEnv():
                               c=color, s=20, marker='o', zorder=5,
                               edgecolors='white', linewidths=0.5)
                 
+                # 提取障碍物几何体供探测使用
+                obs_geoms = [obs.geometry for obs in self.obstacles]
+
+                # 绘制起点（使用USV形状，绿色）
+                start_usv = USV(x_points[0], y_points[0], heading=headings[0],
+                               length=self.usv_length, width=self.usv_width)
+                start_usv.detect_obstacles(obs_geoms)
+                start_usv.show_usv(ax, color='green', alpha=0.8)
+
                 # 绘制终点（使用USV形状，红色）
                 end_usv = USV(x_points[-1], y_points[-1], heading=headings[-1],
                              length=self.usv_length, width=self.usv_width)
+                end_usv.detect_obstacles(obs_geoms)
                 end_usv.show_usv(ax, color='red', alpha=0.9)
                 
                 paths_drawn += 1
@@ -1212,7 +1216,7 @@ class MyUsvEnv():
                 MplPolygon([(0, 0)], closed=True, facecolor='green', edgecolor='darkblue',
                           alpha=0.8, label='Start USV'),
                 Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
-                Patch(facecolor='red', edgecolor='red', label='Obstacle'),
+                Patch(facecolor='gray', edgecolor='gray', label='Obstacle'),
                 Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
                 Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
                 Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
@@ -1337,7 +1341,7 @@ def test_usv_running_and_plot():
     # 2. 重置环境
     obs = env.reset()
     print("环境初始化完成")
-    
+    # env.visualize_env()
     # 3. 运行仿真
     max_steps = 2000
     total_reward = 0

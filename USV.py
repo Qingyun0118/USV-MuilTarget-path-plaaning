@@ -273,29 +273,29 @@ class USV:
   
         # 1. 绘制传感器  
         if show_sensor:  
-            # 背景扇形  
-            wedge = Wedge((self.x, self.y), self.sensor_range,   
-                          np.degrees(self.heading - self.sensor_fov/2),  
-                          np.degrees(self.heading + self.sensor_fov/2),  
-                          color='cyan', alpha=0.1)  
-            ax.add_patch(wedge)  
+            # 背景扇形
+            wedge = Wedge((self.x, self.y), self.sensor_range,
+                          np.degrees(self.heading - self.sensor_fov/2),
+                          np.degrees(self.heading + self.sensor_fov/2),
+                          color='cyan', alpha=0.1, zorder=4)
+            ax.add_patch(wedge)
               
-            # 探测线  
-            angles = np.linspace(  
-                self.heading - self.sensor_fov / 2,  
-                self.heading + self.sensor_fov / 2,  
-                self.num_detection_lines  
-            )  
-            for i, dist in enumerate(self.sensor_readings):  
-                angle = angles[i]  
-                end_x = self.x + dist * np.cos(angle)  
-                end_y = self.y + dist * np.sin(angle)  
+            # 探测线
+            angles = np.linspace(
+                self.heading - self.sensor_fov / 2,
+                self.heading + self.sensor_fov / 2,
+                self.num_detection_lines
+            )
+            for i, dist in enumerate(self.sensor_readings):
+                angle = angles[i]
+                end_x = self.x + dist * np.cos(angle)
+                end_y = self.y + dist * np.sin(angle)
                   
-                line_color = 'red' if dist < self.sensor_range - 0.1 else 'green'  
-                ax.plot([self.x, end_x], [self.y, end_y], color=line_color, alpha=0.3, linewidth=1)  
+                line_color = 'red' if dist < self.sensor_range - 0.1 else 'green'
+                ax.plot([self.x, end_x], [self.y, end_y], color=line_color, alpha=0.3, linewidth=1, zorder=4)
                   
-                if dist < self.sensor_range - 0.1:  
-                    ax.plot(end_x, end_y, 'ro', markersize=2)  
+                if dist < self.sensor_range - 0.1:
+                    ax.plot(end_x, end_y, 'ro', markersize=2, zorder=5)
   
         # 2. 绘制USV本体  
         vertices = self.get_vertices()  

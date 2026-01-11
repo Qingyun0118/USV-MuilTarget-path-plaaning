@@ -10,3 +10,4 @@ __pycache__/
 models/
 globalsea_20250901.nc
 runs/
+usvTest/

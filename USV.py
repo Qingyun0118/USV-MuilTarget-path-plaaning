@@ -14,7 +14,7 @@ class USV:
     以及扇形多线传感器模型。  
     """  
     def __init__(self, x, y, heading=0.0, 
-                mass=20.0,       # 质量 (kg)  
+                mass=50.0,       # 质量 (kg)  
                 inertia=5.0,     # 转动惯性 (kg·m^2) 
                 dt=0.05,
                 length=3.0, width=1.5):  
@@ -308,10 +308,10 @@ if __name__ == '__main__':
     obstacle1 = Point(15, 5).buffer(2.0) # 圆形障碍物  
     obstacle2 = Polygon([(20, 10), (25, 10), (25, 15), (20, 15)]) # 矩形障碍物  
     env_obstacles = [obstacle1, obstacle2]  
-    writer=SummaryWriter('usvTest_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
+    writer=SummaryWriter('usvTest/usvTest_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")))
       
     # 初始化USV  
-    usv = USV(x=0, y=0, heading=np.radians(30),mass=20,inertia=100)  
+    usv = USV(x=0, y=0, heading=np.radians(30),mass=50,inertia=5,dt=0.05)  
       
     # 模拟循环  
     fig, ax = plt.subplots(figsize=(10, 8))  
@@ -328,7 +328,7 @@ if __name__ == '__main__':
         rudder = 0.0  
         if t > 50:  
             # throttle = 0.0
-            rudder = np.radians(15) # 向左打舵 (根据模型定义，正值可能向左或向右，需根据坐标系确认)  
+            rudder = np.radians(30) # 向左打舵 (根据模型定义，正值可能向左或向右，需根据坐标系确认)  
               
         # 1. 动力学步进  
         usv.step(throttle, rudder)  

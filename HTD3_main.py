@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import itertools
-from my_USV_Env import MAX, MyUsvEnv
+from my_USV_Env import MyUsvEnv
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 
@@ -203,44 +203,6 @@ class TrainingInfo:
             self.episode_reward = 0
 
 
-def dict_state_to_tensor(state_dict, device):
-    """Convert state dictionary to tensor for neural network input
-    
-    State components:
-    - x_norm: (1,) normalized x position
-    - y_norm: (1,) normalized y position
-    - heading_norm: (2,) sin and cos of heading angle
-    - Rou_o_norm: (num_obstacles,) normalized distances to obstacles
-    - Alpha_o_norm: (num_obstacles, 2) sin/cos angles to obstacles
-    - Priority_vector: (num_targets-1,) target priority
-    - rou_t_norm: (1,) normalized distance to current target
-    - alpha_t_norm: (1, 2) sin/cos angle to current target
-    """
-    # Extract and flatten all components
-    components = []
-    
-    # Normalized position
-    components.extend(state_dict["x_norm"])
-    components.extend(state_dict["y_norm"])
-    
-    # Heading information (new in updated environment)
-    if "heading_norm" in state_dict:
-        components.extend(state_dict["heading_norm"])
-    
-    # Obstacle information
-    components.extend(state_dict["Rou_o_norm"].flatten())
-    components.extend(state_dict["Alpha_o_norm"].flatten())
-    
-    # Priority vector
-    components.extend(state_dict["Priority_vector"])
-    
-    # Target information
-    components.extend(state_dict["rou_t_norm"])
-    components.extend(state_dict["alpha_t_norm"].flatten())
-    
-    return torch.tensor(components, dtype=torch.float32).to(device)
-
-
 def train_htd3(args, env, agent: HTD3):
     """Train the HTD3 agent for multi-objective path planning"""
 
@@ -257,8 +219,8 @@ def train_htd3(args, env, agent: HTD3):
     print(f"TensorBoard logs saved to "+'runs/{}_TD3_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env,
                                                             ))
     # Training loop
-    state_dict= env.reset()
-    state = dict_state_to_tensor(state_dict, args.device)
+    state = env.reset()
+    state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
     episode=0
     for step in range(args.max_steps):
         # Action selection with exploration
@@ -268,27 +230,28 @@ def train_htd3(args, env, agent: HTD3):
         else:
             # Policy-based action with exploration noise
             with torch.no_grad():
-                action_tensor = agent.get_action(state.unsqueeze(0), explore=True, 
+                action_tensor = agent.get_action(state_tensor.unsqueeze(0), explore=True,
                                                exploration_noise=args.exploration_noise)
                 action = action_tensor.cpu().numpy()[0]
         
         # Environment step
-        next_state_dict, reward, terminated, truncated, _ = env.step(action)
+        next_state, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated
-        next_state = dict_state_to_tensor(next_state_dict, args.device)
+        next_state_tensor = torch.tensor(next_state, dtype=torch.float32).to(args.device)
         
         # Store experience (convert to CPU for storage)
-        replay_buffer.push(state.cpu().numpy(), action, reward, done, next_state.cpu().numpy())
+        replay_buffer.push(state, action, reward, done, next_state)
         
         # Update state and training info
         state = next_state
+        state_tensor = next_state_tensor
         training_info.update(reward, done)
         
         # Reset environment if episode done
         if done:
             episode+=1
-            state_dict= env.reset()#
-            state = dict_state_to_tensor(state_dict, args.device)
+            state = env.reset()#
+            state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
             
             # Logging
             episode_reward = training_info.log["episode_reward"][-1]
@@ -415,11 +378,11 @@ def evaluate_htd3(args, env, agent):
         # Reset environment with optional new seed for each episode
         if args.randomize_eval:
             eval_seed = args.seed + episode if args.seed is not None else None
-            env_state_dict = env.reset(seed=eval_seed)
+            state = env.reset(seed=eval_seed)
         else:
-            env_state_dict = env.reset()
+            state = env.reset()
         
-        state = dict_state_to_tensor(env_state_dict, args.device)
+        state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
         
         csv_file = os.path.join(eval_dir, f"usv_path_episode_{episode+1}.csv")
         print(f"Recording points to {csv_file}")
@@ -434,33 +397,33 @@ def evaluate_htd3(args, env, agent):
         episod_Usv_pathLength = 0.0
         episod_Total_pathLength = 0.0
         
-        last_position = np.array([env_state_dict["x_norm"][0] * MAX, env_state_dict["y_norm"][0] * MAX])
+        last_position = np.array([env.usv.x, env.usv.y])
         
         while not done and episode_length < args.max_episode_steps:
             with torch.no_grad():
-                action_tensor = agent.get_action(state.unsqueeze(0), explore=True)
+                action_tensor = agent.get_action(state_tensor.unsqueeze(0), explore=True)
                 action = action_tensor.cpu().numpy()[0]
                 
-            episod_Usv_pathLength += abs(action[0])
-            
-            next_state_dict, reward, terminated, truncated, info = env.step(action)
+            next_state, reward, terminated, truncated, info = env.step(action)
             
             # Track collisions
             if info.get("collision", False):
                 collision_count += 1
             
-            current_position = np.array([next_state_dict["x_norm"][0] * MAX, next_state_dict["y_norm"][0] * MAX])
+            current_position = np.array([env.usv.x, env.usv.y])
             
             # Get current heading for recording
             current_heading = env.usv.heading
             env.record_points(current_position, csv_file, heading=current_heading)
             
-            episod_Total_pathLength += np.linalg.norm(current_position - last_position)
+            step_distance = np.linalg.norm(current_position - last_position)
+            episod_Usv_pathLength += step_distance
+            episod_Total_pathLength += step_distance
             last_position = current_position
             
             done = terminated or truncated
             
-            state = dict_state_to_tensor(next_state_dict, args.device)
+            state_tensor = torch.tensor(next_state, dtype=torch.float32).to(args.device)
             episode_reward += reward
             episode_length += 1
         
@@ -475,6 +438,11 @@ def evaluate_htd3(args, env, agent):
         print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, "
               f"UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}, "
               f"Collisions={collision_count}")
+
+        #每个回合都绘制并保存轨迹
+        env.draw_path(csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
+                    show_usv_shape=args.show_usv_shape,
+                    usv_interval=args.usv_interval)
     
     # Print evaluation results
     if args.eval_episodes > 1:
@@ -491,11 +459,11 @@ def evaluate_htd3(args, env, agent):
         print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
         print(f"Average Collisions: {avg_collisions:.2f}")
     
-    # Draw path with USV shapes
-    base_csv_file = os.path.join(eval_dir, "usv_path_episode_")
-    env.draw_path(base_csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
-                  max_episode=args.eval_episodes, show_usv_shape=args.show_usv_shape,
-                  usv_interval=args.usv_interval)
+    # # Draw path with USV shapes 因为每次评估回合的随机种子都不一样，所以不可以在一张图中绘制所有轨迹了
+    # base_csv_file = os.path.join(eval_dir, "usv_path_episode_")
+    # env.draw_path(base_csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
+    #               max_episode=args.eval_episodes, show_usv_shape=args.show_usv_shape,
+    #               usv_interval=args.usv_interval)
 
 
 def main():
@@ -504,16 +472,16 @@ def main():
     
     # Environment parameters
     parser.add_argument("--env", default="MyUsvEnv", type=str, help="Environment name")
-    parser.add_argument("--max_action", default=25.0, type=float, help="Maximum action value")
+    parser.add_argument("--max_action", default=1.0, type=float, help="Maximum action value")
     
     # New environment configuration parameters
     parser.add_argument("--num_targets", default=3, type=int, help="Number of targets")
     parser.add_argument("--num_obstacles", default=5, type=int, help="Number of obstacles")
-    parser.add_argument("--seed", default=None, type=int, help="Random seed for environment generation")
+    parser.add_argument("--seed", default=2024, type=int, help="Random seed for environment generation")
     parser.add_argument("--usv_length", default=3.0, type=float, help="USV length")
     parser.add_argument("--usv_width", default=1.5, type=float, help="USV width")
     parser.add_argument("--target_radius", default=3.0, type=float, help="Target area radius")
-    parser.add_argument("--use_random_shapes", action="store_true", help="Use random obstacle shapes")
+    parser.add_argument("--use_random_shapes", action="store_true", default=True, help="Use random obstacle shapes")
     parser.add_argument("--obstacle_radius_min", default=3.0, type=float, help="Minimum obstacle radius")
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float, help="Maximum obstacle radius")
     
@@ -540,7 +508,7 @@ def main():
     parser.add_argument("--eval_episodes", default=1, type=int, help="Evaluation episodes")
     parser.add_argument("--max_episode_steps", default=1000, type=int, help="Max steps per episode")
     parser.add_argument("--randomize_eval", action="store_true", help="Randomize environment for each eval episode")
-    parser.add_argument("--show_usv_shape", action="store_true", default=True, help="Show USV shape in path visualization")
+    parser.add_argument("--show_usv_shape", action="store_true", default=False, help="Show USV shape in path visualization")
     parser.add_argument("--usv_interval", default=5, type=int, help="Interval for drawing USV shapes on path")
     
     # Logging and output
@@ -593,7 +561,7 @@ def main():
 
     # Initialize agent
     sample_state = env.reset()
-    flat_dim = len(dict_state_to_tensor(sample_state, args.device))
+    flat_dim = sample_state.shape[0]
     observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
     
     print(f"State dimension: {flat_dim}")

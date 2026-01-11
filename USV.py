@@ -33,7 +33,7 @@ class USV:
         
         # 物理限制 (防止数值爆炸)  
         self.max_u = 10.0       # 最大纵向速度  
-        self.max_v = 2.0        # 最大横向漂移速度  
+        self.max_v = 10.0        # 最大横向漂移速度  
         self.max_r = np.pi/3.0     # 最大转速 (rad/s)  
         
         self.mass = mass  
@@ -199,12 +199,12 @@ class USV:
   
         # --- 关键修复：数值限幅 (Clipping) ---  
         # 物理世界中船速不可能无限增加，强制截断以防止溢出  
-        # self.u = np.clip(u_next, -self.max_u/2, self.max_u) # 倒车速度慢一点  
-        # self.v = np.clip(v_next, -self.max_v, self.max_v)  
-        # self.r = np.clip(r_next, -self.max_r, self.max_r)  
-        self.u = u_next 
-        self.v = v_next
-        self.r = r_next
+        self.u = np.clip(u_next, -self.max_u/2, self.max_u) # 倒车速度慢一点  
+        self.v = np.clip(v_next, -self.max_v, self.max_v)  
+        self.r = np.clip(r_next, -self.max_r, self.max_r)  
+        # self.u = u_next 
+        # self.v = v_next
+        # self.r = r_next
           
         # --- 运动学更新 ---  
         # 将局部速度转换到全局坐标系  
@@ -239,26 +239,30 @@ class USV:
               
             min_dist = self.sensor_range  
               
-            for obs in obstacles:  
-                if ray.intersects(obs):  
-                    intersection = ray.intersection(obs)  
-                    # 处理不同类型的交集结果  
-                    if intersection.is_empty:  
-                        continue  
-                      
-                    dist = self.sensor_range # 默认最大  
-                      
-                    if intersection.geom_type == 'Point':  
-                        dist = start_point.distance(intersection)  
-                    elif intersection.geom_type == 'MultiPoint':  
-                        # 找最近的点  
-                        dists = [start_point.distance(p) for p in intersection.geoms]  
-                        dist = min(dists)  
-                    elif intersection.geom_type in ['LineString', 'MultiLineString', 'GeometryCollection']:  
-                        dist = start_point.distance(intersection)  
-                      
-                    if dist < min_dist:  
-                        min_dist = dist  
+            for obs in obstacles:
+                try:
+                    if ray.intersects(obs):
+                        intersection = ray.intersection(obs)
+                        # 处理不同类型的交集结果
+                        if intersection.is_empty:
+                            continue
+                        
+                        dist = self.sensor_range # 默认最大
+                        
+                        if intersection.geom_type == 'Point':
+                            dist = start_point.distance(intersection)
+                        elif intersection.geom_type == 'MultiPoint':
+                            # 找最近的点
+                            dists = [start_point.distance(p) for p in intersection.geoms]
+                            dist = min(dists)
+                        elif intersection.geom_type in ['LineString', 'MultiLineString', 'GeometryCollection']:
+                            dist = start_point.distance(intersection)
+                        
+                        if dist < min_dist:
+                            min_dist = dist
+                except Exception as e:
+                    # print(f"Warning: Geometry error in sensor detection: {e}")
+                    continue
               
             self.sensor_readings.append(min_dist)  
               

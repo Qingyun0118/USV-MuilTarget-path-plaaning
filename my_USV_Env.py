@@ -301,33 +301,28 @@ class MyUsvEnv():
         self.action_space = Box(low=np.array([-1.0, -1.0]), high=np.array([1.0, 1.0]), dtype=np.float32)
         
         # 定义观察空间
-        # 自身信息 (o_usv): [x_norm, y_norm, u_norm, v_norm, r_norm, heading_sin, heading_cos]  
-        # x, y 归一化到 [0, 1]  
-        # u, v, r 归一化 (假设最大速度 10m/s, 最大角速度 pi/3 rad/s)  
-        # self_state_dim = 7   
+        # 自身信息 (o_usv): [x_norm, y_norm, u_norm, v_norm, r_norm, heading_sin, heading_cos]
+        self_state_dim = 7
           
-        # # 相对目标信息 (o_relative): [dx_norm, dy_norm, dist_norm]   
-        # rel_target_dim = 3  
+        # 目标信息 (targets): [tx_norm, ty_norm, status] * num_targets
+        # status: 0 (unvisited), 1 (visited)
+        target_dim = 3 * self.num_targets
           
-        # # 海流信息 (o_current): [flow_u_norm, flow_v_norm, flow_angle_sin, flow_angle_cos]  
-        # current_info_dim = 4  
+        # 海流信息 (o_current): [flow_u_norm, flow_v_norm, flow_angle_sin, flow_angle_cos]
+        current_info_dim = 4
           
-        # # 探测器信息 (o_detector): [d_1, ..., d_Nd] (归一化)  
-        # detector_dim = self.usv.num_detection_lines  
+        # 探测器信息 (o_detector): [d_1, ..., d_Nd] (归一化)
+        detector_dim = self.usv.num_detection_lines
 
-        # self.observation_space = Dict({  
-        #     "o_usv":      Box(low=-1.0, high=1.0, shape=(self_state_dim,), dtype=np.float32),  
-        #     "o_relative": Box(low=-1.0, high=1.0, shape=(rel_target_dim,), dtype=np.float32),  
-        #     "o_current":  Box(low=-np.inf, high=np.inf, shape=(current_info_dim,), dtype=np.float32),  
-        #     "o_detector": Box(low=0.0,  high=1.0, shape=(detector_dim,), dtype=np.float32) 
-        # }) 
-
-        total_dim = 7 + 3 + 4 + self.usv.num_detection_lines  
-        self.observation_space = Box(low=-np.inf, high=np.inf, shape=(total_dim,), dtype=np.float32) 
+        self.observation_space = Dict({
+            "o_usv":      Box(low=-np.inf, high=np.inf, shape=(self_state_dim,), dtype=np.float32),
+            "targets":    Box(low=-np.inf, high=np.inf, shape=(target_dim,), dtype=np.float32),
+            "o_current":  Box(low=-np.inf, high=np.inf, shape=(current_info_dim,), dtype=np.float32),
+            "o_detector": Box(low=0.0,  high=1.0, shape=(detector_dim,), dtype=np.float32)
+        })
         
         self.step_counter = 0
-        self.P = np.zeros(max(1, self.num_targets - 1))
-        self.target_index = 0
+        self.target_status = np.zeros(self.num_targets, dtype=np.float32) # 0: unvisited, 1: visited
         
         # 文件记录相关
         self.csv_file = None
@@ -339,89 +334,71 @@ class MyUsvEnv():
         self.dt = 0.05
         self.current_time = 0.0
 
-    def _get_observation(self):  
-            """  
-            计算观测值  
-            """  
-            # --- 1. 获取基础数据 ---  
-            # 自身位置与航向  
-            x, y = self.usv.x, self.usv.y  
-            heading = self.usv.heading  
+    def _get_observation(self):
+            """
+            计算观测值
+            """
+            # --- 1. 获取基础数据 ---
+            # 自身位置与航向
+            x, y = self.usv.x, self.usv.y
+            heading = self.usv.heading
             
-            # 动力学状态 (体坐标系)  
-            u, v, r = self.usv.u, self.usv.v, self.usv.r  
+            # 动力学状态 (体坐标系)
+            u, v, r = self.usv.u, self.usv.v, self.usv.r
             
-            # 当前目标  
-            if self.target_index < len(self.targets):  
-                target = self.targets[self.target_index]  
-                tx, ty = target.x, target.y  
-                t_radius = target.radius_t # 通信半径/到达半径  
-            else:  
-                # 所有目标完成，设为当前位置或 0  
-                tx, ty = x, y  
-                t_radius = 0.0  
-    
-            # 获取海流 (全局坐标系)  
-            flow_u, flow_v = self.get_flow_velocity(x, y, self.current_time)  
+            # 获取海流 (全局坐标系)
+            flow_u, flow_v = self.get_flow_velocity(x, y, self.current_time)
             
-            # --- 2. 构建观测向量 (归一化处理) ---  
+            # --- 2. 构建观测向量 (归一化处理) ---
             
-            # Part 1: USV 自身信息 (o_usv)  
-            # 范围归一化：位置 / 100, 速度 / max_speed  
-            o_usv = np.array([  
-                x / X_MAX,  
-                y / Y_MAX,  
-                u / self.usv.max_u,  
-                v / self.usv.max_v,  
-                r / self.usv.max_r,  
-                np.sin(heading),  
-                np.cos(heading)  
-            ], dtype=np.float32)  
+            # Part 1: USV 自身信息 (o_usv)
+            # 范围归一化：位置 / 100, 速度 / max_speed
+            o_usv = np.array([
+                x / X_MAX,
+                y / Y_MAX,
+                u / self.usv.max_u,
+                v / self.usv.max_v,
+                r / self.usv.max_r,
+                np.sin(heading),
+                np.cos(heading)
+            ], dtype=np.float32)
             
-            # Part 2: 相对目标信息 (o_relative)  
-            dx = tx - x  
-            dy = ty - y  
-            dist = np.sqrt(dx**2 + dy**2)  
+            # Part 2: 所有目标信息 (targets)
+            # [tx_norm, ty_norm, status] * num_targets
+            targets_info = []
+            for i, target in enumerate(self.targets):
+                targets_info.extend([
+                    target.x / X_MAX,
+                    target.y / Y_MAX,
+                    self.target_status[i]
+                ])
+            o_targets = np.array(targets_info, dtype=np.float32)
             
-            # # 通信标志位 (论文中提到 o_comm takes 0 or 1)  
-            # # 此处假设 target.radius_t 即为通信范围  
-            # comm_flag = 1.0 if dist <= t_radius else 0.0  
+            # Part 3: 海流信息 (o_current)
+            # 计算流速大小和流向角度
+            flow_speed = np.sqrt(flow_u**2 + flow_v**2)
+            flow_angle = np.arctan2(flow_v, flow_u)
             
-            # 归一化距离 (用对角线长度)  
-            max_dist = np.sqrt(X_MAX**2 + Y_MAX**2)  
+            o_current = np.array([
+                flow_u , # 也可以只给 u, v
+                flow_v ,
+                np.sin(flow_angle),
+                np.cos(flow_angle)
+            ], dtype=np.float32)
             
-            o_relative = np.array([  
-                dx / max_dist,  
-                dy / max_dist,  
-                dist / max_dist,   
-            ], dtype=np.float32)  
+            # Part 4: 探测器信息 (o_detector)
+            # 直接使用 USV 的传感器读数，归一化到 [0, 1]
+            # self.usv.sensor_readings 存储的是实际距离
+            readings = np.array(self.usv.sensor_readings, dtype=np.float32)
+            o_detector = readings / self.usv.sensor_range
             
-            # Part 3: 海流信息 (o_current)  
-            # 计算流速大小和流向角度  
-            flow_speed = np.sqrt(flow_u**2 + flow_v**2)  
-            flow_angle = np.arctan2(flow_v, flow_u)   
-            
-            o_current = np.array([  
-                flow_u , # 也可以只给 u, v  
-                flow_v ,  
-                np.sin(flow_angle),      
-                np.cos(flow_angle)  
-            ], dtype=np.float32)  
-            
-            # Part 4: 探测器信息 (o_detector)  
-            # 直接使用 USV 的传感器读数，归一化到 [0, 1]  
-            # self.usv.sensor_readings 存储的是实际距离  
-            readings = np.array(self.usv.sensor_readings, dtype=np.float32)  
-            o_detector = readings / self.usv.sensor_range  
-            
-            # # --- 3. 返回字典 ---  
-            # return {  
-            #     "o_usv": o_usv,  
-            #     "o_relative": o_relative,  
-            #     "o_current": o_current,  
-            #     "o_detector": o_detector  
-            # }
-            return np.concatenate([o_usv, o_relative, o_current, o_detector])#扁平化输出
+            # --- 3. 返回字典 ---
+            return {
+                "o_usv": o_usv,
+                "targets": o_targets,
+                "o_current": o_current,
+                "o_detector": o_detector
+            }
 
 
     def _generate_environment(self):
@@ -744,58 +721,63 @@ class MyUsvEnv():
         self._generate_environment()
         self.U, self.V = self._load_current_data()
 
-        self.target_index = 0
+        self.target_status = np.zeros(self.num_targets, dtype=np.float32)
         
         return self._get_observation()
     
     def calculate_reward(self, old_pos, action):
-        """计算奖励"""
-        reward = 0.0  
-        terminated = False  
-        self.collision_flag = False  
+        """
+        计算奖励
+        注意：在HRL架构中，具体的奖励（如Selector的奖励、Actuator的奖励）
+        通常由Agent根据状态变化自行计算。
+        这里仅返回环境的基础事件奖励（如碰撞、到达任意目标）。
+        """
+        reward = 0.0
+        terminated = False
+        self.collision_flag = False
+        self.reached_targets = []
           
-        current_pos = np.array([self.usv.x, self.usv.y])  
+        current_pos = np.array([self.usv.x, self.usv.y])
           
-        # A. 碰撞惩罚 (使用 Shapely 检测)  
-        for obs in self.obstacles:  
-            # 安全区域检测  
-            if self.usv.is_colliding_with(obs.safety_zone):  
-                # 进入警戒区  
-                reward -= 0.5  
-                if self.usv.is_colliding_with(obs.geometry):  
-                    # 发生碰撞  
-                    reward -= 100.0  
-                    self.collision_flag = True  
-                    terminated = True # 碰撞结束  
-                    break  
+        # A. 碰撞惩罚 (使用 Shapely 检测)
+        for obs in self.obstacles:
+            # 安全区域检测
+            if self.usv.is_colliding_with(obs.safety_zone):
+                # 进入警戒区
+                reward -= 0.5
+                if self.usv.is_colliding_with(obs.geometry):
+                    # 发生碰撞
+                    reward -= 100.0
+                    self.collision_flag = True
+                    terminated = True # 碰撞结束
+                    break
           
-        # B. 目标奖励  
-        if self.target_index < len(self.targets):  
-            target = self.targets[self.target_index]  
-            dist = np.linalg.norm(current_pos - np.array([target.x, target.y]))  
-              
-            # 到达判定 (USV进入目标半径)  
-            if dist < target.radius_t:  
-                reward += 50.0  
-                print(f"Target {self.target_index} Reached!")  
-                self.target_index += 1  
-                if self.target_index >= len(self.targets):  
-                    terminated = True # 全部完成  
-                    reward += 100.0  
-            else:  
-                # 引导奖励 (Shaping Reward)  
-                # 1. 距离递减奖励  
-                old_dist = np.linalg.norm(old_pos - np.array([target.x, target.y]))  
-                reward += (old_dist - dist) * 10.0   
+        # B. 目标奖励 (检查所有未访问目标)
+        all_visited = True
+        for i, target in enumerate(self.targets):
+            if self.target_status[i] == 0: # 未访问
+                dist = np.linalg.norm(current_pos - np.array([target.x, target.y]))
+                
+                if dist < target.radius_t:
+                    self.target_status[i] = 1.0
+                    self.reached_targets.append(i)
+                    reward += 50.0
+                    print(f"Target {i} Reached!")
+                else:
+                    all_visited = False
+        
+        if all_visited:
+            terminated = True
+            reward += 100.0
                   
-                # 2. 惩罚时间消耗  
-                reward -= 0.1  
-                  
-        # C. 动作惩罚 (平滑控制)  
-        # 惩罚过大的舵角变化或激烈的动作  
-        reward -= 0.01 * (action[1]**2)  
+        # C. 动作惩罚 (平滑控制)
+        # 惩罚过大的舵角变化或激烈的动作
+        reward -= 0.01 * (action[1]**2)
+        
+        # 时间惩罚
+        reward -= 0.1
           
-        return reward, terminated 
+        return reward, terminated
     
     def step(self, action):
         """执行一步动作"""
@@ -836,15 +818,16 @@ class MyUsvEnv():
         # 提取障碍物的几何体列表供 USV 探测  
         obs_geoms = [obs.geometry for obs in self.obstacles]  
         self.usv.detect_obstacles(obs_geoms)
-         # 5. 奖励计算与状态判断  
-        reward, terminated = self.calculate_reward(old_pos, action)  
-        truncated = self.step_counter >= 2000  
-          
-        info = {  
-            "collision": self.collision_flag,  
-            "target_reached": self.target_index,  
-            "flow": (flow_u, flow_v)  
-        }  
+        # 5. 奖励计算与状态判断
+        reward, terminated = self.calculate_reward(old_pos, action)
+        truncated = self.step_counter >= 2000
+        
+        info = {
+            "collision": self.collision_flag,
+            "reached_targets": self.reached_targets,
+            "flow": (flow_u, flow_v),
+            "target_status": self.target_status.copy()
+        }
         
         if self.record_flag:
             self.record_points(self.current_pos, "usv_path_points_test.csv", heading=self.usv.heading)

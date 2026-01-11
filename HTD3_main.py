@@ -1,542 +1,319 @@
-"""HTD3算法实现 - 基于分层TD3的多目标路径规划"""
+"""
+HRL-MG-TD3实现。多目标TD3的分层强化学习。
+"""
+
 import argparse
-from collections import defaultdict
 import os
 import random
-from dataclasses import dataclass, field
-import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import itertools
-from my_USV_Env import MyUsvEnv
 from torch.utils.tensorboard import SummaryWriter
 import datetime
+from collections import deque
+from my_USV_Env import MyUsvEnv
 
-class QNet(nn.Module):
-    """Q-network (critic) for HTD3 algorithm."""
+# --- Device Configuration ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def __init__(self, dim_state, dim_action):
-        super().__init__()
-        self.fc1 = nn.Linear(dim_state + dim_action, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, 32)
-        self.fc4 = nn.Linear(32, 1)
+# --- Replay Buffers ---
 
-    def forward(self, state, action):
-        sa = torch.cat([state, action], -1)
-        x = F.relu(self.fc1(sa))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = self.fc4(x)
-        return x
-
-
-class PolicyNet(nn.Module):
-    """Policy Network for HTD3 algorithm."""
-
-    def __init__(self, dim_state, dim_action, max_action=2.0):
-        super().__init__()
-        self.max_action = max_action
-        self.fc1 = nn.Linear(dim_state, 128)
-        self.fc2 = nn.Linear(128, 64)
-        self.fc3 = nn.Linear(64, 32)
-        self.fc4 = nn.Linear(32, dim_action)
-
-    def forward(self, state):
-        x = F.relu(self.fc1(state))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = self.max_action * torch.tanh(self.fc4(x))
-        return x
-
-
-class HTD3(nn.Module):
-    """Hierarchical Twin Delayed Deep Deterministic Policy Gradient (HTD3)"""
-    
-    def __init__(self, dim_state, dim_action, max_action, num_targets=3):
-        super().__init__()
-
-        self.max_action = max_action
-        self.num_targets = num_targets
-        
-        # Initialize networks
-        self.Q1 = QNet(dim_state, dim_action)
-        self.Q2 = QNet(dim_state, dim_action)
-        self.Mu = PolicyNet(dim_state, dim_action, max_action)
-        
-        # Target networks
-        self.target_Q1 = QNet(dim_state, dim_action)
-        self.target_Q2 = QNet(dim_state, dim_action)
-        self.target_Mu = PolicyNet(dim_state, dim_action, max_action)
-        
-        # Initialize target networks with same weights
-        self.target_Q1.load_state_dict(self.Q1.state_dict())
-        self.target_Q2.load_state_dict(self.Q2.state_dict())
-        self.target_Mu.load_state_dict(self.Mu.state_dict())
-
-    def get_action(self, state, explore=False, exploration_noise=0.1):
-        """Get action from policy with optional exploration noise"""
-        with torch.no_grad():
-            action = self.Mu(state)
-            if explore:
-                noise = torch.randn_like(action) * exploration_noise
-                action = torch.clamp(action + noise, -self.max_action, self.max_action)
-            return action
-
-    def compute_value_loss(self, args, s_batch, a_batch, r_batch, d_batch, next_s_batch):
-        """Compute the value loss for the two Q networks with target policy smoothing."""
-
-        with torch.no_grad():
-            # Target policy smoothing - add noise to target actions
-            next_actions = self.target_Mu(next_s_batch)
-            noise = torch.clamp(
-                torch.randn_like(next_actions) * args.policy_noise,
-                -args.noise_clip,
-                args.noise_clip,
-            )
-            next_actions = torch.clamp(next_actions + noise, 
-                                     min=-self.max_action, max=self.max_action)
-
-            # Clipped double Q-learning - take minimum of two target Q values
-            target_Q1 = self.target_Q1(next_s_batch, next_actions).squeeze()
-            target_Q2 = self.target_Q2(next_s_batch, next_actions).squeeze()
-            target_Q = torch.min(target_Q1, target_Q2)
-            
-            # TD target
-            y = r_batch + args.gamma * target_Q * (1 - d_batch)
-
-        # Current Q values
-        current_Q1 = self.Q1(s_batch, a_batch).squeeze()
-        current_Q2 = self.Q2(s_batch, a_batch).squeeze()
-        
-        # MSE losses
-        value_loss1 = F.mse_loss(current_Q1, y)
-        value_loss2 = F.mse_loss(current_Q2, y)
-        
-        return value_loss1, value_loss2
-
-    def compute_policy_loss(self, s_batch):
-        """Compute policy loss using deterministic policy gradient"""
-        actions = self.Mu(s_batch)
-        policy_loss = -self.Q1(s_batch, actions).mean()
-        return policy_loss
-
-    def soft_update(self, tau=0.001):
-        """Soft update of target networks with parameter tau"""
-        for target_param, param in zip(self.target_Q1.parameters(), self.Q1.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-            
-        for target_param, param in zip(self.target_Q2.parameters(), self.Q2.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-            
-        for target_param, param in zip(self.target_Mu.parameters(), self.Mu.parameters()):
-            target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
-
-
-@dataclass
 class ReplayBuffer:
-    """Experience replay buffer for HTD3"""
-    maxsize: int
-    size: int = 0
-    state: list = field(default_factory=list)
-    action: list = field(default_factory=list)
-    reward: list = field(default_factory=list)
-    done: list = field(default_factory=list)
-    next_state: list = field(default_factory=list)
+    """Standard Replay Buffer for Selector (DQN)"""
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-    def push(self, state, action, reward, done, next_state):
-        """Add experience to buffer"""
-        if self.size < self.maxsize:
-            self.state.append(state)
-            self.action.append(action)
-            self.reward.append(reward)
-            self.done.append(done)
-            self.next_state.append(next_state)
-        else:
-            position = self.size % self.maxsize
-            self.state[position] = state
-            self.action[position] = action
-            self.reward[position] = reward
-            self.done[position] = done
-            self.next_state[position] = next_state
-        self.size += 1
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
 
-    def sample(self, n):
-        """Sample batch of experiences"""
-        total_number = min(self.size, self.maxsize)
-        indices = np.random.randint(total_number, size=n)
-        
-        state = [self.state[i] for i in indices]
-        action = [self.action[i] for i in indices]
-        reward = [self.reward[i] for i in indices]
-        done = [self.done[i] for i in indices]
-        next_state = [self.next_state[i] for i in indices]
-        
-        return state, action, reward, done, next_state
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done = zip(*batch)
+        return (
+            torch.FloatTensor(np.array(state)).to(device),
+            torch.LongTensor(np.array(action)).unsqueeze(1).to(device),
+            torch.FloatTensor(np.array(reward)).unsqueeze(1).to(device),
+            torch.FloatTensor(np.array(next_state)).to(device),
+            torch.FloatTensor(np.array(done)).unsqueeze(1).to(device)
+        )
 
+    def __len__(self):
+        return len(self.buffer)
 
-class TrainingInfo:
-    """Track training statistics"""
-    def __init__(self):
-        self.log = defaultdict(list)
-        self.episode_length = 0
-        self.episode_reward = 0
-        self.max_episode_reward = -float("inf")
+class HER_ReplayBuffer:
+    """Replay Buffer with Hindsight Experience Replay for Actuators"""
+    def __init__(self, capacity):
+        self.buffer = deque(maxlen=capacity)
 
-    def update(self, reward, done):
-        """Update episode statistics"""
-        self.episode_length += 1
-        self.episode_reward += reward
-        
-        if done:
-            self.log["episode_length"].append(self.episode_length)
-            self.log["episode_reward"].append(self.episode_reward)
-            
-            if self.episode_reward > self.max_episode_reward:
-                self.max_episode_reward = self.episode_reward
-            
-            # Reset for next episode
-            self.episode_length = 0
-            self.episode_reward = 0
+    def push(self, state, action, reward, next_state, done, desired_goal, achieved_goal):
+        self.buffer.append((state, action, reward, next_state, done, desired_goal, achieved_goal))
 
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        state, action, reward, next_state, done, desired_goal, achieved_goal = zip(*batch)
+        
+        return (
+            torch.FloatTensor(np.array(state)).to(device),
+            torch.FloatTensor(np.array(action)).to(device),
+            torch.FloatTensor(np.array(reward)).unsqueeze(1).to(device),
+            torch.FloatTensor(np.array(next_state)).to(device),
+            torch.FloatTensor(np.array(done)).unsqueeze(1).to(device),
+            torch.FloatTensor(np.array(desired_goal)).to(device),
+            torch.FloatTensor(np.array(achieved_goal)).to(device)
+        )
+    
+    def __len__(self):
+        return len(self.buffer)
 
-def train_htd3(args, env, agent: HTD3):
-    """Train the HTD3 agent for multi-objective path planning"""
+# --- Neural Networks ---
+class SelectorQNet(nn.Module):
+    """DQN for Selector: State -> Q-values for each target"""
+    def __init__(self, state_dim, num_actions):
+        super(SelectorQNet, self).__init__()
+        self.fc1 = nn.Linear(state_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, num_actions)
 
-    # Optimizers with different learning rates for actor and critic
-    Q1_optimizer = torch.optim.Adam(agent.Q1.parameters(), lr=args.lr_critic)
-    Q2_optimizer = torch.optim.Adam(agent.Q2.parameters(), lr=args.lr_critic)
-    Mu_optimizer = torch.optim.Adam(agent.Mu.parameters(), lr=args.lr_actor)
-    
-    # Experience replay buffer
-    replay_buffer = ReplayBuffer(maxsize=args.buffer_size)
-    training_info = TrainingInfo()
-    writer = SummaryWriter('runs/{}_TD3_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env,
-                                                            ))
-    print(f"TensorBoard logs saved to "+'runs/{}_TD3_{}'.format(datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), args.env,
-                                                            ))
-    # Training loop
-    state = env.reset()
-    state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
-    episode=0
-    for step in range(args.max_steps):
-        # Action selection with exploration
-        if step < args.warmup_steps:
-            # Random exploration during warmup
-            action = env.action_space.sample()
-        else:
-            # Policy-based action with exploration noise
-            with torch.no_grad():
-                action_tensor = agent.get_action(state_tensor.unsqueeze(0), explore=True,
-                                               exploration_noise=args.exploration_noise)
-                action = action_tensor.cpu().numpy()[0]
-        
-        # Environment step
-        next_state, reward, terminated, truncated, _ = env.step(action)
-        done = terminated or truncated
-        next_state_tensor = torch.tensor(next_state, dtype=torch.float32).to(args.device)
-        
-        # Store experience (convert to CPU for storage)
-        replay_buffer.push(state, action, reward, done, next_state)
-        
-        # Update state and training info
-        state = next_state
-        state_tensor = next_state_tensor
-        training_info.update(reward, done)
-        
-        # Reset environment if episode done
-        if done:
-            episode+=1
-            state = env.reset()#
-            state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
-            
-            # Logging
-            episode_reward = training_info.log["episode_reward"][-1]
-            episode_length = training_info.log["episode_length"][-1]
-            
-            value_loss = training_info.log["value_loss1"][-1] if training_info.log["value_loss1"] else 0
-            print(f"Step {step}: Reward={episode_reward:.1f}, Length={episode_length}, "
-                  f"MaxReward={training_info.max_episode_reward:.1f}, ValueLoss={value_loss:.4f}")
-            
-            # Save best model
-            if episode_reward >= training_info.max_episode_reward:
-                save_path = os.path.join(args.output_dir, "best_model.pth")
-                # torch.save({
-                #     'actor': agent.Mu.state_dict(),
-                #     'critic1': agent.Q1.state_dict(), 
-                #     'critic2': agent.Q2.state_dict(),
-                #     'episode_reward': episode_reward
-                # }, save_path)
-                torch.save(agent.Mu.state_dict(), save_path)
-        
-        # Training after warmup
-        if step > args.warmup_steps and step % args.update_frequency == 0:
-            # Sample batch
-            s_batch, a_batch, r_batch, d_batch, ns_batch = replay_buffer.sample(args.batch_size)
-            
-            # Convert to tensors and move to device
-            s_batch = torch.tensor(np.array(s_batch), dtype=torch.float32).to(args.device)
-            a_batch = torch.tensor(np.array(a_batch), dtype=torch.float32).to(args.device)
-            r_batch = torch.tensor(np.array(r_batch), dtype=torch.float32).to(args.device)
-            d_batch = torch.tensor(np.array(d_batch), dtype=torch.float32).to(args.device)
-            ns_batch = torch.tensor(np.array(ns_batch), dtype=torch.float32).to(args.device)
-            
-            # Update critics
-            value_loss1, value_loss2 = agent.compute_value_loss(args, s_batch, a_batch, 
-                                                              r_batch, d_batch, ns_batch)
-            
-            Q1_optimizer.zero_grad()
-            value_loss1.backward()
-            Q1_optimizer.step()
-            
-            Q2_optimizer.zero_grad()
-            value_loss2.backward()
-            Q2_optimizer.step()
-            
-            training_info.log["value_loss1"].append(value_loss1.item())
-            training_info.log["value_loss2"].append(value_loss2.item())
-            
-            # Delayed policy updates
-            if step % args.policy_update_freq == 0:
-                policy_loss = agent.compute_policy_loss(s_batch)
-                Mu_optimizer.zero_grad()
-                policy_loss.backward()
-                Mu_optimizer.step()
-                
-                # Soft update target networks
-                agent.soft_update(args.tau)
-                
-                training_info.log["policy_loss"].append(policy_loss.item())
-        
-        # Logging and visualization
-        if step % args.log_interval == 0 and step > args.warmup_steps:
-            writer.add_scalar('Loss/Q1_Loss',value_loss1,episode)
-            writer.add_scalar('Loss/Q2_Loss',value_loss2,episode)
-            writer.add_scalar('Loss/Q2_Loss-Q1_Loss',value_loss2-value_loss1,episode)
-            writer.add_scalar('Reward/episode',episode_reward,episode)
-            # Plot losses
-            # if training_info.log["value_loss1"]:
-                # plt.figure(figsize=(12, 4))
-                
-                # plt.subplot(1, 2, 1)
-                # plt.plot(training_info.log["value_loss1"], label='Q1 Loss')
-                # plt.plot(training_info.log["value_loss2"], label='Q2 Loss')
-                # plt.xlabel('Training Steps')
-                # plt.ylabel('Value Loss')
-                # plt.legend()
-                # plt.title('Critic Losses')
-                
-                # plt.subplot(1, 2, 2)
-                # plt.plot(training_info.log["episode_reward"])
-                # plt.xlabel('Episode')
-                # plt.ylabel('Episode Reward')
-                # plt.title('Training Progress')
-                
-                # plt.tight_layout()
-                # plt.savefig(f"{args.output_dir}/training_progress.png", dpi=150, bbox_inches="tight")
-                # plt.close()
-    
-    # Save final model
-    final_save_path = os.path.join(args.output_dir, "final_model.pth")
-    # torch.save({
-    #     'actor': agent.Mu.state_dict(),
-    #     'critic1': agent.Q1.state_dict(),
-    #     'critic2': agent.Q2.state_dict(),
-    #     'training_info': training_info.log
-    # }, final_save_path)
-    torch.save(agent.Mu.state_dict(), final_save_path)
-    
-    print(f"Training completed. Models saved to {args.output_dir}")
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
+class Actor(nn.Module):
+    """TD3 Actor: (State + Goal) -> Action"""
+    def __init__(self, state_dim, goal_dim, action_dim, max_action):
+        super(Actor, self).__init__()
+        self.fc1 = nn.Linear(state_dim + goal_dim, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, action_dim)
+        self.max_action = max_action
 
-def evaluate_htd3(args, env, agent):
-    """Evaluate the trained HTD3 agent"""
-    
-    # Load trained model
-    model_path = os.path.join(args.output_dir, "best_model.pth")
-    if not os.path.exists(model_path):
-        model_path = os.path.join(args.output_dir, "final_model.pth")
-    
-    state_dict = torch.load(model_path, map_location=args.device)
-    agent.Mu.load_state_dict(state_dict)
-    
-    print("Loaded trained model for evaluation")
-    eval_dir = os.path.join(args.output_dir, "evaluation_results")
-    os.makedirs(eval_dir, exist_ok=True)
-    
-    # Evaluation loop
-    episode_rewards = []
-    episode_lengths = []
-    episod_Usv_pathLengths = []
-    episod_Total_pathLengths = []
-    collision_counts = []
-    
-    for episode in range(args.eval_episodes):
-        # Reset environment with optional new seed for each episode
-        if args.randomize_eval:
-            eval_seed = args.seed + episode if args.seed is not None else None
-            state = env.reset(seed=eval_seed)
-        else:
-            state = env.reset()
-        
-        state_tensor = torch.tensor(state, dtype=torch.float32).to(args.device)
-        
-        csv_file = os.path.join(eval_dir, f"usv_path_episode_{episode+1}.csv")
-        print(f"Recording points to {csv_file}")
-        if os.path.exists(csv_file):
-            os.remove(csv_file)
-            
-        episode_reward = 0
-        episode_length = 0
-        done = False
-        collision_count = 0
-        
-        episod_Usv_pathLength = 0.0
-        episod_Total_pathLength = 0.0
-        
-        last_position = np.array([env.usv.x, env.usv.y])
-        
-        while not done and episode_length < args.max_episode_steps:
-            with torch.no_grad():
-                action_tensor = agent.get_action(state_tensor.unsqueeze(0), explore=True)
-                action = action_tensor.cpu().numpy()[0]
-                
-            next_state, reward, terminated, truncated, info = env.step(action)
-            
-            # Track collisions
-            if info.get("collision", False):
-                collision_count += 1
-            
-            current_position = np.array([env.usv.x, env.usv.y])
-            
-            # Get current heading for recording
-            current_heading = env.usv.heading
-            env.record_points(current_position, csv_file, heading=current_heading)
-            
-            step_distance = np.linalg.norm(current_position - last_position)
-            episod_Usv_pathLength += step_distance
-            episod_Total_pathLength += step_distance
-            last_position = current_position
-            
-            done = terminated or truncated
-            
-            state_tensor = torch.tensor(next_state, dtype=torch.float32).to(args.device)
-            episode_reward += reward
-            episode_length += 1
-        
-        episode_rewards.append(episode_reward)
-        episode_lengths.append(episode_length)
-        episod_Usv_pathLengths.append(episod_Usv_pathLength)
-        episod_Total_pathLengths.append(episod_Total_pathLength)
-        collision_counts.append(collision_count)
+    def forward(self, state, goal):
+        x = torch.cat([state, goal], dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        return self.max_action * torch.tanh(self.fc3(x))
 
-        env.close_writer()
+class Critic(nn.Module):
+    """TD3 Critic: (State + Goal + Action) -> Q-value"""
+    def __init__(self, state_dim, goal_dim, action_dim):
+        super(Critic, self).__init__()
+        # Q1 architecture
+        self.l1 = nn.Linear(state_dim + goal_dim + action_dim, 256)
+        self.l2 = nn.Linear(256, 256)
+        self.l3 = nn.Linear(256, 1)
+
+        # Q2 architecture
+        self.l4 = nn.Linear(state_dim + goal_dim + action_dim, 256)
+        self.l5 = nn.Linear(256, 256)
+        self.l6 = nn.Linear(256, 1)
+
+    def forward(self, state, goal, action):
+        sa = torch.cat([state, goal, action], 1)
+
+        q1 = F.relu(self.l1(sa))
+        q1 = F.relu(self.l2(q1))
+        q1 = self.l3(q1)
+
+        q2 = F.relu(self.l4(sa))
+        q2 = F.relu(self.l5(q2))
+        q2 = self.l6(q2)
+        return q1, q2
+
+    def Q1(self, state, goal, action):
+        sa = torch.cat([state, goal, action], 1)
+        q1 = F.relu(self.l1(sa))
+        q1 = F.relu(self.l2(q1))
+        q1 = self.l3(q1)
+        return q1
+
+# --- Agents ---
+
+class SelectorAgent:
+    def __init__(self, state_dim, num_targets, lr=1e-3, gamma=0.99, epsilon=0.1):
+        self.q_net = SelectorQNet(state_dim, num_targets).to(device)
+        self.target_q_net = SelectorQNet(state_dim, num_targets).to(device)
+        self.target_q_net.load_state_dict(self.q_net.state_dict())
+        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr)
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.num_targets = num_targets
+
+    def select_action(self, state, valid_mask=None, eval=False):
+        """
+        状态：numpy 数组
+        有效掩码：布尔数组（如果目标可用/未访问则为 True）
+        """
+        if not eval and random.random() < self.epsilon:
+            if valid_mask is not None:
+                valid_indices = np.where(valid_mask)[0]
+                if len(valid_indices) > 0:
+                    return np.random.choice(valid_indices)
+            return np.random.randint(0, self.num_targets)
         
-        print(f"Evaluation Episode {episode + 1}: Reward={episode_reward:.1f}, Length={episode_length}, "
-              f"UsvPathLength={episod_Usv_pathLength:.2f}, TotalPathLength={episod_Total_pathLength:.2f}, "
-              f"Collisions={collision_count}")
+        state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+        with torch.no_grad():
+            q_values = self.q_net(state_t).cpu().numpy().flatten()
+        
+        if valid_mask is not None:
+            # 用 -inf 屏蔽无效（已访问）的目标
+            q_values[~valid_mask.astype(bool)] = -1e9
+            
+        return np.argmax(q_values)
 
-        #每个回合都绘制并保存轨迹
-        env.draw_path(csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
-                    show_usv_shape=args.show_usv_shape,
-                    usv_interval=args.usv_interval)
-    
-    # Print evaluation results
-    if args.eval_episodes > 1:
-        avg_reward = np.mean(episode_rewards)
-        avg_length = np.mean(episode_lengths)
-        avg_Usv_pathLength = np.mean(episod_Usv_pathLengths)
-        avg_Total_pathLength = np.mean(episod_Total_pathLengths)
-        avg_collisions = np.mean(collision_counts)
-    
-        print(f"\nEvaluation Results:")
-        print(f"Average Reward: {avg_reward:.2f}")
-        print(f"Average Length: {avg_length:.2f}")
-        print(f"Average UsvPathLength: {avg_Usv_pathLength:.2f}")
-        print(f"Average TotalPathLength: {avg_Total_pathLength:.2f}")
-        print(f"Average Collisions: {avg_collisions:.2f}")
-    
-    # # Draw path with USV shapes 因为每次评估回合的随机种子都不一样，所以不可以在一张图中绘制所有轨迹了
-    # base_csv_file = os.path.join(eval_dir, "usv_path_episode_")
-    # env.draw_path(base_csv_file, ifshow=True, ifsave=True, savePath=eval_dir,
-    #               max_episode=args.eval_episodes, show_usv_shape=args.show_usv_shape,
-    #               usv_interval=args.usv_interval)
+    def train(self, replay_buffer, batch_size=64):
+        if len(replay_buffer) < batch_size:
+            return
+        
+        state, action, reward, next_state, done = replay_buffer.sample(batch_size)
 
+        with torch.no_grad():
+            next_q = self.target_q_net(next_state).max(1)[0].unsqueeze(1)
+            target_q = reward + (1 - done) * self.gamma * next_q
 
-def main():
-    """Main function for HTD3 training and evaluation"""
-    parser = argparse.ArgumentParser(description="HTD3 for Multi-objective Path Planning")
+        current_q = self.q_net(state).gather(1, action)
+        loss = F.mse_loss(current_q, target_q)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+    def update_target(self, tau=0.005):
+        for param, target_param in zip(self.q_net.parameters(), self.target_q_net.parameters()):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+
+class TD3Agent:
+    def __init__(self, state_dim, goal_dim, action_dim, max_action, lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005, policy_noise=0.2, noise_clip=0.5, policy_freq=2):
+        self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
+        self.actor_target = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
+        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
+
+        self.critic = Critic(state_dim, goal_dim, action_dim).to(device)
+        self.critic_target = Critic(state_dim, goal_dim, action_dim).to(device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
+
+        self.max_action = max_action
+        self.gamma = gamma
+        self.tau = tau
+        self.policy_noise = policy_noise
+        self.noise_clip = noise_clip
+        self.policy_freq = policy_freq
+        self.total_it = 0
+
+    def select_action(self, state, goal, noise=0.0):
+        state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
+        goal_t = torch.FloatTensor(goal).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            action = self.actor(state_t, goal_t).cpu().numpy().flatten()
+        
+        if noise > 0:
+            action = (action + np.random.normal(0, noise, size=action.shape)).clip(-self.max_action, self.max_action)
+        
+        return action
+
+    def train(self, replay_buffer, batch_size=100):
+        if len(replay_buffer) < batch_size:
+            return 0, 0
+
+        self.total_it += 1
+
+        # Sample replay buffer 
+        state, action, reward, next_state, done, desired_goal, achieved_goal = replay_buffer.sample(batch_size)
+
+        # 使用 desired_goal 进行训练（标准 HER 逻辑使用 desired_goal，但我们也可以将 achieved_goal 作为成功示例混合使用）
+        # 这里我们假设缓冲区已经包含经过 HER 处理的转换（重新标记的目标），或者我们可以在运行时处理。
+        # 为了简化，我们假设缓冲区存储 (s, a, r, s', d, g, ag) 并使用 g。
+        # 注意：在标准 HER 中，我们会采样一个批次，并在某些比例上将 g 替换为 ag 并重新计算奖励。
+        # 这里我们将实现一个简单版本：缓冲区存储经历。
+        # 如果我们想要 HER，应该在推入缓冲区之前进行重新标记，或者在这里进行。
+        # 为了在这个实现中简化，我们假设在推入缓冲区之前进行重新标记。
+        
+        with torch.no_grad():
+            noise = (torch.randn_like(action) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            
+            next_action = (self.actor_target(next_state, desired_goal) + noise).clamp(-self.max_action, self.max_action)
+
+            # Compute the target Q value
+            target_Q1, target_Q2 = self.critic_target(next_state, desired_goal, next_action)
+            target_Q = torch.min(target_Q1, target_Q2)
+            target_Q = reward + (1 - done) * self.gamma * target_Q
+
+        # Get current Q estimates
+        current_Q1, current_Q2 = self.critic(state, desired_goal, action)
+
+        # Compute critic loss
+        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+
+        # Optimize the critic
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        self.critic_optimizer.step()
+
+        actor_loss = 0
+        # Delayed policy updates
+        if self.total_it % self.policy_freq == 0:
+            # Compute actor losse
+            actor_loss = -self.critic.Q1(state, desired_goal, self.actor(state, desired_goal)).mean()
+            
+            # Optimize the actor 
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            self.actor_optimizer.step()
+
+            # Update the frozen target models
+            for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+
+            for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        
+        return critic_loss.item(), actor_loss if isinstance(actor_loss, int) else actor_loss.item()
+
+# --- Helper Functions ---
+
+def get_selector_state(obs_dict):
+    """Extract state for Selector: USV info + Targets info"""
+    # o_usv: 7, targets: 3*N
+    return np.concatenate([obs_dict['o_usv'], obs_dict['targets']])
+
+def get_upper_state(obs_dict):
+    """Extract state for Upper Actuator: USV info + Lidar"""
+    # o_usv: 7, o_detector: 13
+    return np.concatenate([obs_dict['o_usv'], obs_dict['o_detector']])
+
+def get_lower_state(obs_dict):
+    """Extract state for Lower Actuator: USV velocities"""
+    # o_usv: [x, y, u, v, r, sin, cos]
+    # We need [u, v, r] which are indices 2, 3, 4
+    return obs_dict['o_usv'][2:5]
+
+def get_target_pos(obs_dict, target_idx, num_targets):
+    """Get global position of the selected target"""
+    # targets: [x1, y1, s1, x2, y2, s2, ...]
+    # We need to denormalize if they are normalized. 
+    # In my_USV_Env, they are normalized by X_MAX, Y_MAX.
+    # But here we might want to work with normalized values or denormalized.
+    # Let's stick to normalized values for NN inputs, but we might need real values for distance calc.
+    # The env returns normalized values in 'targets'.
     
-    # Environment parameters
-    parser.add_argument("--env", default="MyUsvEnv", type=str, help="Environment name")
-    parser.add_argument("--max_action", default=1.0, type=float, help="Maximum action value")
-    
-    # New environment configuration parameters
-    parser.add_argument("--num_targets", default=3, type=int, help="Number of targets")
-    parser.add_argument("--num_obstacles", default=5, type=int, help="Number of obstacles")
-    parser.add_argument("--seed", default=2024, type=int, help="Random seed for environment generation")
-    parser.add_argument("--usv_length", default=3.0, type=float, help="USV length")
-    parser.add_argument("--usv_width", default=1.5, type=float, help="USV width")
-    parser.add_argument("--target_radius", default=3.0, type=float, help="Target area radius")
-    parser.add_argument("--use_random_shapes", action="store_true", default=True, help="Use random obstacle shapes")
-    parser.add_argument("--obstacle_radius_min", default=3.0, type=float, help="Minimum obstacle radius")
-    parser.add_argument("--obstacle_radius_max", default=10.0, type=float, help="Maximum obstacle radius")
-    
-    # Training parameters
-    parser.add_argument("--max_steps", default=100000, type=int, help="Total training steps")
-    parser.add_argument("--warmup_steps", default=5000, type=int, help="Random exploration steps")
-    parser.add_argument("--batch_size", default=64, type=int, help="Training batch size")
-    parser.add_argument("--buffer_size", default=100000, type=int, help="Replay buffer size")
-    parser.add_argument("--update_frequency", default=1, type=int, help="Training frequency")
-    parser.add_argument("--policy_update_freq", default=2, type=int, help="Policy update frequency")
-    
-    # Learning rates
-    parser.add_argument("--lr_actor", default=0.0005, type=float, help="Actor learning rate")
-    parser.add_argument("--lr_critic", default=0.0003, type=float, help="Critic learning rate")
-    
-    # Algorithm parameters
-    parser.add_argument("--gamma", default=0.99, type=float, help="Discount factor")
-    parser.add_argument("--tau", default=0.001, type=float, help="Target network update rate")
-    parser.add_argument("--policy_noise", default=0.2, type=float, help="Policy noise")
-    parser.add_argument("--noise_clip", default=0.5, type=float, help="Noise clipping")
-    parser.add_argument("--exploration_noise", default=0.1, type=float, help="Exploration noise")
-    
-    # Evaluation parameters
-    parser.add_argument("--eval_episodes", default=1, type=int, help="Evaluation episodes")
-    parser.add_argument("--max_episode_steps", default=1000, type=int, help="Max steps per episode")
-    parser.add_argument("--randomize_eval", action="store_true", help="Randomize environment for each eval episode")
-    parser.add_argument("--show_usv_shape", action="store_true", default=False, help="Show USV shape in path visualization")
-    parser.add_argument("--usv_interval", default=5, type=int, help="Interval for drawing USV shapes on path")
-    
-    # Logging and output
-    parser.add_argument("--log_interval", default=1000, type=int, help="Logging interval")
-    parser.add_argument("--output_dir", default="htd3_output", type=str, help="Output directory")
-    
-    # Mode selection
-    parser.add_argument("--do_train", action="store_true", help="Enable training")
-    parser.add_argument("--do_eval", action="store_true", help="Enable evaluation")
-    
-    args = parser.parse_args()
-    
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Set device
-    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {args.device}")
-    
-    # Set random seeds for reproducibility
-    if args.seed is not None:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        random.seed(args.seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(args.seed)
-    
-    # Initialize environment with new parameters
+    # Extract from obs_dict['targets']
+    base_idx = target_idx * 3
+    tx = obs_dict['targets'][base_idx]
+    ty = obs_dict['targets'][base_idx+1]
+    return np.array([tx, ty])
+
+def get_usv_pos(obs_dict):
+    """Get normalized USV position"""
+    return obs_dict['o_usv'][0:2]
+
+# --- Main HRL Loop ---
+
+def train_hrl(args):
+    # 1. 环境初始化
     env = MyUsvEnv(
         num_targets=args.num_targets,
         num_obstacles=args.num_obstacles,
@@ -549,41 +326,371 @@ def main():
         use_random_shapes=args.use_random_shapes
     )
     
-    # Print environment info
-    env_info = env.get_environment_info()
-    print(f"\nEnvironment Configuration:")
-    print(f"  Targets: {env_info['num_targets']}")
-    print(f"  Obstacles: {env_info['num_obstacles']}")
-    print(f"  Seed: {env_info['seed']}")
-    print(f"  Start Position: {env_info['start_pos']}")
-    print(f"  USV Size: {env_info['usv_size']}")
-    print()
+    # 状态维度
+    obs = env.reset()
+    selector_state_dim = get_selector_state(obs).shape[0]
+    upper_state_dim = get_upper_state(obs).shape[0]
+    lower_state_dim = get_lower_state(obs).shape[0]
+    
+    # 动作维度
+    selector_action_dim = args.num_targets
+    upper_action_dim = 2 # (dx, dy) 子目标
+    lower_action_dim = 2 # (throttle, rudder)
+    
+    # 目标维度
+    upper_goal_dim = 2 # 相对目标位置（dx, dy）
+    lower_goal_dim = 2 # 相对子目标位置 (dx, dy)
+    
+    # 2. 智能体初始化
+    selector = SelectorAgent(selector_state_dim, selector_action_dim, epsilon=args.epsilon_start)
+    upper_agent = TD3Agent(upper_state_dim, upper_goal_dim, upper_action_dim, max_action=args.subgoal_range)
+    lower_agent = TD3Agent(lower_state_dim, lower_goal_dim, lower_action_dim, max_action=1.0)
+    
+    # 3. 缓冲区设置
+    selector_buffer = ReplayBuffer(args.buffer_size)
+    upper_buffer = HER_ReplayBuffer(args.buffer_size)
+    lower_buffer = HER_ReplayBuffer(args.buffer_size)
+    
+    writer = SummaryWriter(f'htd3_output/runs/HRL_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}')
+    
+    global_step = 0
+    
+    for episode in range(args.max_episodes):
+        obs_dict = env.reset()
+        done = False
+        episode_reward = 0
+        
+        # 选择器选择一个高级目标
+        selector_state = get_selector_state(obs_dict)
+        
+        # 掩码访问目标
+        target_status = obs_dict['targets'][2::3] # 0: unvisited, 1: visited
+        valid_mask = (target_status == 0)
+        
+        # If all visited (shouldn't happen at start), reset
+        if not np.any(valid_mask):
+            continue
+            
+        target_idx = selector.select_action(selector_state, valid_mask)
+        
+        # 获取目标位置（归一化）
+        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
+        
+        # 选择器步骤循环
+        step_count = 0
+        while not done and step_count < args.max_steps:
+            # 1. 上层执行器：生成子目标
+            upper_state = get_upper_state(obs_dict)
+            usv_pos = get_usv_pos(obs_dict)
+            
+            # 计算上级代理的相对目标
+            g_des_rel = g_des_global - usv_pos
+            
+            # 上层动作：子目标（相对于USV）
+            # 我们将输出缩放到一个小范围内（例如，0.1标准化单位约等于10米）
+            g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=args.exploration_noise)
+            
+            # 2. 下层执行器：控制回路（k 步）
+            # 下部代理尝试达到 g_sub_rel。 
+            # 注意：g_sub_rel 是全局坐标系的相对向量？还是机体坐标系？
+            # 为简单起见，我们假设所有内容都是全局坐标系的相对向量（dx, dy）。
+            # 理想情况下，下部代理应在机体坐标系中工作，但为了与上部保持一致，我们暂且使用全局相对坐标。
+            
+            # 初始下层状态
+            lower_state = get_lower_state(obs_dict)
+            
+            # 执行下级代理 k 步
+            for k in range(args.lower_steps):
+                # 下层动作
+                # 下层代理的目标是 g_sub_rel。
+                # 然而，随着 USV 的移动，g_sub_rel（由上层生成的固定空间点）相对于 USV 会发生变化。
+                # 我们需要跟踪子目标的“全局”位置。
+                # g_sub_global = usv_pos_start   g_sub_rel_start
+                
+                if k == 0:
+                    g_sub_global = usv_pos + g_sub_rel
+                
+                # 当前相对子目标
+                curr_usv_pos = get_usv_pos(obs_dict)
+                curr_g_sub_rel = g_sub_global - curr_usv_pos
+                
+                lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)
+                
+                # Environment Step
+                next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)
+                
+                # Process Rewards
+                # Lower Reward: Distance to sub-goal
+                dist_to_sub = np.linalg.norm(curr_g_sub_rel)
+                r_low = -dist_to_sub - 0.1 * np.linalg.norm(lower_action)**2
+                
+                # Store Lower Transition
+                next_lower_state = get_lower_state(next_obs_dict)
+                # HER: Store with original goal
+                lower_buffer.push(lower_state, lower_action, r_low, next_lower_state, terminated, curr_g_sub_rel, curr_g_sub_rel) # Achieved goal approx same as state change? Simplified.
+                
+                # Update State
+                obs_dict = next_obs_dict
+                lower_state = next_lower_state
+                episode_reward += env_reward
+                global_step += 1
+                
+                # Check Dynamic Goal Detection (Algorithm 2.2)
+                # If we reached ANY target, we should credit Selector
+                reached_indices = info.get('reached_targets', [])
+                if len(reached_indices) > 0:
+                    for reached_idx in reached_indices:
+                        # If we reached the intended target
+                        if reached_idx == target_idx:
+                            # Selector Success
+                            selector_reward = 1.0
+                            selector_done = False # Not necessarily done with episode, but done with this sub-task? 
+                            # Actually Selector is high level, one step per target choice.
+                            # If target reached, Selector step is done.
+                            pass
+                        else:
+                            # Unexpected success (Relabeling)
+                            # Store a transition for Selector as if it had chosen reached_idx
+                            # s_start, action=reached_idx, r=1.0, s_next
+                            selector_buffer.push(selector_state, reached_idx, 1.0, get_selector_state(obs_dict), False)
+                            print(f"Relabeling: Selector accidentally reached target {reached_idx}")
+                
+                if terminated or truncated:
+                    done = True
+                    break
+            
+            # End of Lower Loop (Upper Step Done)
+            
+            # Upper Reward
+            # Did we reach g_des? Or did we make progress?
+            # PDF Eq 2-12: -dist(usv+sub, g_des) - collision
+            # Here we use actual new pos
+            new_usv_pos = get_usv_pos(obs_dict)
+            dist_to_des = np.linalg.norm(g_des_global - new_usv_pos)
+            
+            collision = info.get('collision', False)
+            r_up = -dist_to_des - (10.0 if collision else 0.0)
+            
+            # Store Upper Transition
+            next_upper_state = get_upper_state(obs_dict)
+            # HER for Upper: Achieved goal is actual displacement
+            actual_displacement = new_usv_pos - usv_pos
+            upper_buffer.push(upper_state, g_sub_rel, r_up, next_upper_state, done, g_des_rel, actual_displacement)
+            
+            # Selector Reward (Sparse)
+            # If target reached, r=1. Else r=-0.1 or similar
+            # Check if target_idx is in reached_targets of the *last* step or any step in the loop?
+            # We check status from obs_dict
+            is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
+            
+            if is_reached:
+                r_sel = 1.0
+                # Selector step finished
+                selector_buffer.push(selector_state, target_idx, r_sel, get_selector_state(obs_dict), False)
+                
+                # Pick new target if not all done
+                target_status = obs_dict['targets'][2::3]
+                valid_mask = (target_status == 0)
+                if np.any(valid_mask):
+                    selector_state = get_selector_state(obs_dict)
+                    target_idx = selector.select_action(selector_state, valid_mask)
+                    g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
+                else:
+                    # All done
+                    done = True
+            elif done:
+                # Failed or Collision
+                r_sel = -1.0
+                selector_buffer.push(selector_state, target_idx, r_sel, get_selector_state(obs_dict), True)
+            else:
+                # Continue towards same target
+                pass
+            
+            step_count += 1
+            
+            # Training
+            if global_step > args.warmup_steps:
+                selector.train(selector_buffer, args.batch_size)
+                upper_agent.train(upper_buffer, args.batch_size)
+                lower_agent.train(lower_buffer, args.batch_size)
+                
+                # Decay epsilon
+                selector.epsilon = max(args.epsilon_end, selector.epsilon * args.epsilon_decay)
 
-    # Initialize agent
-    sample_state = env.reset()
-    flat_dim = sample_state.shape[0]
-    observation_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32)
-    
-    print(f"State dimension: {flat_dim}")
-    print(f"Action dimension: {env.action_space.shape[0]}")
-    
-    agent = HTD3(
-        dim_state=observation_space.shape[0],
-        dim_action=env.action_space.shape[0],
-        max_action=args.max_action,
-        num_targets=args.num_targets
-    ).to(args.device)
-    
-    # Training
-    if args.do_train:
-        print("\nStarting HTD3 training...")
-        train_htd3(args, env, agent)
-    
-    # Evaluation
-    if args.do_eval:
-        print("\nStarting HTD3 evaluation...")
-        evaluate_htd3(args, env, agent)
+        print(f"Episode {episode}: Reward {episode_reward:.2f}, Steps {global_step}")
+        writer.add_scalar('Reward/Episode', episode_reward, episode)
 
+    # Save Models
+    os.makedirs(args.output_dir, exist_ok=True)
+    torch.save(selector.q_net.state_dict(), os.path.join(args.output_dir, "selector.pth"))
+    torch.save(upper_agent.actor.state_dict(), os.path.join(args.output_dir, "upper_actor.pth"))
+    torch.save(lower_agent.actor.state_dict(), os.path.join(args.output_dir, "lower_actor.pth"))
+    print("Training Complete.")
+
+def evaluate_hrl(args):
+    print("Starting Evaluation...")
+    # 1. Environment Setup
+    env = MyUsvEnv(
+        num_targets=args.num_targets,
+        num_obstacles=args.num_obstacles,
+        seed=args.seed,
+        record_flag=False, # We will manually record
+        usv_length=args.usv_length,
+        usv_width=args.usv_width,
+        target_radius=args.target_radius,
+        obstacle_radius_range=(args.obstacle_radius_min, args.obstacle_radius_max),
+        use_random_shapes=args.use_random_shapes
+    )
+    
+    # Dimensions
+    obs = env.reset()
+    selector_state_dim = get_selector_state(obs).shape[0]
+    upper_state_dim = get_upper_state(obs).shape[0]
+    lower_state_dim = get_lower_state(obs).shape[0]
+    
+    # Action Dims
+    selector_action_dim = args.num_targets
+    upper_action_dim = 2
+    lower_action_dim = 2
+    
+    # Goal Dims
+    upper_goal_dim = 2
+    lower_goal_dim = 2
+    
+    # 2. Agents Setup & Load Models
+    selector = SelectorAgent(selector_state_dim, selector_action_dim)
+    upper_agent = TD3Agent(upper_state_dim, upper_goal_dim, upper_action_dim, max_action=args.subgoal_range)
+    lower_agent = TD3Agent(lower_state_dim, lower_goal_dim, lower_action_dim, max_action=1.0)
+    
+    model_dir = args.output_dir
+    if os.path.exists(os.path.join(model_dir, "selector.pth")):
+        selector.q_net.load_state_dict(torch.load(os.path.join(model_dir, "selector.pth"), map_location=device))
+        upper_agent.actor.load_state_dict(torch.load(os.path.join(model_dir, "upper_actor.pth"), map_location=device))
+        lower_agent.actor.load_state_dict(torch.load(os.path.join(model_dir, "lower_actor.pth"), map_location=device))
+        print("Models loaded successfully.")
+    else:
+        print("No models found, running with random weights.")
+
+    eval_dir = os.path.join(args.output_dir, "evaluation_results")
+    os.makedirs(eval_dir, exist_ok=True)
+
+    for episode in range(args.eval_episodes):
+        obs_dict = env.reset()
+        done = False
+        episode_reward = 0
+        
+        csv_file = os.path.join(eval_dir, f"hrl_path_episode_{episode+1}.csv")
+        if os.path.exists(csv_file):
+            os.remove(csv_file)
+        
+        # Selector chooses a high-level goal
+        selector_state = get_selector_state(obs_dict)
+        target_status = obs_dict['targets'][2::3]
+        valid_mask = (target_status == 0)
+        
+        if not np.any(valid_mask):
+            continue
+            
+        target_idx = selector.select_action(selector_state, valid_mask, eval=True)
+        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
+        
+        print(f"Episode {episode}: Selector chose Target {target_idx}")
+        
+        step_count = 0
+        while not done and step_count < args.max_steps:
+            upper_state = get_upper_state(obs_dict)
+            usv_pos = get_usv_pos(obs_dict)
+            g_des_rel = g_des_global - usv_pos
+            
+            # Upper Action
+            g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=0.0)
+            
+            # Lower Loop
+            for k in range(args.lower_steps):
+                if k == 0:
+                    g_sub_global = usv_pos + g_sub_rel
+                
+                lower_state = get_lower_state(obs_dict)
+                curr_usv_pos = get_usv_pos(obs_dict)
+                curr_g_sub_rel = g_sub_global - curr_usv_pos
+                
+                lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=0.0)
+                
+                next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)
+                
+                # Record Path
+                env.record_points(np.array([env.usv.x, env.usv.y]), csv_file)
+                
+                obs_dict = next_obs_dict
+                episode_reward += env_reward
+                
+                # Check if target reached
+                is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
+                
+                if is_reached:
+                    print(f"  Target {target_idx} reached!")
+                    target_status = obs_dict['targets'][2::3]
+                    valid_mask = (target_status == 0)
+                    if np.any(valid_mask):
+                        selector_state = get_selector_state(obs_dict)
+                        target_idx = selector.select_action(selector_state, valid_mask, eval=True)
+                        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
+                        print(f"  Selector chose new Target {target_idx}")
+                        # Break lower loop to let Upper generate new subgoal for new target
+                        break
+                    else:
+                        done = True
+                        break
+                
+                if terminated or truncated:
+                    done = True
+                    break
+            
+            step_count += 1
+            
+        print(f"Episode {episode} finished. Reward: {episode_reward:.2f}")
+        env.close_writer()
+        
+        # Draw path
+        env.draw_path(csv_file, ifshow=False, ifsave=True, savePath=eval_dir)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num_targets", default=3, type=int)
+    parser.add_argument("--num_obstacles", default=5, type=int)
+    parser.add_argument("--seed", default=2024, type=int)
+    parser.add_argument("--usv_length", default=3.0, type=float)
+    parser.add_argument("--usv_width", default=1.5, type=float)
+    parser.add_argument("--target_radius", default=3.0, type=float)
+    parser.add_argument("--obstacle_radius_min", default=3.0, type=float)
+    parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
+    parser.add_argument("--use_random_shapes", action="store_true", default=True)
+    
+    parser.add_argument("--max_episodes", default=500, type=int)
+    parser.add_argument("--max_steps", default=200, type=int, help="Max Upper steps per episode")
+    parser.add_argument("--lower_steps", default=10, type=int, help="Lower steps per Upper step")
+    parser.add_argument("--batch_size", default=128, type=int)
+    parser.add_argument("--buffer_size", default=50000, type=int)
+    parser.add_argument("--warmup_steps", default=1000, type=int)
+    
+    parser.add_argument("--epsilon_start", default=1.0, type=float)
+    parser.add_argument("--epsilon_end", default=0.1, type=float)
+    parser.add_argument("--epsilon_decay", default=0.995, type=float)
+    parser.add_argument("--exploration_noise", default=0.1, type=float)
+    
+    parser.add_argument("--subgoal_range", default=0.2, type=float, help="Range of sub-goal (normalized)")
+    
+    parser.add_argument("--output_dir", default="hrl_output", type=str)
+    
+    # Mode
+    parser.add_argument("--do_train", action="store_true")
+    parser.add_argument("--do_eval", action="store_true")
+    parser.add_argument("--eval_episodes", default=5, type=int)
+    
+    args = parser.parse_args()
+    
+    if args.do_train:
+        train_hrl(args)
+    
+    if args.do_eval:
+        evaluate_hrl(args)

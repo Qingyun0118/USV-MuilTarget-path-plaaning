@@ -310,6 +310,58 @@ def get_usv_pos(obs_dict):
     """Get normalized USV position"""
     return obs_dict['o_usv'][0:2]
 
+def check_subgoal_collision(usv_pos, sub_goal_rel, obstacles, margin=2.0):  
+    """  
+    检查生成的子目标是否落在障碍物膨胀区域内 (用于 Upper Reward 计算)  
+    usv_pos: [x, y]  
+    sub_goal_rel: [dx, dy]  
+    """  
+    # 计算子目标绝对坐标  
+    sub_goal_global = usv_pos + sub_goal_rel  
+    
+    # 简单的点碰撞检测 (可以根据 Obstacle 类的方法优化)  
+    # 这里假设 obstacles 是 MyUsvEnv 中的对象列表  
+    for obs in obstacles:  
+        # 使用障碍物的安全区域 (safety_zone) 进行判断  
+        if obs.is_point_in_safety_zone(sub_goal_global):  
+            return True  
+    return False  
+
+def calc_upper_reward(usv_pos, sub_goal_rel, g_des_global, obstacles):  
+    """  
+    计算上层执行器奖励 (Eq 2-12)  
+    R_up = -alpha * dist(current + sub, final) - beta * Collision  
+    """  
+    alpha = 1.0  
+    beta = 10.0  
+    
+    # 预测的下一步位置 (假设完美执行)  
+    predicted_pos = usv_pos + sub_goal_rel  
+    
+    # 距离惩罚：子目标是否指向最终目标  
+    dist_to_final = np.linalg.norm(predicted_pos - g_des_global)  
+    
+    # 碰撞惩罚  
+    is_collision = check_subgoal_collision(usv_pos, sub_goal_rel, obstacles)  
+    
+    reward = -alpha * dist_to_final  
+    if is_collision:  
+        reward -= beta  
+        
+    return reward  
+
+def calc_lower_reward(current_pos, target_sub_global, action):  
+    """  
+    计算下层执行器奖励 (Eq 2-13)  
+    R_low = -||p - g_sub|| - lambda * ||action||^2  
+    """  
+    dist = np.linalg.norm(current_pos - target_sub_global)  
+    # 动作平滑惩罚 (lambda)  
+    action_penalty = 0.1 * np.linalg.norm(action)**2  
+    
+    # 这里的奖励是密集的距离奖励  
+    return -dist - action_penalty  
+
 # --- Main HRL Loop ---
 
 def train_hrl(args):
@@ -325,13 +377,27 @@ def train_hrl(args):
         obstacle_radius_range=(args.obstacle_radius_min, args.obstacle_radius_max),
         use_random_shapes=args.use_random_shapes
     )
-    
+
+    # 显示环境信息
+    inf = env.get_environment_info()
+    print(f"目标数量: {inf['num_targets']}")
+    print(f"障碍物数量: {inf['num_obstacles']}")
+    print(f"随机种子: {inf['seed']}")
+    print(f"起始位置: {inf['start_pos']}")
+    print(f"USV尺寸: {inf['usv_size']}")
+    print("\n目标位置:")
+    for i, t in enumerate(inf['targets']):
+        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
+    print("\n障碍物信息:")
+    for i, o in enumerate(inf['obstacles']):
+        print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
+
     # 状态维度
     obs = env.reset()
     selector_state_dim = get_selector_state(obs).shape[0]
     upper_state_dim = get_upper_state(obs).shape[0]
     lower_state_dim = get_lower_state(obs).shape[0]
-    
+    print(obs)
     # 动作维度
     selector_action_dim = args.num_targets
     upper_action_dim = 2 # (dx, dy) 子目标
@@ -355,169 +421,175 @@ def train_hrl(args):
     
     global_step = 0
     
-    for episode in range(args.max_episodes):
-        obs_dict = env.reset()
-        done = False
-        episode_reward = 0
+    for episode in range(args.max_episodes):  
+        obs_dict = env.reset()  
+        usv_pos = get_usv_pos(obs_dict)  
         
-        # 选择器选择一个高级目标
-        selector_state = get_selector_state(obs_dict)
+        # 记录 Episode 开始时的未访问目标  
+        target_status = obs_dict['targets'][2::3] # 0: unvisited  
+        valid_mask = (target_status == 0)  
+        print('目标掩码：',valid_mask)
+        episode_reward = 0  
+        done = False  
         
-        # 掩码访问目标
-        target_status = obs_dict['targets'][2::3] # 0: unvisited, 1: visited
-        valid_mask = (target_status == 0)
-        
-        # If all visited (shouldn't happen at start), reset
-        if not np.any(valid_mask):
-            continue
+        # -------------------------------------------------  
+        # Outer Loop: Selector (选择目标)  
+        # -------------------------------------------------  
+        while not done and np.any(valid_mask):  
+            selector_state = get_selector_state(obs_dict)  
             
-        target_idx = selector.select_action(selector_state, valid_mask)
-        
-        # 获取目标位置（归一化）
-        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
-        
-        # 选择器步骤循环
-        step_count = 0
-        while not done and step_count < args.max_steps:
-            # 1. 上层执行器：生成子目标
-            upper_state = get_upper_state(obs_dict)
-            usv_pos = get_usv_pos(obs_dict)
+            # Selector 选择一个目标索引 k  
+            target_idx = selector.select_action(selector_state, valid_mask)  
+            g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)  
+            print('决策器选择的目标：{}，目标位置：{}'.format(target_idx, g_des_global*100))
+            # Selector 的单步奖励累积（直到达到这个目标或超时）  
+            selector_step_reward = 0  
+            selector_done = False  
             
-            # 计算上级代理的相对目标
-            g_des_rel = g_des_global - usv_pos
+            # 记录 Selector 开始时的状态用于存储  
+            selector_start_state = selector_state  
+            selector_start_pos = usv_pos  
             
-            # 上层动作：子目标（相对于USV）
-            # 我们将输出缩放到一个小范围内（例如，0.1标准化单位约等于10米）
-            g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=args.exploration_noise)
+            # -------------------------------------------------  
+            # Middle Loop: Upper Actuator (生成子目标)  
+            # -------------------------------------------------  
+            # 限制 Upper Actuator 在一定步数内尝试到达 Selector 的目标  
+            upper_steps_limit = args.max_steps // args.num_targets   
             
-            # 2. 下层执行器：控制回路（k 步）
-            # 下部代理尝试达到 g_sub_rel。 
-            # 注意：g_sub_rel 是全局坐标系的相对向量？还是机体坐标系？
-            # 为简单起见，我们假设所有内容都是全局坐标系的相对向量（dx, dy）。
-            # 理想情况下，下部代理应在机体坐标系中工作，但为了与上部保持一致，我们暂且使用全局相对坐标。
-            
-            # 初始下层状态
-            lower_state = get_lower_state(obs_dict)
-            
-            # 执行下级代理 k 步
-            for k in range(args.lower_steps):
-                # 下层动作
-                # 下层代理的目标是 g_sub_rel。
-                # 然而，随着 USV 的移动，g_sub_rel（由上层生成的固定空间点）相对于 USV 会发生变化。
-                # 我们需要跟踪子目标的“全局”位置。
-                # g_sub_global = usv_pos_start   g_sub_rel_start
+            for u_step in range(upper_steps_limit):  
+                upper_state = get_upper_state(obs_dict)  
+                usv_pos = get_usv_pos(obs_dict)  
                 
-                if k == 0:
-                    g_sub_global = usv_pos + g_sub_rel
+                # 计算相对最终目标的向量 (Obs for Upper)  
+                g_des_rel = g_des_global - usv_pos  
                 
-                # 当前相对子目标
-                curr_usv_pos = get_usv_pos(obs_dict)
-                curr_g_sub_rel = g_sub_global - curr_usv_pos
+                # Upper 选择动作：相对子目标 (dx, dy)  
+                g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=args.exploration_noise)  
+                # print('执行器上层选择的子目标相对usv位置：{}'.format(g_sub_rel))
+                # 计算 Upper 的奖励 (基于生成的子目标质量，不需要等下层执行完)  
+                r_up = calc_upper_reward(usv_pos, g_sub_rel, g_des_global, env.obstacles)  
                 
-                lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)
-                
-                # Environment Step
-                next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)
-                
-                # Process Rewards
-                # Lower Reward: Distance to sub-goal
-                dist_to_sub = np.linalg.norm(curr_g_sub_rel)
-                r_low = -dist_to_sub - 0.1 * np.linalg.norm(lower_action)**2
-                
-                # Store Lower Transition
-                next_lower_state = get_lower_state(next_obs_dict)
-                # HER: Store with original goal
-                lower_buffer.push(lower_state, lower_action, r_low, next_lower_state, terminated, curr_g_sub_rel, curr_g_sub_rel) # Achieved goal approx same as state change? Simplified.
-                
-                # Update State
-                obs_dict = next_obs_dict
-                lower_state = next_lower_state
-                episode_reward += env_reward
-                global_step += 1
-                
-                # Check Dynamic Goal Detection (Algorithm 2.2)
-                # If we reached ANY target, we should credit Selector
-                reached_indices = info.get('reached_targets', [])
-                if len(reached_indices) > 0:
-                    for reached_idx in reached_indices:
-                        # If we reached the intended target
-                        if reached_idx == target_idx:
-                            # Selector Success
-                            selector_reward = 1.0
-                            selector_done = False # Not necessarily done with episode, but done with this sub-task? 
-                            # Actually Selector is high level, one step per target choice.
-                            # If target reached, Selector step is done.
-                            pass
-                        else:
-                            # Unexpected success (Relabeling)
-                            # Store a transition for Selector as if it had chosen reached_idx
-                            # s_start, action=reached_idx, r=1.0, s_next
-                            selector_buffer.push(selector_state, reached_idx, 1.0, get_selector_state(obs_dict), False)
-                            print(f"Relabeling: Selector accidentally reached target {reached_idx}")
-                
-                if terminated or truncated:
-                    done = True
-                    break
-            
-            # End of Lower Loop (Upper Step Done)
-            
-            # Upper Reward
-            # Did we reach g_des? Or did we make progress?
-            # PDF Eq 2-12: -dist(usv+sub, g_des) - collision
-            # Here we use actual new pos
-            new_usv_pos = get_usv_pos(obs_dict)
-            dist_to_des = np.linalg.norm(g_des_global - new_usv_pos)
-            
-            collision = info.get('collision', False)
-            r_up = -dist_to_des - (10.0 if collision else 0.0)
-            
-            # Store Upper Transition
-            next_upper_state = get_upper_state(obs_dict)
-            # HER for Upper: Achieved goal is actual displacement
-            actual_displacement = new_usv_pos - usv_pos
-            upper_buffer.push(upper_state, g_sub_rel, r_up, next_upper_state, done, g_des_rel, actual_displacement)
-            
-            # Selector Reward (Sparse)
-            # If target reached, r=1. Else r=-0.1 or similar
-            # Check if target_idx is in reached_targets of the *last* step or any step in the loop?
-            # We check status from obs_dict
-            is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
-            
-            if is_reached:
-                r_sel = 1.0
-                # Selector step finished
-                selector_buffer.push(selector_state, target_idx, r_sel, get_selector_state(obs_dict), False)
-                
-                # Pick new target if not all done
-                target_status = obs_dict['targets'][2::3]
-                valid_mask = (target_status == 0)
-                if np.any(valid_mask):
-                    selector_state = get_selector_state(obs_dict)
-                    target_idx = selector.select_action(selector_state, valid_mask)
-                    g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
-                else:
-                    # All done
-                    done = True
-            elif done:
-                # Failed or Collision
-                r_sel = -1.0
-                selector_buffer.push(selector_state, target_idx, r_sel, get_selector_state(obs_dict), True)
-            else:
-                # Continue towards same target
-                pass
-            
-            step_count += 1
-            
-            # Training
-            if global_step > args.warmup_steps:
-                selector.train(selector_buffer, args.batch_size)
-                upper_agent.train(upper_buffer, args.batch_size)
-                lower_agent.train(lower_buffer, args.batch_size)
-                
-                # Decay epsilon
-                selector.epsilon = max(args.epsilon_end, selector.epsilon * args.epsilon_decay)
+                # 子目标的全局坐标 (用于给 Lower 追踪)  
+                g_sub_global = usv_pos + g_sub_rel  
+                print('执行器上层选择的子目标绝对位置：{}'.format(g_sub_global))  
+                # -------------------------------------------------  
+                # Inner Loop: Lower Actuator (动力学控制)  
+                # -------------------------------------------------  
+                # 下层尝试在 k 步内通过底层控制到达 g_sub_global  
+                for l_step in range(args.lower_steps):  
+                    lower_state = get_lower_state(obs_dict)  
+                    curr_usv_pos = get_usv_pos(obs_dict)  
+                    
+                    # Lower 的目标是相对于当前位置的子目标向量  
+                    curr_g_sub_rel = g_sub_global - curr_usv_pos  
+                    
+                    # Lower 选择动作：[推力, 舵角]  
+                    lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)  
+                    
+                    # 环境交互  
+                    next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)  
+                    next_usv_pos = get_usv_pos(next_obs_dict)  
+                    
+                    # Lower 奖励计算  
+                    r_low = calc_lower_reward(curr_usv_pos, g_sub_global, lower_action)  
+                    
+                    # 存储 Lower 经验 (HER 风格: 状态, 动作, 奖励, 下一状态, Done, 期望目标, 实际达成)  
+                    # 注意：Lower 的 Goal 是相对位移  
+                    actual_move = next_usv_pos - curr_usv_pos  
+                    lower_buffer.push(  
+                        lower_state, lower_action, r_low, get_lower_state(next_obs_dict),   
+                        terminated, curr_g_sub_rel, actual_move  
+                    )  
+                    
+                    # 状态更新  
+                    obs_dict = next_obs_dict  
+                    usv_pos = next_usv_pos  
+                    episode_reward += env_reward  
+                    global_step += 1  
+                    
+                    # === 关键：动态目标检测 (Algorithm 2.2) ===  
+                    reached_indices = info.get('reached_targets', [])  
+                    
+                    if len(reached_indices) > 0:  
+                        for reached_idx in reached_indices:  
+                            # 1. 正常情况：到达了 Selector 指定的目标  
+                            if reached_idx == target_idx:  
+                                print(f"Selector Success: Reached target {target_idx}")  
+                                selector_step_reward = 1.0  
+                                selector_done = True # Selector 的这步决策完成了  
+                            
+                            # 2. 意外惊喜 (Relabeling)：到达了其他未访问的目标  
+                            elif obs_dict['targets'][reached_idx*3 + 2] == 1.0: # 确保是刚变成1的  
+                                print(f"**Relabeling**: Accidentally reached {reached_idx} while aiming for {target_idx}")  
+                                # 构造一条虚拟经验：就好像 Selector 当初选的是 reached_idx  
+                                # State: selector_start_state  
+                                # Action: reached_idx  
+                                # Reward: 1.0 (成功)  
+                                # Next State: get_selector_state(next_obs_dict)  
+                                selector_buffer.push(  
+                                    selector_start_state, reached_idx, 1.0,   
+                                    get_selector_state(next_obs_dict), False  
+                                )  
+                                # 注意：如果是意外到达，不结束当前对 target_idx 的追求，  
+                                # 除非 target_idx 也在 reached_indices 里，或者策略要求重新规划  
+                                # 这里我们选择让 Selector 重新规划（跳出 Upper/Lower 循环）  
+                                selector_done = True   
+                    
+                    # 训练 Lower Agent  
+                    if len(lower_buffer) > args.batch_size:  
+                        lower_agent.train(lower_buffer, args.batch_size)  
 
-        print(f"Episode {episode}: Reward {episode_reward:.2f}, Steps {global_step}")
+                    if terminated or truncated or selector_done:  
+                        break  
+                # --- End of Lower Loop ---  
+                
+                # 存储 Upper 经验  
+                next_upper_state = get_upper_state(obs_dict)  
+                # Upper 的实际达成是：最终位置 - 初始位置  
+                actual_upper_displacement = usv_pos - selector_start_pos # 近似  
+                
+                upper_buffer.push(  
+                    upper_state, g_sub_rel, r_up, next_upper_state,   
+                    selector_done, g_des_rel, actual_upper_displacement  
+                )  
+                
+                # 训练 Upper Agent  
+                if len(upper_buffer) > args.batch_size:  
+                    upper_agent.train(upper_buffer, args.batch_size)  
+                
+                if terminated or truncated or selector_done:  
+                    break  
+            # --- End of Upper Loop ---  
+            
+            # 存储 Selector 经验 (正常的)  
+            # 如果没成功到达，Reward 为 -1 (或者 0，取决于稀疏奖励设计)  
+            final_selector_reward = selector_step_reward if selector_done else -1.0  
+            next_selector_state = get_selector_state(obs_dict)  
+            
+            # 判断整个 Episode 是否结束（所有目标都访问了）  
+            target_status = obs_dict['targets'][2::3]  
+            valid_mask = (target_status == 0)  
+            all_done = not np.any(valid_mask)  
+              
+            selector_buffer.push(  
+                selector_start_state, target_idx, final_selector_reward,   
+                next_selector_state, all_done  
+            )  
+              
+            # 训练 Selector  
+            if len(selector_buffer) > args.batch_size:  
+                selector.train(selector_buffer, args.batch_size)  
+              
+            if terminated or truncated:  
+                done = True  
+                break  
+                  
+        # --- End of Selector Loop ---  
+          
+        # 衰减 Epsilon  
+        selector.epsilon = max(args.epsilon_end, selector.epsilon * args.epsilon_decay)  
+          
+        print(f"Episode {episode}: Total Reward {episode_reward:.2f}, Steps {global_step}, Collisions {info.get('collision', )}")  
         writer.add_scalar('Reward/Episode', episode_reward, episode)
 
     # Save Models
@@ -666,9 +738,9 @@ if __name__ == "__main__":
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
     parser.add_argument("--use_random_shapes", action="store_true", default=True)
     
-    parser.add_argument("--max_episodes", default=500, type=int)
+    parser.add_argument("--max_episodes", default=1000, type=int)
     parser.add_argument("--max_steps", default=200, type=int, help="Max Upper steps per episode")
-    parser.add_argument("--lower_steps", default=10, type=int, help="Lower steps per Upper step")
+    parser.add_argument("--lower_steps", default=2000, type=int, help="Lower steps per Upper step")
     parser.add_argument("--batch_size", default=128, type=int)
     parser.add_argument("--buffer_size", default=50000, type=int)
     parser.add_argument("--warmup_steps", default=1000, type=int)

@@ -224,7 +224,7 @@ ROU_MAX = 25.0
 
 # 默认参数
 DEFAULT_ROU_C = 1.5
-DEFAULT_ROU_S = 3.5
+DEFAULT_ROU_S = 1.5
 
 
 class MyUsvEnv():
@@ -725,34 +725,27 @@ class MyUsvEnv():
         
         return self._get_observation()
     
-    def calculate_reward(self, old_pos, action):
+    def calculate_reward(self, g_sub_global):
         """
-        计算奖励
-        注意：在HRL架构中，具体的奖励（如Selector的奖励、Actuator的奖励）
-        通常由Agent根据状态变化自行计算。
-        这里仅返回环境的基础事件奖励（如碰撞、到达任意目标）。
+        计算执行器下层的奖励
         """
         reward = 0.0
         terminated = False
         self.collision_flag = False
         self.reached_targets = []
-          
+        
         current_pos = np.array([self.usv.x, self.usv.y])
-          
-        # A. 碰撞惩罚 (使用 Shapely 检测)
+        
+        # 碰撞惩罚 (使用 Shapely 检测)
         for obs in self.obstacles:
-            # 安全区域检测
-            if self.usv.is_colliding_with(obs.safety_zone):
-                # 进入警戒区
-                reward -= 0.5
-                if self.usv.is_colliding_with(obs.geometry):
-                    # 发生碰撞
-                    reward -= 100.0
-                    self.collision_flag = True
-                    terminated = True # 碰撞结束
-                    break
-          
-        # B. 目标奖励 (检查所有未访问目标)
+            if self.usv.is_colliding_with(obs.geometry):
+                # 发生碰撞
+                reward = -1.0
+                self.collision_flag = True
+                terminated = True # 碰撞结束
+                break
+        
+        # 
         all_visited = True
         for i, target in enumerate(self.targets):
             if self.target_status[i] == 0: # 未访问
@@ -761,37 +754,34 @@ class MyUsvEnv():
                 if dist < target.radius_t:
                     self.target_status[i] = 1.0
                     self.reached_targets.append(i)
-                    reward += 50.0
-                    print(f"Target {i} Reached!")
                 else:
                     all_visited = False
         
         if all_visited:
             terminated = True
-            reward += 100.0
-                  
-        # C. 动作惩罚 (平滑控制)
-        # 惩罚过大的舵角变化或激烈的动作
-        reward -= 0.01 * (action[1]**2)
         
-        # 时间惩罚
-        reward -= 0.1
-          
+        dist = np.linalg.norm(current_pos - g_sub_global)  #靠近子目标的距离惩罚
+        # print("Distance to sub-goal:", dist)
+        if dist < self.target_radius:  
+            reward = 0.0  # 达到子目标附近时不再惩罚距离
+        # else:
+        #     reward += - 0.001 * dist  # 距离惩罚系数
+
         return reward, terminated
     
-    def step(self, action):
+    def step(self, action,g_sub_global):
         """执行一步动作"""
         self.step_counter += 1
         self.current_time += self.dt
 
-         # 1. 动作映射 (Action Mapping)  
+        # 1. 动作映射 (Action Mapping)  
         # 将 [-1, 1] 映射到物理范围  
         # 油门: [-1, 1] -> [0, 1]  
         throttle = float((action[0] + 1.0) / 2.0)  
         throttle = np.clip(throttle, 0.0, 1.0)  
-          
-        # 舵角: [-1, 1] -> [-45deg, 45deg] (弧度)  
-        max_rudder = np.radians(45)  
+        
+        # 舵角: [-1, 1] -> [-60deg, 60deg] (弧度)  
+        max_rudder = np.radians(60)  
         rudder = float(action[1] * max_rudder) 
 
         # 2. 动力学更新 (USV Dynamics)  
@@ -819,7 +809,7 @@ class MyUsvEnv():
         obs_geoms = [obs.geometry for obs in self.obstacles]  
         self.usv.detect_obstacles(obs_geoms)
         # 5. 奖励计算与状态判断
-        reward, terminated = self.calculate_reward(old_pos, action)
+        reward, terminated = self.calculate_reward(g_sub_global)
         truncated = self.step_counter >= 2000
         
         info = {
@@ -913,7 +903,7 @@ class MyUsvEnv():
             Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
             Patch(facecolor='red', edgecolor='red', label='Obstacle'),
             Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
-            Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
+            # Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
             Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current')
         ]
         
@@ -1201,7 +1191,7 @@ class MyUsvEnv():
                 Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
                 Patch(facecolor='gray', edgecolor='gray', label='Obstacle'),
                 Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
-                Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
+                # Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
                 Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
                 Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.5, linestyle='--'),
                 MplPolygon([(0, 0)], closed=True, facecolor='red', edgecolor='darkblue',
@@ -1360,38 +1350,38 @@ def test_usv_running_and_plot():
 
 # test
 if __name__ == '__main__':
-    test_usv_running_and_plot()
-    # print("=" * 60)
-    # print("测试1: 使用随机种子生成环境")
-    # print("=" * 60)
+    # test_usv_running_and_plot()
+    print("=" * 60)
+    print("测试1: 使用随机种子生成环境")
+    print("=" * 60)
     
-    # # 创建带有随机种子的环境
-    # env = MyUsvEnv(
-    #     num_targets=4,
-    #     num_obstacles=6,
-    #     seed=42,
-    #     record_flag=False,
-    #     usv_length=3.0,
-    #     usv_width=1.5,
-    #     use_random_shapes=True
-    # )
+    # 创建带有随机种子的环境
+    env = MyUsvEnv(
+        num_targets=5,
+        num_obstacles=9,
+        seed=42,
+        record_flag=False,
+        usv_length=3.0,
+        usv_width=1.5,
+        use_random_shapes=True
+    )
     
-    # # 显示环境信息
-    # info = env.get_environment_info()
-    # print(f"目标数量: {info['num_targets']}")
-    # print(f"障碍物数量: {info['num_obstacles']}")
-    # print(f"随机种子: {info['seed']}")
-    # print(f"起始位置: {info['start_pos']}")
-    # print(f"USV尺寸: {info['usv_size']}")
-    # print("\n目标位置:")
-    # for i, t in enumerate(info['targets']):
-    #     print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
-    # print("\n障碍物信息:")
-    # for i, o in enumerate(info['obstacles']):
-    #     print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
+    # 显示环境信息
+    info = env.get_environment_info()
+    print(f"目标数量: {info['num_targets']}")
+    print(f"障碍物数量: {info['num_obstacles']}")
+    print(f"随机种子: {info['seed']}")
+    print(f"起始位置: {info['start_pos']}")
+    print(f"USV尺寸: {info['usv_size']}")
+    print("\n目标位置:")
+    for i, t in enumerate(info['targets']):
+        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
+    print("\n障碍物信息:")
+    for i, o in enumerate(info['obstacles']):
+        print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
     
-    # # 可视化环境
-    # env.visualize_env()
+    # 可视化环境
+    env.visualize_env()
     
     # print("\n" + "=" * 60)
     # print("测试2: 使用相同种子重新生成环境（应该相同）")

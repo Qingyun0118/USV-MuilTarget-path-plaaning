@@ -72,8 +72,8 @@ class SelectorQNet(nn.Module):
     def __init__(self, state_dim, num_actions):
         super(SelectorQNet, self).__init__()
         self.fc1 = nn.Linear(state_dim, 128)
-        self.fc2 = nn.Linear(128, 128)
-        self.fc3 = nn.Linear(128, num_actions)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, num_actions)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -85,8 +85,8 @@ class Actor(nn.Module):
     def __init__(self, state_dim, goal_dim, action_dim, max_action):
         super(Actor, self).__init__()
         self.fc1 = nn.Linear(state_dim + goal_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, action_dim)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, action_dim)
         self.max_action = max_action
 
     def forward(self, state, goal):
@@ -101,13 +101,13 @@ class Critic(nn.Module):
         super(Critic, self).__init__()
         # Q1 architecture
         self.l1 = nn.Linear(state_dim + goal_dim + action_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, 1)
+        self.l2 = nn.Linear(256, 128)
+        self.l3 = nn.Linear(128, 1)
 
         # Q2 architecture
         self.l4 = nn.Linear(state_dim + goal_dim + action_dim, 256)
-        self.l5 = nn.Linear(256, 256)
-        self.l6 = nn.Linear(256, 1)
+        self.l5 = nn.Linear(256, 128)
+        self.l6 = nn.Linear(128, 1)
 
     def forward(self, state, goal, action):
         sa = torch.cat([state, goal, action], 1)
@@ -131,7 +131,7 @@ class Critic(nn.Module):
 # --- Agents ---
 
 class SelectorAgent:
-    def __init__(self, state_dim, num_targets, lr=1e-3, gamma=0.99, epsilon=0.1):
+    def __init__(self, state_dim, num_targets, lr=1e-3, gamma=0.98, epsilon=0.3):
         self.q_net = SelectorQNet(state_dim, num_targets).to(device)
         self.target_q_net = SelectorQNet(state_dim, num_targets).to(device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
@@ -184,7 +184,7 @@ class SelectorAgent:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
 class TD3Agent:
-    def __init__(self, state_dim, goal_dim, action_dim, max_action, lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005, policy_noise=0.2, noise_clip=0.5, policy_freq=2):
+    def __init__(self, state_dim, goal_dim, action_dim, max_action, lr_actor=1e-3, lr_critic=1e-3, gamma=0.98, tau=0.05, policy_noise=0.2, noise_clip=0.5, policy_freq=2):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -276,14 +276,14 @@ class TD3Agent:
 # --- Helper Functions ---
 
 def get_selector_state(obs_dict):
-    """Extract state for Selector: USV info + Targets info"""
-    # o_usv: 7, targets: 3*N
-    return np.concatenate([obs_dict['o_usv'], obs_dict['targets']])
+    """Extract state for Selector: USV pos info + Targets info"""
+    # o_usv pos: 2, targets: 3*N
+    return np.concatenate([obs_dict['o_usv'][0:2], obs_dict['targets']])
 
 def get_upper_state(obs_dict):
-    """Extract state for Upper Actuator: USV info + Lidar"""
-    # o_usv: 7, o_detector: 13
-    return np.concatenate([obs_dict['o_usv'], obs_dict['o_detector']])
+    """Extract state for Upper Actuator: USV pos info + Lidar"""
+    # o_usv: 2, o_detector: 13
+    return np.concatenate([obs_dict['o_usv'][0:2], obs_dict['o_detector']])
 
 def get_lower_state(obs_dict):
     """Extract state for Lower Actuator: USV velocities"""
@@ -293,12 +293,12 @@ def get_lower_state(obs_dict):
 
 def get_target_pos(obs_dict, target_idx, num_targets):
     """Get global position of the selected target"""
-    # targets: [x1, y1, s1, x2, y2, s2, ...]
-    # We need to denormalize if they are normalized. 
-    # In my_USV_Env, they are normalized by X_MAX, Y_MAX.
-    # But here we might want to work with normalized values or denormalized.
-    # Let's stick to normalized values for NN inputs, but we might need real values for distance calc.
-    # The env returns normalized values in 'targets'.
+    # 目标: [x1, y1, s1, x2, y2, s2, ...]  
+    # 如果它们已经归一化，我们需要进行反归一化。   
+    # 在 my_USV_Env 中，它们是通过 X_MAX, Y_MAX 进行归一化的。  
+    # 但在这里，我们可能希望使用归一化值或者反归一化值。  
+    # 对于神经网络输入，我们保持使用归一化值，但计算距离时可能需要真实值。  
+    # 环境在 'targets' 中返回归一化值。
     
     # Extract from obs_dict['targets']
     base_idx = target_idx * 3
@@ -350,17 +350,14 @@ def calc_upper_reward(usv_pos, sub_goal_rel, g_des_global, obstacles):
         
     return reward  
 
-def calc_lower_reward(current_pos, target_sub_global, action):  
-    """  
-    计算下层执行器奖励 (Eq 2-13)  
-    R_low = -||p - g_sub|| - lambda * ||action||^2  
-    """  
-    dist = np.linalg.norm(current_pos - target_sub_global)  
-    # 动作平滑惩罚 (lambda)  
-    action_penalty = 0.1 * np.linalg.norm(action)**2  
-    
-    # 这里的奖励是密集的距离奖励  
-    return -dist - action_penalty  
+# def calc_lower_reward(current_pos, target_sub_global, action):  
+#     """  
+#     计算下层执行器奖励 
+#     """  
+#     dist = np.linalg.norm(current_pos - target_sub_global)  #靠近子目标的距离惩罚
+#     if dist < args.target_radius/5.0:  
+#         dist = 0.0  # 达到子目标附近时不再惩罚距离
+#     return -dist  
 
 # --- Main HRL Loop ---
 
@@ -413,10 +410,10 @@ def train_hrl(args):
     lower_agent = TD3Agent(lower_state_dim, lower_goal_dim, lower_action_dim, max_action=1.0)
     
     # 3. 缓冲区设置
-    selector_buffer = ReplayBuffer(args.buffer_size)
-    upper_buffer = HER_ReplayBuffer(args.buffer_size)
-    lower_buffer = HER_ReplayBuffer(args.buffer_size)
-    
+    selector_buffer = ReplayBuffer(args.selector_buffer_size)
+    upper_buffer = HER_ReplayBuffer(args.actuator_buffer_size)
+    lower_buffer = HER_ReplayBuffer(args.actuator_buffer_size)
+
     writer = SummaryWriter(f'htd3_output/runs/HRL_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}')
     
     global_step = 0
@@ -428,8 +425,9 @@ def train_hrl(args):
         # 记录 Episode 开始时的未访问目标  
         target_status = obs_dict['targets'][2::3] # 0: unvisited  
         valid_mask = (target_status == 0)  
-        print('目标掩码：',valid_mask)
-        episode_reward = 0  
+        episode_lower_reward = 0  
+        episode_upper_reward = 0
+        episode_selector_reward = 0
         done = False  
         
         # -------------------------------------------------  
@@ -454,9 +452,7 @@ def train_hrl(args):
             # Middle Loop: Upper Actuator (生成子目标)  
             # -------------------------------------------------  
             # 限制 Upper Actuator 在一定步数内尝试到达 Selector 的目标  
-            upper_steps_limit = args.max_steps // args.num_targets   
-            
-            for u_step in range(upper_steps_limit):  
+            for u_step in range(args.upper_steps):  
                 upper_state = get_upper_state(obs_dict)  
                 usv_pos = get_usv_pos(obs_dict)  
                 
@@ -487,11 +483,11 @@ def train_hrl(args):
                     lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)  
                     
                     # 环境交互  
-                    next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)  
+                    next_obs_dict, r_low, terminated, truncated, info = env.step(lower_action,g_sub_global)  
                     next_usv_pos = get_usv_pos(next_obs_dict)  
                     
                     # Lower 奖励计算  
-                    r_low = calc_lower_reward(curr_usv_pos, g_sub_global, lower_action)  
+                    # r_low = calc_lower_reward(curr_usv_pos, g_sub_global, lower_action)
                     
                     # 存储 Lower 经验 (HER 风格: 状态, 动作, 奖励, 下一状态, Done, 期望目标, 实际达成)  
                     # 注意：Lower 的 Goal 是相对位移  
@@ -504,10 +500,10 @@ def train_hrl(args):
                     # 状态更新  
                     obs_dict = next_obs_dict  
                     usv_pos = next_usv_pos  
-                    episode_reward += env_reward  
+                    # episode_reward += r_low
                     global_step += 1  
                     
-                    # === 关键：动态目标检测 (Algorithm 2.2) ===  
+                    # === 关键：动态目标检测 ===  
                     reached_indices = info.get('reached_targets', [])  
                     
                     if len(reached_indices) > 0:  
@@ -515,7 +511,9 @@ def train_hrl(args):
                             # 1. 正常情况：到达了 Selector 指定的目标  
                             if reached_idx == target_idx:  
                                 print(f"Selector Success: Reached target {target_idx}")  
-                                selector_step_reward = 1.0  
+                                selector_step_reward = 1.0 
+                                r_low += 1.0  # Lower 额外奖励
+                                r_up += 1.0  # Upper 额外奖励
                                 selector_done = True # Selector 的这步决策完成了  
                             
                             # 2. 意外惊喜 (Relabeling)：到达了其他未访问的目标  
@@ -536,8 +534,10 @@ def train_hrl(args):
                                 selector_done = True   
                     
                     # 训练 Lower Agent  
-                    if len(lower_buffer) > args.batch_size:  
-                        lower_agent.train(lower_buffer, args.batch_size)  
+                    if len(lower_buffer) > args.actuator_batch_size:  
+                        lower_agent.train(lower_buffer, args.actuator_batch_size)  
+
+                    episode_lower_reward += r_low
 
                     if terminated or truncated or selector_done:  
                         break  
@@ -554,43 +554,52 @@ def train_hrl(args):
                 )  
                 
                 # 训练 Upper Agent  
-                if len(upper_buffer) > args.batch_size:  
-                    upper_agent.train(upper_buffer, args.batch_size)  
+                if len(upper_buffer) > args.actuator_batch_size:  
+                    upper_agent.train(upper_buffer, args.actuator_batch_size)  
                 
+                episode_upper_reward += r_up
+
                 if terminated or truncated or selector_done:  
                     break  
             # --- End of Upper Loop ---  
             
             # 存储 Selector 经验 (正常的)  
-            # 如果没成功到达，Reward 为 -1 (或者 0，取决于稀疏奖励设计)  
-            final_selector_reward = selector_step_reward if selector_done else -1.0  
-            next_selector_state = get_selector_state(obs_dict)  
-            
+            # None:Reward 为 -1.0 ;到达选定的目标 0.0；到达所有目标 1.0
             # 判断整个 Episode 是否结束（所有目标都访问了）  
             target_status = obs_dict['targets'][2::3]  
             valid_mask = (target_status == 0)  
-            all_done = not np.any(valid_mask)  
-              
+            all_done = not np.any(valid_mask) 
+
+            if all_done:
+                selector_step_reward=2.0 #全部完成目标 1.0
+
+            final_selector_reward = selector_step_reward if selector_done else -1.0  
+            next_selector_state = get_selector_state(obs_dict)  
+            
             selector_buffer.push(  
                 selector_start_state, target_idx, final_selector_reward,   
                 next_selector_state, all_done  
             )  
-              
+            
             # 训练 Selector  
-            if len(selector_buffer) > args.batch_size:  
-                selector.train(selector_buffer, args.batch_size)  
-              
+            if len(selector_buffer) > args.selector_batch_size:  
+                selector.train(selector_buffer, args.selector_batch_size)  
+            
+            episode_selector_reward += final_selector_reward
+
             if terminated or truncated:  
                 done = True  
                 break  
-                  
+                
         # --- End of Selector Loop ---  
-          
+        
         # 衰减 Epsilon  
         selector.epsilon = max(args.epsilon_end, selector.epsilon * args.epsilon_decay)  
-          
-        print(f"Episode {episode}: Total Reward {episode_reward:.2f}, Steps {global_step}, Collisions {info.get('collision', )}")  
-        writer.add_scalar('Reward/Episode', episode_reward, episode)
+        
+        print(f"Episode {episode}: lower Reward {episode_lower_reward:.2f}, upper Reward {episode_upper_reward:.2f}, selector Reward {episode_selector_reward:.2f}, Steps {global_step}, Collisions {info.get('collision', )}")  
+        writer.add_scalar('Selector_Reward/Episode', episode_selector_reward, episode)
+        writer.add_scalar('Upper_Reward/Episode', episode_upper_reward, episode)
+        writer.add_scalar('Lower_Reward/Episode', episode_lower_reward, episode)
 
     # Save Models
     os.makedirs(args.output_dir, exist_ok=True)
@@ -649,7 +658,7 @@ def evaluate_hrl(args):
     for episode in range(args.eval_episodes):
         obs_dict = env.reset()
         done = False
-        episode_reward = 0
+        episode_lower_reward = 0
         
         csv_file = os.path.join(eval_dir, f"hrl_path_episode_{episode+1}.csv")
         if os.path.exists(csv_file):
@@ -669,7 +678,7 @@ def evaluate_hrl(args):
         print(f"Episode {episode}: Selector chose Target {target_idx}")
         
         step_count = 0
-        while not done and step_count < args.max_steps:
+        while not done and step_count < args.lower_steps:
             upper_state = get_upper_state(obs_dict)
             usv_pos = get_usv_pos(obs_dict)
             g_des_rel = g_des_global - usv_pos
@@ -688,13 +697,13 @@ def evaluate_hrl(args):
                 
                 lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=0.0)
                 
-                next_obs_dict, env_reward, terminated, truncated, info = env.step(lower_action)
+                next_obs_dict, r_low, terminated, truncated, info = env.step(lower_action,g_sub_global)
                 
                 # Record Path
                 env.record_points(np.array([env.usv.x, env.usv.y]), csv_file)
                 
                 obs_dict = next_obs_dict
-                episode_reward += env_reward
+                episode_lower_reward += r_low
                 
                 # Check if target reached
                 is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
@@ -720,7 +729,7 @@ def evaluate_hrl(args):
             
             step_count += 1
             
-        print(f"Episode {episode} finished. Reward: {episode_reward:.2f}")
+        print(f"Episode {episode}: lower Reward {episode_lower_reward:.2f} Steps {step_count}, Collisions {info.get('collision', )}")  
         env.close_writer()
         
         # Draw path
@@ -728,8 +737,8 @@ def evaluate_hrl(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_targets", default=3, type=int)
-    parser.add_argument("--num_obstacles", default=5, type=int)
+    parser.add_argument("--num_targets", default=2, type=int)
+    parser.add_argument("--num_obstacles", default=3, type=int)
     parser.add_argument("--seed", default=2024, type=int)
     parser.add_argument("--usv_length", default=3.0, type=float)
     parser.add_argument("--usv_width", default=1.5, type=float)
@@ -738,12 +747,15 @@ if __name__ == "__main__":
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
     parser.add_argument("--use_random_shapes", action="store_true", default=True)
     
-    parser.add_argument("--max_episodes", default=1000, type=int)
-    parser.add_argument("--max_steps", default=200, type=int, help="Max Upper steps per episode")
+    parser.add_argument("--max_episodes", default=500, type=int)
+    # parser.add_argument("--max_steps", default=100000, type=int, help="Global max steps for training")
+    parser.add_argument("--upper_steps", default=50, type=int, help="Upper steps per Selector step")
     parser.add_argument("--lower_steps", default=2000, type=int, help="Lower steps per Upper step")
-    parser.add_argument("--batch_size", default=128, type=int)
-    parser.add_argument("--buffer_size", default=50000, type=int)
-    parser.add_argument("--warmup_steps", default=1000, type=int)
+    parser.add_argument("--selector_batch_size", default=32, type=int)
+    parser.add_argument("--actuator_batch_size", default=1024, type=int)
+    parser.add_argument("--selector_buffer_size", default=10000, type=int)
+    parser.add_argument("--actuator_buffer_size", default=10000000, type=int)
+    parser.add_argument("--warmup_steps", default=10000, type=int)
     
     parser.add_argument("--epsilon_start", default=1.0, type=float)
     parser.add_argument("--epsilon_end", default=0.1, type=float)

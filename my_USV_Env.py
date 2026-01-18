@@ -730,7 +730,8 @@ class MyUsvEnv():
         计算执行器下层的奖励
         """
         reward = 0.0
-        terminated = False
+        sub_done = False
+        crush = False
         self.collision_flag = False
         self.reached_targets = []
         
@@ -742,11 +743,10 @@ class MyUsvEnv():
                 # 发生碰撞
                 reward = -1.0
                 self.collision_flag = True
-                terminated = True # 碰撞结束
+                crush = True # 碰撞结束
                 break
         
-        # 
-        all_visited = True
+        #更新目标状态
         for i, target in enumerate(self.targets):
             if self.target_status[i] == 0: # 未访问
                 dist = np.linalg.norm(current_pos - np.array([target.x, target.y]))
@@ -754,20 +754,14 @@ class MyUsvEnv():
                 if dist < target.radius_t:
                     self.target_status[i] = 1.0
                     self.reached_targets.append(i)
-                else:
-                    all_visited = False
-        
-        if all_visited:
-            terminated = True
-        
+
         dist = np.linalg.norm(current_pos - g_sub_global)  #靠近子目标的距离惩罚
         # print("Distance to sub-goal:", dist)
         if dist < self.target_radius:  
             reward = 0.0  # 达到子目标附近时不再惩罚距离
-        # else:
-        #     reward += - 0.001 * dist  # 距离惩罚系数
+            sub_done = True
 
-        return reward, terminated
+        return reward, sub_done, crush
     
     def step(self, action,g_sub_global):
         """执行一步动作"""
@@ -809,7 +803,7 @@ class MyUsvEnv():
         obs_geoms = [obs.geometry for obs in self.obstacles]  
         self.usv.detect_obstacles(obs_geoms)
         # 5. 奖励计算与状态判断
-        reward, terminated = self.calculate_reward(g_sub_global)
+        reward, sub_done, crush = self.calculate_reward(g_sub_global)
         truncated = self.step_counter >= 2000
         
         info = {
@@ -822,7 +816,7 @@ class MyUsvEnv():
         if self.record_flag:
             self.record_points(self.current_pos, "usv_path_points_test.csv", heading=self.usv.heading)
         
-        return self._get_observation(), reward, terminated, truncated, info 
+        return self._get_observation(), reward, sub_done, crush, truncated, info 
     
     def get_flow_velocity(self, x, y, t=None):
         """获取指定位置的海流速度"""

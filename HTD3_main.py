@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 from collections import deque
-from my_USV_Env import MyUsvEnv
+from my_USV_Env import MyUsvEnv,X_MAX,Y_MAX
 
 # --- Device Configuration ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,30 +41,105 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
-class HER_ReplayBuffer:
-    """Replay Buffer with Hindsight Experience Replay for Actuators"""
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-
-    def push(self, state, action, reward, next_state, done, desired_goal, achieved_goal):
-        self.buffer.append((state, action, reward, next_state, done, desired_goal, achieved_goal))
-
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done, desired_goal, achieved_goal = zip(*batch)
+class HER_ReplayBuffer:  
+    def __init__(self, capacity, max_episode_len, k_future=4):  
+        """  
+        :param capacity: 缓冲区最大容量（以 episode 为单位）  
+        :param max_episode_len: 每个 episode 的最大步数  
+        :param k_future: HER 采样比例 (future strategy 4:1)  
+        """  
+        self.capacity = capacity  
+        self.max_episode_len = max_episode_len  
+        self.k_future = k_future  
         
-        return (
-            torch.FloatTensor(np.array(state)).to(device),
-            torch.FloatTensor(np.array(action)).to(device),
-            torch.FloatTensor(np.array(reward)).unsqueeze(1).to(device),
-            torch.FloatTensor(np.array(next_state)).to(device),
-            torch.FloatTensor(np.array(done)).unsqueeze(1).to(device),
-            torch.FloatTensor(np.array(desired_goal)).to(device),
-            torch.FloatTensor(np.array(achieved_goal)).to(device)
-        )
-    
-    def __len__(self):
-        return len(self.buffer)
+        # 存储 buffer，列表的列表。 buffer[i] 是第 i 个 episode 的所有 transition  
+        self.buffer = deque(maxlen=capacity)   
+        
+    def store_episode(self, episode_transitions):  
+        """  
+        存储完整的一条轨迹  
+        episode_transitions: list of (state, action, next_state, achieved_goal, desired_goal, info)  
+        注意：我们这里不存 reward，因为 reward 是采样时算的  
+        """  
+        self.buffer.append(episode_transitions)  
+
+    def sample(self, batch_size):  
+        state_batch, action_batch, reward_batch, next_state_batch, done_batch = [], [], [], [], []  
+        goal_batch = [] # desired_goal  
+        
+        # 1. 随机选择 batch_size 个 episode  
+        # 假如 buffer 里不够 batch_size，就允许重复采样  
+        num_episodes = len(self.buffer)  
+        episode_indices = np.random.randint(0, num_episodes, batch_size)  
+        
+        for ep_idx in episode_indices:  
+            episode = self.buffer[ep_idx]  
+            episode_len = len(episode)  
+            
+            # 2. 在该 episode 中随机选择一个时间步 t  
+            t = np.random.randint(0, episode_len)  
+            transition = episode[t]  
+            
+            # 解包 transition  
+            # 格式: (state, action, next_state, achieved_goal(step), desired_goal, actual_accumulated_pos)  
+            # 注意：对于 Lower Agent，achieved_goal 通常是单步位移或累积位移，这里我们需要存绝对位置或相对起点的位移  
+            s, a, ns, ag, dg, info = transition  
+            
+            # 3. HER Logic: 决定是否重标记目标  
+            # future strategy: 以概率 1 - 1/(1+k) 采样未来的状态作为目标  
+            # 简单写法：80% 概率用 future  
+            her_bool = (np.random.random() < 0.8)  
+            
+            if her_bool:  
+                # 采样未来时刻 t_future (t <= t_future < len)  
+                t_future = np.random.randint(t, episode_len)  
+                # 使用未来时刻的 "achieved_goal" 作为新的 "desired_goal"  
+                # 注意：我们需要确保数据结构里存了 consistent 的 achieved_goal  
+                # 这里的 ag_future 应该是相对于当前时刻 t 的状态  
+                
+                # === 针对 HRL 的特殊处理 ===  
+                # Lower Agent 的目标通常是 "相对位移"。  
+                # 如果 t 时刻在位置 P_t，t_future 时刻在 P_future。  
+                # 原始目标是 P_sub - P_t。  
+                # HER 目标应该是 P_future - P_t。  
+                
+                future_transition = episode[t_future]  
+                # 我们假设存储时，info 里存了 'usv_pos' (绝对坐标或归一化坐标)  
+                pos_t = info['current_pos']  
+                pos_future = future_transition[5]['next_pos'] # info is index 5  
+                
+                new_goal = pos_future - pos_t # 新的相对目标  
+                
+                # 重算奖励  
+                r = compute_reward(np.array([new_goal]), np.array([new_goal])) # 完美达成，距离为0  
+                g = new_goal  
+            else:  
+                # 使用原始目标  
+                r = compute_reward(np.array([ag]), np.array([dg]))  
+                g = dg  
+            
+            # 4. 收集数据  
+            state_batch.append(s)  
+            action_batch.append(a)  
+            reward_batch.append(r)  
+            next_state_batch.append(ns)  
+            done_batch.append(0.0) # HER 通常即使到了目标也不设 done=True，或者根据距离设  
+            goal_batch.append(g)  
+
+        # 转换为 Tensor  
+        return (  
+            torch.FloatTensor(np.array(state_batch)).to(device),  
+            torch.FloatTensor(np.array(action_batch)).to(device),  
+            torch.FloatTensor(np.array(reward_batch)).reshape(-1, 1).to(device),  
+            torch.FloatTensor(np.array(next_state_batch)).to(device),  
+            torch.FloatTensor(np.array(done_batch)).unsqueeze(1).to(device),  
+            torch.FloatTensor(np.array(goal_batch)).to(device), # desired_goal input to actor  
+            None # achieved_goal (not used in standard TD3 input, only for reward)  
+        )  
+  
+    def __len__(self):  
+        return len(self.buffer)  
+
 
 # --- Neural Networks ---
 class SelectorQNet(nn.Module):
@@ -131,7 +206,7 @@ class Critic(nn.Module):
 # --- Agents ---
 
 class SelectorAgent:
-    def __init__(self, state_dim, num_targets, lr=1e-3, gamma=0.98, epsilon=0.3):
+    def __init__(self, state_dim, num_targets, lr=1e-4, gamma=0.99, epsilon=0.3):
         self.q_net = SelectorQNet(state_dim, num_targets).to(device)
         self.target_q_net = SelectorQNet(state_dim, num_targets).to(device)
         self.target_q_net.load_state_dict(self.q_net.state_dict())
@@ -184,7 +259,7 @@ class SelectorAgent:
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
 class TD3Agent:
-    def __init__(self, state_dim, goal_dim, action_dim, max_action, lr_actor=1e-3, lr_critic=1e-3, gamma=0.98, tau=0.05, policy_noise=0.2, noise_clip=0.5, policy_freq=2):
+    def __init__(self, state_dim, goal_dim, action_dim, max_action, lr_actor=1e-3, lr_critic=1e-3, gamma=0.99, tau=0.05, policy_noise=0.2, noise_clip=0.5, policy_freq=2):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target.load_state_dict(self.actor.state_dict())
@@ -283,13 +358,13 @@ def get_selector_state(obs_dict):
 def get_upper_state(obs_dict):
     """Extract state for Upper Actuator: USV pos info + Lidar"""
     # o_usv: 2, o_detector: 13
-    return np.concatenate([obs_dict['o_usv'][0:2], obs_dict['o_detector']])
+    return np.concatenate([obs_dict['o_usv'][0:2],obs_dict['o_detector']])
 
 def get_lower_state(obs_dict):
     """Extract state for Lower Actuator: USV velocities"""
     # o_usv: [x, y, u, v, r, sin, cos]
     # We need [u, v, r] which are indices 2, 3, 4
-    return obs_dict['o_usv'][2:5]
+    return np.concatenate([obs_dict['o_usv'], obs_dict['o_detector'], obs_dict['o_current']])
 
 def get_target_pos(obs_dict, target_idx, num_targets):
     """Get global position of the selected target"""
@@ -358,255 +433,280 @@ def calc_upper_reward(usv_pos, sub_goal_rel, g_des_global, obstacles):
 #     if dist < args.target_radius/5.0:  
 #         dist = 0.0  # 达到子目标附近时不再惩罚距离
 #     return -dist  
+def compute_reward(achieved_goal, desired_goal, info=None):  
+    """  
+    计算奖励函数 (支持批量计算)  
+    :param achieved_goal: 实际达到的相对位移/位置 [batch_size, dim]  
+    :param desired_goal: 期望的相对位移/位置 [batch_size, dim]  
+    :return: 奖励 [batch_size, 1]  
+    """  
+    # 计算欧氏距离  
+    # 注意：输入通常是 Tensor 或 Numpy  
+    if isinstance(achieved_goal, torch.Tensor):  
+        dist = torch.norm(achieved_goal - desired_goal, dim=1, keepdim=True)  
+        # 奖励设计：距离越近奖励越大，最大为0。基于距离的密集奖励。  
+        # 系数 10.0 是为了让梯度更明显  
+        return -1.0 * dist   
+    else:  
+        dist = np.linalg.norm(achieved_goal - desired_goal, axis=-1, keepdims=True)  
+        return -1.0 * dist  
+
 
 # --- Main HRL Loop ---
 
-def train_hrl(args):
-    # 1. 环境初始化
-    env = MyUsvEnv(
-        num_targets=args.num_targets,
-        num_obstacles=args.num_obstacles,
-        seed=args.seed,
-        record_flag=False,
-        usv_length=args.usv_length,
-        usv_width=args.usv_width,
-        target_radius=args.target_radius,
-        obstacle_radius_range=(args.obstacle_radius_min, args.obstacle_radius_max),
-        use_random_shapes=args.use_random_shapes
-    )
+def train_hrl(args):  
+    # 1. 环境初始化  
+    env = MyUsvEnv(  
+        num_targets=args.num_targets,  
+        num_obstacles=args.num_obstacles,  
+        seed=args.seed,  
+        record_flag=False,  
+        usv_length=args.usv_length,  
+        usv_width=args.usv_width,  
+        target_radius=args.target_radius,  
+        obstacle_radius_range=(args.obstacle_radius_min, args.obstacle_radius_max),  
+        use_random_shapes=args.use_random_shapes  
+    )  
 
-    # 显示环境信息
-    inf = env.get_environment_info()
-    print(f"目标数量: {inf['num_targets']}")
-    print(f"障碍物数量: {inf['num_obstacles']}")
-    print(f"随机种子: {inf['seed']}")
-    print(f"起始位置: {inf['start_pos']}")
-    print(f"USV尺寸: {inf['usv_size']}")
-    print("\n目标位置:")
-    for i, t in enumerate(inf['targets']):
-        print(f"  目标{i}: ({t['x']:.1f}, {t['y']:.1f}), 半径={t['radius']}")
-    print("\n障碍物信息:")
-    for i, o in enumerate(inf['obstacles']):
-        print(f"  障碍物{i}: 形状={o['shape']}, 位置=({o['x']:.1f}, {o['y']:.1f})")
+    # 获取维度  
+    obs = env.reset()  
+    selector_state_dim = get_selector_state(obs).shape[0]  
+    upper_state_dim = get_upper_state(obs).shape[0]  
+    lower_state_dim = get_lower_state(obs).shape[0]  
+    
+    # 动作与目标维度  
+    selector_action_dim = args.num_targets  
+    upper_action_dim = 2 # (dx, dy)  
+    lower_action_dim = 2 # (throttle, rudder)  
+    upper_goal_dim = 2   # 相对目标  
+    lower_goal_dim = 2   # 相对子目标  
+    
+    # 2. 智能体初始化  
+    selector = SelectorAgent(selector_state_dim, selector_action_dim, epsilon=args.epsilon_start)  
+    # 注意：max_action 限制了子目标范围  
+    upper_agent = TD3Agent(upper_state_dim, upper_goal_dim, upper_action_dim, max_action=args.subgoal_range, lr_actor=1e-4, lr_critic=1e-3)  
+    lower_agent = TD3Agent(lower_state_dim, lower_goal_dim, lower_action_dim, max_action=1.0, lr_actor=1e-4, lr_critic=1e-3)  
+    
+    # 3. 缓冲区设置 (使用 HER Buffer)  
+    selector_buffer = ReplayBuffer(args.selector_buffer_size)  
+    # Capacity 是 Episode 数量  
+    upper_buffer = HER_ReplayBuffer(capacity=5000, max_episode_len=args.upper_steps)  
+    lower_buffer = HER_ReplayBuffer(capacity=10000, max_episode_len=args.lower_steps)  
 
-    # 状态维度
-    obs = env.reset()
-    selector_state_dim = get_selector_state(obs).shape[0]
-    upper_state_dim = get_upper_state(obs).shape[0]
-    lower_state_dim = get_lower_state(obs).shape[0]
-    print(obs)
-    # 动作维度
-    selector_action_dim = args.num_targets
-    upper_action_dim = 2 # (dx, dy) 子目标
-    lower_action_dim = 2 # (throttle, rudder)
+    writer = SummaryWriter(f'htd3_output/runs/HRL_HER_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}')  
     
-    # 目标维度
-    upper_goal_dim = 2 # 相对目标位置（dx, dy）
-    lower_goal_dim = 2 # 相对子目标位置 (dx, dy)
-    
-    # 2. 智能体初始化
-    selector = SelectorAgent(selector_state_dim, selector_action_dim, epsilon=args.epsilon_start)
-    upper_agent = TD3Agent(upper_state_dim, upper_goal_dim, upper_action_dim, max_action=args.subgoal_range)
-    lower_agent = TD3Agent(lower_state_dim, lower_goal_dim, lower_action_dim, max_action=1.0)
-    
-    # 3. 缓冲区设置
-    selector_buffer = ReplayBuffer(args.selector_buffer_size)
-    upper_buffer = HER_ReplayBuffer(args.actuator_buffer_size)
-    lower_buffer = HER_ReplayBuffer(args.actuator_buffer_size)
+    global_step = 0  
+    SCALE = np.array([X_MAX, Y_MAX]) # 坐标反归一化因子 [100, 100]  
 
-    writer = SummaryWriter(f'htd3_output/runs/HRL_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}')
-    
-    global_step = 0
-    
-    for episode in range(args.max_episodes):  
-        obs_dict = env.reset()  
-        usv_pos = get_usv_pos(obs_dict)  
+    for episode in range(args.max_episodes):    
+        obs_dict = env.reset()    
+        usv_pos = get_usv_pos(obs_dict) # 归一化坐标 [0, 1]  
         
-        # 记录 Episode 开始时的未访问目标  
-        target_status = obs_dict['targets'][2::3] # 0: unvisited  
-        valid_mask = (target_status == 0)  
-        episode_lower_reward = 0  
-        episode_upper_reward = 0
-        episode_selector_reward = 0
-        done = False  
+        target_status = obs_dict['targets'][2::3] # 0: unvisited    
+        valid_mask = (target_status == 0)    
         
-        # -------------------------------------------------  
-        # Outer Loop: Selector (选择目标)  
-        # -------------------------------------------------  
-        while not done and np.any(valid_mask):  
-            selector_state = get_selector_state(obs_dict)  
-            
-            # Selector 选择一个目标索引 k  
-            target_idx = selector.select_action(selector_state, valid_mask)  
-            g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)  
-            print('决策器选择的目标：{}，目标位置：{}'.format(target_idx, g_des_global*100))
-            # Selector 的单步奖励累积（直到达到这个目标或超时）  
-            selector_step_reward = 0  
-            selector_done = False  
-            
-            # 记录 Selector 开始时的状态用于存储  
-            selector_start_state = selector_state  
+        # 记录累积奖励用于显示  
+        episode_lower_reward = 0    
+        episode_upper_reward = 0  
+        episode_selector_reward = 0  
+        
+        done = False    
+        attempts = 0  
+        crush = False  
+        
+        # ==================== Selector Loop ====================  
+        while not (done or attempts >= args.num_targets or crush):    
+            attempts += 1   
+            selector_state = get_selector_state(obs_dict)    
             selector_start_pos = usv_pos  
+            selector_start_state = selector_state  
             
-            # -------------------------------------------------  
-            # Middle Loop: Upper Actuator (生成子目标)  
-            # -------------------------------------------------  
-            # 限制 Upper Actuator 在一定步数内尝试到达 Selector 的目标  
-            for u_step in range(args.upper_steps):  
-                upper_state = get_upper_state(obs_dict)  
-                usv_pos = get_usv_pos(obs_dict)  
+            # Selector 选择一个全局目标  
+            target_idx = selector.select_action(selector_state, valid_mask)    
+            g_des_global_norm = get_target_pos(obs_dict, target_idx, args.num_targets) # 归一化的全局目标  
+            
+            print(f'EP:{episode} | Selector Target: {target_idx} | Pos: {g_des_global_norm*100}')  
+            
+            selector_step_reward = 0    
+            selector_done = False    
+            
+            # 临时存储 Upper 轨迹 (用于 HER)  
+            upper_trajectory = []  
+            
+            # ==================== Upper Agent Loop ====================  
+            u_step = 0  
+            while not (done or selector_done or crush or u_step >= args.upper_steps):    
+                u_step += 1  
+                upper_state = get_upper_state(obs_dict)    
+                usv_pos_start_upper = get_usv_pos(obs_dict)    
                 
-                # 计算相对最终目标的向量 (Obs for Upper)  
-                g_des_rel = g_des_global - usv_pos  
+                # Upper Goal: 最终目标 - 当前位置 (相对向量)  
+                g_des_rel = g_des_global_norm - usv_pos_start_upper    
                 
-                # Upper 选择动作：相对子目标 (dx, dy)  
-                g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=args.exploration_noise)  
-                # print('执行器上层选择的子目标相对usv位置：{}'.format(g_sub_rel))
-                # 计算 Upper 的奖励 (基于生成的子目标质量，不需要等下层执行完)  
-                r_up = calc_upper_reward(usv_pos, g_sub_rel, g_des_global, env.obstacles)  
+                # Upper Action: 生成子目标 (相对偏移)  
+                g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=args.exploration_noise)    
                 
-                # 子目标的全局坐标 (用于给 Lower 追踪)  
-                g_sub_global = usv_pos + g_sub_rel  
-                print('执行器上层选择的子目标绝对位置：{}'.format(g_sub_global))  
-                # -------------------------------------------------  
-                # Inner Loop: Lower Actuator (动力学控制)  
-                # -------------------------------------------------  
-                # 下层尝试在 k 步内通过底层控制到达 g_sub_global  
-                for l_step in range(args.lower_steps):  
-                    lower_state = get_lower_state(obs_dict)  
-                    curr_usv_pos = get_usv_pos(obs_dict)  
+                # 计算子目标绝对位置 (归一化)  
+                g_sub_global_norm = usv_pos_start_upper + g_sub_rel  
+                g_sub_global_norm = np.clip(g_sub_global_norm, 0, 1) # 限制在地图内  
+                
+                # 临时存储 Lower 轨迹 (用于 HER)  
+                lower_trajectory = []  
+                sub_done = False  
+                
+                # ==================== Lower Agent Loop ====================  
+                l_step = 0  
+                # 强制 Lower 步数较小，例如 20  
+                while not (done or selector_done or sub_done or crush or l_step >= args.lower_steps):    
+                    l_step += 1  
+                    lower_state = get_lower_state(obs_dict)    
+                    curr_usv_pos = get_usv_pos(obs_dict)    
                     
-                    # Lower 的目标是相对于当前位置的子目标向量  
-                    curr_g_sub_rel = g_sub_global - curr_usv_pos  
+                    # Lower Goal: 子目标 - 当前位置  
+                    curr_g_sub_rel = g_sub_global_norm - curr_usv_pos    
                     
-                    # Lower 选择动作：[推力, 舵角]  
-                    lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)  
+                    # Lower Action: [Throttle, Rudder]  
+                    lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=args.exploration_noise)    
                     
-                    # 环境交互  
-                    next_obs_dict, r_low, terminated, truncated, info = env.step(lower_action,g_sub_global)  
-                    next_usv_pos = get_usv_pos(next_obs_dict)  
+                    # --- 关键：将坐标转为绝对坐标传给环境 ---  
+                    g_sub_global_abs = g_sub_global_norm * SCALE  
+                    next_obs_dict, _, sub_done, crush, truncated, info = env.step(lower_action, g_sub_global_abs)    
                     
-                    # Lower 奖励计算  
-                    # r_low = calc_lower_reward(curr_usv_pos, g_sub_global, lower_action)
+                    next_usv_pos = get_usv_pos(next_obs_dict)    
                     
-                    # 存储 Lower 经验 (HER 风格: 状态, 动作, 奖励, 下一状态, Done, 期望目标, 实际达成)  
-                    # 注意：Lower 的 Goal 是相对位移  
+                    # 计算实际位移 (Achieved Goal)  
                     actual_move = next_usv_pos - curr_usv_pos  
-                    lower_buffer.push(  
-                        lower_state, lower_action, r_low, get_lower_state(next_obs_dict),   
-                        terminated, curr_g_sub_rel, actual_move  
+                    
+                    # 计算 Dense Reward 用于日志显示 (Buffer里存原始数据由HER重算)  
+                    r_low_dense = compute_reward(np.array([actual_move]), np.array([curr_g_sub_rel]))[0][0]  
+                    episode_lower_reward += r_low_dense  
+
+                    # 存储到 Lower 轨迹  
+                    # info 必须包含 'current_pos' 和 'next_pos' 供 HER 使用  
+                    step_info = {'current_pos': curr_usv_pos, 'next_pos': next_usv_pos}  
+                    
+                    lower_trajectory.append(  
+                        (lower_state, lower_action, get_lower_state(next_obs_dict),   
+                        actual_move, curr_g_sub_rel, step_info)  
                     )  
                     
-                    # 状态更新  
                     obs_dict = next_obs_dict  
                     usv_pos = next_usv_pos  
-                    # episode_reward += r_low
-                    global_step += 1  
+                    global_step += 1    
                     
-                    # === 关键：动态目标检测 ===  
+                    # >>>>>>>>>>>>>>>>>> 动态目标检测 (DGT) 开始 <<<<<<<<<<<<<<<<<<  
                     reached_indices = info.get('reached_targets', [])  
-                    
                     if len(reached_indices) > 0:  
-                        for reached_idx in reached_indices:  
-                            # 1. 正常情况：到达了 Selector 指定的目标  
-                            if reached_idx == target_idx:  
-                                print(f"Selector Success: Reached target {target_idx}")  
-                                selector_step_reward = 1.0 
-                                r_low += 1.0  # Lower 额外奖励
-                                r_up += 1.0  # Upper 额外奖励
-                                selector_done = True # Selector 的这步决策完成了  
-                            
-                            # 2. 意外惊喜 (Relabeling)：到达了其他未访问的目标  
-                            elif obs_dict['targets'][reached_idx*3 + 2] == 1.0: # 确保是刚变成1的  
-                                print(f"**Relabeling**: Accidentally reached {reached_idx} while aiming for {target_idx}")  
-                                # 构造一条虚拟经验：就好像 Selector 当初选的是 reached_idx  
-                                # State: selector_start_state  
-                                # Action: reached_idx  
-                                # Reward: 1.0 (成功)  
-                                # Next State: get_selector_state(next_obs_dict)  
-                                selector_buffer.push(  
-                                    selector_start_state, reached_idx, 1.0,   
-                                    get_selector_state(next_obs_dict), False  
-                                )  
-                                # 注意：如果是意外到达，不结束当前对 target_idx 的追求，  
-                                # 除非 target_idx 也在 reached_indices 里，或者策略要求重新规划  
-                                # 这里我们选择让 Selector 重新规划（跳出 Upper/Lower 循环）  
+                        next_selector_state = get_selector_state(next_obs_dict)  
+                        # 检查当前是否所有任务已完成 (用于判断 Fake Done)  
+                        current_valid_mask = (next_obs_dict['targets'][2::3] == 0)  
+                        is_all_done = not np.any(current_valid_mask)  
+
+                        for r_idx in reached_indices:  
+                            if r_idx == target_idx:  
+                                # Case 1: 到达了预定目标  
+                                print(f"  >>> SUCCESS: Reached Intended Target {target_idx}")  
+                                selector_step_reward = 1.0  
                                 selector_done = True   
-                    
-                    # 训练 Lower Agent  
-                    if len(lower_buffer) > args.actuator_batch_size:  
-                        lower_agent.train(lower_buffer, args.actuator_batch_size)  
+                            else:  
+                                # Case 2: 意外到达了其他有效目标  
+                                print(f"  >>> DGT HIT: Reached Target {r_idx} (aiming for {target_idx})")  
+                                
+                                # 构造虚拟经验：假设 Selector 当初选的就是 r_idx  
+                                # Action: r_idx  
+                                # Reward: 1.0 (成功)  
+                                # Next State: next_selector_state  
+                                # Done: is_all_done (如果这是最后一个目标，则Done=True)  
+                                selector_buffer.push(  
+                                    selector_start_state,  
+                                    r_idx, # Fake Action  
+                                    1.0,   # Fake Reward  
+                                    next_selector_state,  
+                                    is_all_done  
+                                )  
+                                
+                                # 只要碰到任何目标，我们都认为当前规划需要重置  
+                                # 因为当前位置变了，未访问目标列表也变了，继续执行旧策略不如重新决策  
+                                selector_done = True  
+                    # >>>>>>>>>>>>>>>>>> 动态目标检测 (DGT) 结束 <<<<<<<<<<<<<<<<<<  
 
-                    episode_lower_reward += r_low
-
-                    if terminated or truncated or selector_done:  
-                        break  
                 # --- End of Lower Loop ---  
                 
-                # 存储 Upper 经验  
-                next_upper_state = get_upper_state(obs_dict)  
-                # Upper 的实际达成是：最终位置 - 初始位置  
-                actual_upper_displacement = usv_pos - selector_start_pos # 近似  
+                # 1. 存储 Lower 轨迹到 HER Buffer  
+                lower_buffer.store_episode(lower_trajectory)  
                 
-                upper_buffer.push(  
-                    upper_state, g_sub_rel, r_up, next_upper_state,   
-                    selector_done, g_des_rel, actual_upper_displacement  
-                )  
-                
-                # 训练 Upper Agent  
-                if len(upper_buffer) > args.actuator_batch_size:  
-                    upper_agent.train(upper_buffer, args.actuator_batch_size)  
-                
-                episode_upper_reward += r_up
+                # 2. 训练 Lower Agent  
+                # 只有当数据足够多时才训练  
+                if len(lower_buffer) > args.actuator_batch_size:  
+                    for _ in range(l_step): # 每步训练一次  
+                        lower_agent.train(lower_buffer, args.actuator_batch_size)  
 
-                if terminated or truncated or selector_done:  
-                    break  
+                # 3. 记录 Upper Transition  
+                next_upper_state = get_upper_state(obs_dict)  
+                usv_pos_end_upper = get_usv_pos(obs_dict)  
+                
+                # Upper Achieved Goal: 这一阶段的总位移  
+                actual_upper_displacement = usv_pos_end_upper - usv_pos_start_upper  
+                
+                # Upper Reward (Dense): 越接近 Global Target 越好  
+                r_up_dense = compute_reward(np.array([actual_upper_displacement]), np.array([g_des_rel]))[0][0]  
+                episode_upper_reward += r_up_dense  
+                
+                step_info_upper = {'current_pos': usv_pos_start_upper, 'next_pos': usv_pos_end_upper}  
+                
+                upper_trajectory.append(  
+                    (upper_state, g_sub_rel, next_upper_state,   
+                    actual_upper_displacement, g_des_rel, step_info_upper)  
+                )  
+
             # --- End of Upper Loop ---  
             
-            # 存储 Selector 经验 (正常的)  
-            # None:Reward 为 -1.0 ;到达选定的目标 0.0；到达所有目标 1.0
-            # 判断整个 Episode 是否结束（所有目标都访问了）  
-            target_status = obs_dict['targets'][2::3]  
-            valid_mask = (target_status == 0)  
-            all_done = not np.any(valid_mask) 
-
-            if all_done:
-                selector_step_reward=2.0 #全部完成目标 1.0
-
-            final_selector_reward = selector_step_reward if selector_done else -1.0  
-            next_selector_state = get_selector_state(obs_dict)  
+            # 1. 存储 Upper 轨迹到 HER Buffer  
+            upper_buffer.store_episode(upper_trajectory)  
             
-            selector_buffer.push(  
-                selector_start_state, target_idx, final_selector_reward,   
-                next_selector_state, all_done  
+            # 2. 训练 Upper Agent  
+            if len(upper_buffer) > args.actuator_batch_size:  
+                for _ in range(u_step):  
+                    upper_agent.train(upper_buffer, args.actuator_batch_size)  
+            
+            # 3. Selector Update  
+            target_status = obs_dict['targets'][2::3]    
+            valid_mask = (target_status == 0)    
+            done = not np.any(valid_mask)   
+
+            if done:  
+                selector_step_reward = 2.0 # 完成所有任务的大奖励  
+
+            final_selector_reward = selector_step_reward if selector_done else -0.1 # 步数惩罚  
+            
+            selector_buffer.push(    
+                selector_start_state, target_idx, final_selector_reward,     
+                get_selector_state(obs_dict), done    
             )  
             
-            # 训练 Selector  
-            if len(selector_buffer) > args.selector_batch_size:  
-                selector.train(selector_buffer, args.selector_batch_size)  
+            if len(selector_buffer) > args.selector_batch_size:    
+                selector.train(selector_buffer, args.selector_batch_size)    
             
-            episode_selector_reward += final_selector_reward
-
-            if terminated or truncated:  
-                done = True  
-                break  
-                
-        # --- End of Selector Loop ---  
+            episode_selector_reward += final_selector_reward    
+            
+        # --- End of Selector Loop ---    
         
         # 衰减 Epsilon  
         selector.epsilon = max(args.epsilon_end, selector.epsilon * args.epsilon_decay)  
         
-        print(f"Episode {episode}: lower Reward {episode_lower_reward:.2f}, upper Reward {episode_upper_reward:.2f}, selector Reward {episode_selector_reward:.2f}, Steps {global_step}, Collisions {info.get('collision', )}")  
-        writer.add_scalar('Selector_Reward/Episode', episode_selector_reward, episode)
-        writer.add_scalar('Upper_Reward/Episode', episode_upper_reward, episode)
-        writer.add_scalar('Lower_Reward/Episode', episode_lower_reward, episode)
+        print(f"Episode {episode} End | R_low: {episode_lower_reward:.1f} | R_up: {episode_upper_reward:.1f} | R_sel: {episode_selector_reward:.1f} | Steps: {global_step}")    
+        
+        writer.add_scalar('Reward/Lower', episode_lower_reward, episode)  
+        writer.add_scalar('Reward/Upper', episode_upper_reward, episode)  
+        writer.add_scalar('Reward/Selector', episode_selector_reward, episode)  
 
-    # Save Models
-    os.makedirs(args.output_dir, exist_ok=True)
-    torch.save(selector.q_net.state_dict(), os.path.join(args.output_dir, "selector.pth"))
-    torch.save(upper_agent.actor.state_dict(), os.path.join(args.output_dir, "upper_actor.pth"))
-    torch.save(lower_agent.actor.state_dict(), os.path.join(args.output_dir, "lower_actor.pth"))
-    print("Training Complete.")
+    # Save Models  
+    os.makedirs(args.output_dir, exist_ok=True)  
+    torch.save(selector.q_net.state_dict(), os.path.join(args.output_dir, "selector.pth"))  
+    torch.save(upper_agent.actor.state_dict(), os.path.join(args.output_dir, "upper_actor.pth"))  
+    torch.save(lower_agent.actor.state_dict(), os.path.join(args.output_dir, "lower_actor.pth"))  
+    print("Training Complete.")  
+
 
 def evaluate_hrl(args):
     print("Starting Evaluation...")
@@ -658,76 +758,81 @@ def evaluate_hrl(args):
     for episode in range(args.eval_episodes):
         obs_dict = env.reset()
         done = False
+        truncated=False
+        crush = False
         episode_lower_reward = 0
-        
+        attempts=0
         csv_file = os.path.join(eval_dir, f"hrl_path_episode_{episode+1}.csv")
         if os.path.exists(csv_file):
             os.remove(csv_file)
         
         # Selector chooses a high-level goal
-        selector_state = get_selector_state(obs_dict)
-        target_status = obs_dict['targets'][2::3]
-        valid_mask = (target_status == 0)
-        
-        if not np.any(valid_mask):
-            continue
+        while not (done or attempts >= args.num_targets or crush):
+            attempts+=1
+            selector_state = get_selector_state(obs_dict)
+            target_status = obs_dict['targets'][2::3]
+            valid_mask = (target_status == 0)
             
-        target_idx = selector.select_action(selector_state, valid_mask, eval=True)
-        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
-        
-        print(f"Episode {episode}: Selector chose Target {target_idx}")
-        
-        step_count = 0
-        while not done and step_count < args.lower_steps:
-            upper_state = get_upper_state(obs_dict)
-            usv_pos = get_usv_pos(obs_dict)
-            g_des_rel = g_des_global - usv_pos
+            # if not np.any(valid_mask):
+            #     continue
+                
+            target_idx = selector.select_action(selector_state, valid_mask, eval=True)
+            g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
             
-            # Upper Action
-            g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=0.0)
+            print(f"Episode {episode}: Selector chose Target {target_idx}")
             
-            # Lower Loop
-            for k in range(args.lower_steps):
-                if k == 0:
-                    g_sub_global = usv_pos + g_sub_rel
+            step_count = 0
+            while not (done or crush or truncated):
+                upper_state = get_upper_state(obs_dict)
+                usv_pos = get_usv_pos(obs_dict)
+                g_des_rel = g_des_global - usv_pos
                 
-                lower_state = get_lower_state(obs_dict)
-                curr_usv_pos = get_usv_pos(obs_dict)
-                curr_g_sub_rel = g_sub_global - curr_usv_pos
+                # Upper Action
+                g_sub_rel = upper_agent.select_action(upper_state, g_des_rel, noise=0.0)
                 
-                lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=0.0)
+                # Lower Loop
+                g_sub_global = usv_pos + g_sub_rel
+                sub_done=False
+                while not (done or sub_done or crush or truncated):
+                    lower_state = get_lower_state(obs_dict)
+                    curr_usv_pos = get_usv_pos(obs_dict)
+                    curr_g_sub_rel = g_sub_global - curr_usv_pos
+                    
+                    lower_action = lower_agent.select_action(lower_state, curr_g_sub_rel, noise=0.0)
+                    
+                    next_obs_dict, r_low, sub_done, crush, truncated, info = env.step(lower_action,g_sub_global)
+                    
+                    
+
+                    # Record Path
+                    env.record_points(np.array([env.usv.x, env.usv.y]), csv_file)
+                    
+                    obs_dict = next_obs_dict
+                    episode_lower_reward += r_low
+                    
+                    # Check if target reached
+                    is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
+                    
+                    if is_reached:
+                        print(f"  Target {target_idx} reached!")
+                        target_status = obs_dict['targets'][2::3]
+                        valid_mask = (target_status == 0)
+                        if np.any(valid_mask):
+                            selector_state = get_selector_state(obs_dict)
+                            target_idx = selector.select_action(selector_state, valid_mask, eval=True)
+                            g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
+                            print(f"  Selector chose new Target {target_idx}")
+                            # Break lower loop to let Upper generate new subgoal for new target
+                            break
+                        else:
+                            done = True
+                            break
+                    
+                    # if terminated or truncated:
+                    #     done = True
+                    #     break
                 
-                next_obs_dict, r_low, terminated, truncated, info = env.step(lower_action,g_sub_global)
-                
-                # Record Path
-                env.record_points(np.array([env.usv.x, env.usv.y]), csv_file)
-                
-                obs_dict = next_obs_dict
-                episode_lower_reward += r_low
-                
-                # Check if target reached
-                is_reached = (obs_dict['targets'][target_idx*3 + 2] == 1.0)
-                
-                if is_reached:
-                    print(f"  Target {target_idx} reached!")
-                    target_status = obs_dict['targets'][2::3]
-                    valid_mask = (target_status == 0)
-                    if np.any(valid_mask):
-                        selector_state = get_selector_state(obs_dict)
-                        target_idx = selector.select_action(selector_state, valid_mask, eval=True)
-                        g_des_global = get_target_pos(obs_dict, target_idx, args.num_targets)
-                        print(f"  Selector chose new Target {target_idx}")
-                        # Break lower loop to let Upper generate new subgoal for new target
-                        break
-                    else:
-                        done = True
-                        break
-                
-                if terminated or truncated:
-                    done = True
-                    break
-            
-            step_count += 1
+                step_count += 1
             
         print(f"Episode {episode}: lower Reward {episode_lower_reward:.2f} Steps {step_count}, Collisions {info.get('collision', )}")  
         env.close_writer()
@@ -738,8 +843,8 @@ def evaluate_hrl(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num_targets", default=2, type=int)
-    parser.add_argument("--num_obstacles", default=3, type=int)
-    parser.add_argument("--seed", default=2024, type=int)
+    parser.add_argument("--num_obstacles", default=5, type=int)
+    parser.add_argument("--seed", default=2025, type=int)
     parser.add_argument("--usv_length", default=3.0, type=float)
     parser.add_argument("--usv_width", default=1.5, type=float)
     parser.add_argument("--target_radius", default=3.0, type=float)
@@ -749,12 +854,12 @@ if __name__ == "__main__":
     
     parser.add_argument("--max_episodes", default=500, type=int)
     # parser.add_argument("--max_steps", default=100000, type=int, help="Global max steps for training")
-    parser.add_argument("--upper_steps", default=50, type=int, help="Upper steps per Selector step")
-    parser.add_argument("--lower_steps", default=2000, type=int, help="Lower steps per Upper step")
-    parser.add_argument("--selector_batch_size", default=32, type=int)
-    parser.add_argument("--actuator_batch_size", default=1024, type=int)
-    parser.add_argument("--selector_buffer_size", default=10000, type=int)
-    parser.add_argument("--actuator_buffer_size", default=10000000, type=int)
+    parser.add_argument("--upper_steps", default=20, type=int, help="Upper steps per Selector step")
+    parser.add_argument("--lower_steps", default=50, type=int, help="Lower steps per Upper step")
+    parser.add_argument("--selector_batch_size", default=64, type=int)
+    parser.add_argument("--actuator_batch_size", default=256, type=int)
+    parser.add_argument("--selector_buffer_size", default=50000, type=int)
+    parser.add_argument("--actuator_buffer_size", default=1000000, type=int)
     parser.add_argument("--warmup_steps", default=10000, type=int)
     
     parser.add_argument("--epsilon_start", default=1.0, type=float)

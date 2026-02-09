@@ -110,9 +110,9 @@ class USV:
         }  
 
         # 传感器参数  
-        self.sensor_range = 10.0  
-        self.sensor_fov = np.radians(120)  
-        self.num_detection_lines = 13  
+        self.sensor_range = 15.0  
+        self.sensor_fov = np.radians(150)  
+        self.num_detection_lines = 15  
         self.sensor_readings = [self.sensor_range] * self.num_detection_lines  
           
         self.polygon = None  
@@ -199,7 +199,7 @@ class USV:
   
         # --- 关键修复：数值限幅 (Clipping) ---  
         # 物理世界中船速不可能无限增加，强制截断以防止溢出  
-        self.u = np.clip(u_next, -self.max_u/2, self.max_u) # 倒车速度慢一点  
+        self.u = np.clip(u_next, -self.max_u, self.max_u) # 倒车速度慢一点  
         self.v = np.clip(v_next, -self.max_v, self.max_v)  
         self.r = np.clip(r_next, -self.max_r, self.max_r)  
         # self.u = u_next 

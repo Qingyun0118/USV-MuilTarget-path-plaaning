@@ -380,8 +380,8 @@ class MyUsvEnv():
             flow_angle = np.arctan2(flow_v, flow_u)
             
             o_current = np.array([
-                flow_u , # 也可以只给 u, v
-                flow_v ,
+                flow_u / flow_speed, # 也可以只给 u, v
+                flow_v / flow_speed,
                 np.sin(flow_angle),
                 np.cos(flow_angle)
             ], dtype=np.float32)
@@ -725,54 +725,44 @@ class MyUsvEnv():
         
         return self._get_observation()
     
-    def calculate_reward(self, g_sub_global):
+    def check_state(self, position):
         """
-        计算执行器下层的奖励
+        只负责检查当前状态是否碰撞或到达目标
         """
-        reward = 0.0
-        sub_done = False
-        crush = False
+        done = False
         self.collision_flag = False
         self.reached_targets = []
-        
-        current_pos = np.array([self.usv.x, self.usv.y])
-        
         # 碰撞惩罚 (使用 Shapely 检测)
         for obs in self.obstacles:
             if self.usv.is_colliding_with(obs.geometry):
                 # 发生碰撞
-                reward = -1.0
                 self.collision_flag = True
-                crush = True # 碰撞结束
                 break
         
-        #更新目标状态
+        #更新全局目标状态
         for i, target in enumerate(self.targets):
             if self.target_status[i] == 0: # 未访问
-                dist = np.linalg.norm(current_pos - np.array([target.x, target.y]))
+                dist = np.linalg.norm(self.current_pos - np.array([target.x, target.y]))
                 
                 if dist < target.radius_t:
                     self.target_status[i] = 1.0
                     self.reached_targets.append(i)
 
-        dist = np.linalg.norm(current_pos - g_sub_global)  #靠近子目标的距离惩罚
-        # print("Distance to sub-goal:", dist)
+        dist = np.linalg.norm(self.current_pos - position)  #靠近子目标的距离惩罚
         if dist < self.target_radius:  
-            reward = 0.0  # 达到子目标附近时不再惩罚距离
-            sub_done = True
+            done = True
 
-        return reward, sub_done, crush
+        return done, self.collision_flag
     
-    def step(self, action,g_sub_global):
+    def step(self, action, goal_position_global):
         """执行一步动作"""
         self.step_counter += 1
         self.current_time += self.dt
 
-        # 1. 动作映射 (Action Mapping)  
-        # 将 [-1, 1] 映射到物理范围  
-        # 油门: [-1, 1] -> [0, 1]  
-        throttle = float((action[0] + 1.0) / 2.0)  
-        throttle = np.clip(throttle, 0.0, 1.0)  
+        # 1. 动作映射 (Action Mapping)   
+        # 油门: [-1, 1]
+        throttle = action[0]  
+        # throttle = np.clip(throttle, 0.0, 1.0)  
         
         # 舵角: [-1, 1] -> [-60deg, 60deg] (弧度)  
         max_rudder = np.radians(60)  
@@ -780,7 +770,7 @@ class MyUsvEnv():
 
         # 2. 动力学更新 (USV Dynamics)  
         # 注意：USV.step 内部计算了推力产生的位移  
-        old_pos = np.array([self.usv.x, self.usv.y])  
+        # old_pos = np.array([self.usv.x, self.usv.y])  
         self.usv.step(throttle, rudder) 
         
         # 3. 叠加海流影响 (Environment Effect)  
@@ -802,9 +792,10 @@ class MyUsvEnv():
         # 提取障碍物的几何体列表供 USV 探测  
         obs_geoms = [obs.geometry for obs in self.obstacles]  
         self.usv.detect_obstacles(obs_geoms)
-        # 5. 奖励计算与状态判断
-        reward, sub_done, crush = self.calculate_reward(g_sub_global)
-        truncated = self.step_counter >= 2000
+        # 5. 
+        done, crush = self.check_state(goal_position_global)
+        # truncated = self.step_counter >= 2000
+        truncated=False
         
         info = {
             "collision": self.collision_flag,
@@ -816,7 +807,7 @@ class MyUsvEnv():
         if self.record_flag:
             self.record_points(self.current_pos, "usv_path_points_test.csv", heading=self.usv.heading)
         
-        return self._get_observation(), reward, sub_done, crush, truncated, info 
+        return self._get_observation(), done, crush, truncated, info 
     
     def get_flow_velocity(self, x, y, t=None):
         """获取指定位置的海流速度"""

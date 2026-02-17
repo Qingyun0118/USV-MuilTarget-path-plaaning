@@ -1245,6 +1245,100 @@ class MyUsvEnv():
         
         return info
 
+    # ==================== HGG 辅助接口 ====================
+    # 以下方法为 HGG (Hindsight Goal Generation) 算法提供支持
+    # 参考: Ren et al., "Exploration via Hindsight Goal Generation", NeurIPS 2019
+
+    @staticmethod
+    def phi(state):
+        """
+        状态到目标空间的映射函数 φ: S → G
+        HGG 论文 Eq.(1) 中的 φ(s)
+        
+        对于 USV 导航任务，目标空间为归一化的 2D 位置 [0,1]²
+        从观测状态中提取归一化的 (x, y) 坐标
+        
+        Args:
+            state: 观测状态向量 (o_usv 部分)，前两维为 x/X_MAX, y/Y_MAX
+        
+        Returns:
+            np.ndarray: 归一化的 [x, y] 位置，shape=(2,)
+        """
+        return np.array(state[:2], dtype=np.float32)
+
+    @staticmethod
+    def goal_distance(g1, g2):
+        """
+        计算两个目标之间的欧氏距离（归一化空间）
+        用于 HGG 的 Wasserstein 距离计算
+        
+        Args:
+            g1: 目标1，shape=(2,)
+            g2: 目标2，shape=(2,)
+        
+        Returns:
+            float: L2 距离
+        """
+        return np.linalg.norm(np.array(g1) - np.array(g2))
+
+    def sample_task(self, target_idx=None):
+        """
+        从任务分布 T* 中采样一个 (s0, g) 对
+        用于 HGG Algorithm 1 的 Step 4: Sample {(ŝ₀ⁱ, ĝⁱ)} ~ T*
+        
+        在 USV 多目标导航场景中:
+        - s0 = 当前 USV 的归一化起始位置
+        - g  = 某个目标点的归一化位置
+        
+        Args:
+            target_idx: 指定目标索引。若为 None，则随机选择一个未访问的目标
+        
+        Returns:
+            s0: 归一化的初始位置 np.ndarray, shape=(2,)
+            g:  归一化的目标位置 np.ndarray, shape=(2,)
+        """
+        # 初始位置：当前 USV 归一化坐标
+        s0 = np.array([self.usv.x / X_MAX, self.usv.y / Y_MAX], dtype=np.float32)
+        
+        if target_idx is not None:
+            # 使用指定目标
+            target = self.targets[target_idx]
+        else:
+            # 随机选择一个未访问的目标
+            unvisited = [i for i in range(self.num_targets) if self.target_status[i] == 0]
+            if len(unvisited) > 0:
+                idx = np.random.choice(unvisited)
+                target = self.targets[idx]
+            else:
+                # 所有目标已访问，随机选一个
+                target = self.targets[np.random.randint(0, self.num_targets)]
+        
+        g = np.array([target.x / X_MAX, target.y / Y_MAX], dtype=np.float32)
+        return s0, g
+
+    def sample_tasks_batch(self, K, target_idx=None):
+        """
+        批量采样 K 个 (s0, g) 对，用于 HGG 的二部图匹配
+        
+        在 USV 场景中，同一个 episode 内初始位置相同，
+        但可以对目标位置添加微小扰动以增加多样性
+        
+        Args:
+            K: 采样数量
+            target_idx: 指定目标索引（用于 Upper 层 HGG）
+        
+        Returns:
+            s0_batch: shape=(K, 2), 归一化初始位置
+            g_batch:  shape=(K, 2), 归一化目标位置
+        """
+        s0_list = []
+        g_list = []
+        for _ in range(K):
+            s0, g = self.sample_task(target_idx)
+            s0_list.append(s0)
+            g_list.append(g)
+        return np.array(s0_list, dtype=np.float32), np.array(g_list, dtype=np.float32)
+
 
 # 兼容性：保留旧的全局变量定义
 START_POS = np.array([5.0, 5.0])

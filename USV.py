@@ -14,8 +14,8 @@ class USV:
     以及扇形多线传感器模型。  
     """  
     def __init__(self, x, y, heading=0.0, 
-                mass=50.0,       # 质量 (kg)  
-                inertia=5.0,     # 转动惯性 (kg·m^2) 
+                mass=20.0,       # 质量 (kg)  
+                inertia=2.0,     # 转动惯性 (kg·m^2) 
                 dt=0.05,
                 length=3.0, width=1.5):  
         

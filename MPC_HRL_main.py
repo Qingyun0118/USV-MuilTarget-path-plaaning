@@ -1193,14 +1193,21 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     print(f"\n{'=' * 60}")
     print(f"  Evaluation Summary [{eval_mode.upper()} mode]")
     print(f"{'=' * 60}")
+    print(f"  Environment:  {num_targets} targets, {args.eval_obstacles} obstacles")
+    print(f"  Episodes:     {len(eval_results)}")
     success_count = sum(1 for r in eval_results if r['success'])
-    avg_distance = np.mean([r['total_distance'] for r in eval_results])
-    avg_time = np.mean([r['time'] for r in eval_results])
     collision_count = sum(1 for r in eval_results if r['collision'])
+    success_results = [r for r in eval_results if r['success']]
     print(f"  Success Rate: {success_count}/{len(eval_results)} "
           f"({100 * success_count / max(len(eval_results), 1):.0f}%)")
-    print(f"  Avg Distance: {avg_distance:.1f}")
-    print(f"  Avg Time:     {avg_time:.2f}s per episode")
+    if success_results:
+        avg_distance = np.mean([r['total_distance'] for r in success_results])
+        avg_time = np.mean([r['time'] for r in success_results])
+        print(f"  Avg Distance: {avg_distance:.1f}  (success only)")
+        print(f"  Avg Time:     {avg_time:.2f}s per episode  (success only)")
+    else:
+        print(f"  Avg Distance: N/A  (no successful episode)")
+        print(f"  Avg Time:     N/A  (no successful episode)")
     print(f"  Total Time:   {total_eval_time:.2f}s")
     print(f"  Collisions:   {collision_count}")
 

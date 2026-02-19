@@ -28,6 +28,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# 评估指标与雷达图模块
+from evaluation_metrics import (
+    evaluate_single_episode, evaluate_all_episodes,
+    compute_success_rate, print_evaluation_report,
+    get_normalized_metrics_for_radar
+)
+from radar_chart import plot_single_radar, plot_multi_radar, plot_metrics_bar_chart
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 from collections import deque
@@ -736,6 +744,12 @@ def train_mpc_hrl(args):
     global_step = 0
     best_reward = -float('inf')
 
+    # 训练历史记录 (用于样本效率评估)
+    training_history = {
+        'episode_steps': [],
+        'episode_successes': [],
+    }
+
     print(f"\n{'=' * 60}")
     print(f"  Training Start — {NUM_TARGETS}T/{NUM_OBSTACLES}O")
     print(f"  MPC Decay: Dawood Exponential (p0={args.mpc_p0}, p_min={args.mpc_p_min})")
@@ -928,7 +942,12 @@ def train_mpc_hrl(args):
 
         # ---- 记录成功率 ----
         all_active_reached = (targets_reached_count >= active_targets)
-        mpc_scheduler.record_episode(all_active_reached and not crush)
+        ep_success = all_active_reached and not crush
+        mpc_scheduler.record_episode(ep_success)
+
+        # 记录训练历史 (样本效率)
+        training_history['episode_steps'].append(total_steps)
+        training_history['episode_successes'].append(bool(ep_success))
 
         # ---- Logging ----
         success_rate = mpc_scheduler.get_success_rate()
@@ -994,6 +1013,13 @@ def train_mpc_hrl(args):
                os.path.join(args.output_dir, "actuator_actor.pth"))
     torch.save(actuator.critic.state_dict(),
                os.path.join(args.output_dir, "actuator_critic.pth"))
+
+    # 保存训练历史 (样本效率评估需要)
+    import json
+    history_path = os.path.join(args.output_dir, "training_history.json")
+    with open(history_path, 'w') as f:
+        json.dump(training_history, f)
+    print(f"训练历史已保存至: {history_path}")
 
     writer.close()
     print(f"\nTraining Complete. Episodes: {args.max_episodes}")
@@ -1210,6 +1236,65 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
         print(f"  Avg Time:     N/A  (no successful episode)")
     print(f"  Total Time:   {total_eval_time:.2f}s")
     print(f"  Collisions:   {collision_count}")
+
+    # ====================================================================
+    # 综合评估: 6 项指标计算 + 雷达图
+    # ====================================================================
+    if save_csv:
+        print(f"\n--- 运行综合指标评估 (6 项指标) ---")
+
+        # 海流速度获取函数
+        flow_fn = lambda x, y: env.get_flow_velocity(x, y)
+
+        # 加载训练历史 (用于样本效率评估, 仅训练后可用)
+        import json
+        history_path = os.path.join(args.output_dir, "training_history.json")
+        episode_steps_train = None
+        episode_successes_train = None
+        if os.path.exists(history_path):
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            episode_steps_train = history.get('episode_steps')
+            episode_successes_train = history.get('episode_successes')
+            print(f"已加载训练历史 ({len(episode_steps_train)} episodes)")
+        else:
+            print(f"未找到训练历史 ({history_path}), 样本效率指标将跳过")
+
+        # 运行综合评估
+        report = evaluate_all_episodes(
+            eval_results=eval_results,
+            csv_dir=eval_dir,
+            env=env,
+            eval_mode=eval_mode,
+            flow_fn=flow_fn,
+            dt=env.dt,
+            episode_steps_train=episode_steps_train,
+            episode_successes_train=episode_successes_train,
+        )
+
+        # 打印评估报告
+        algo_name = 'MPC-HRL (RL)' if eval_mode == 'rl' else 'MPC-HRL (MPC)'
+        print_evaluation_report(report, algorithm_name=algo_name)
+
+        # 获取雷达图数据并绘制
+        radar_metrics = get_normalized_metrics_for_radar(report)
+        radar_save = os.path.join(eval_dir, f"radar_{eval_mode}.png")
+        plot_single_radar(
+            radar_metrics,
+            algorithm_name=algo_name,
+            save_path=radar_save,
+            show=False
+        )
+
+        # 保存评估结果到文本
+        result_file = os.path.join(eval_dir, f"evaluation_report_{eval_mode}.txt")
+        with open(result_file, 'w', encoding='utf-8') as f:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print_evaluation_report(report, algorithm_name=algo_name)
+            f.write(buf.getvalue())
+        print(f"评估报告已保存至: {result_file}")
 
 
 # ============================================================================

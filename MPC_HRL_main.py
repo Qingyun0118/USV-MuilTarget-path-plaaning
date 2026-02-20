@@ -21,6 +21,7 @@ MPC-Guided Two-Layer HRL for USV Multi-Target Navigation
 """
 
 import argparse
+import json
 import os
 import random
 import time
@@ -28,6 +29,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# 评估指标与雷达图模块
+from evaluation_metrics import (
+    evaluate_single_episode, evaluate_all_episodes,
+    compute_success_rate, print_evaluation_report,
+    get_normalized_metrics_for_radar
+)
+from radar_chart import plot_single_radar, plot_multi_radar, plot_metrics_bar_chart
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 from collections import deque
@@ -759,15 +768,75 @@ def train_mpc_hrl(args):
 
     global_step = 0
     best_reward = -float('inf')
+    start_episode = 0
+
+    # 训练历史记录 (用于样本效率评估)
+    training_history = {
+        'episode_steps': [],
+        'episode_successes': [],
+    }
+
+    # ---- 7. 从检查点恢复训练 (可选) ----
+    if getattr(args, 'resume', None):
+        resume_path = args.resume
+        # 支持直接传 episode 数字, 自动推断路径
+        if resume_path.isdigit():
+            resume_path = os.path.join(
+                args.output_dir, "checkpoints", f"ep_{resume_path}",
+                "checkpoint.pth")
+        elif os.path.isdir(resume_path):
+            resume_path = os.path.join(resume_path, "checkpoint.pth")
+
+        if os.path.exists(resume_path):
+            print(f"\n[Resume] 正在从检查点恢复: {resume_path}")
+            ckpt = torch.load(resume_path, map_location=device)
+
+            # 恢复网络权重
+            selector.q_net.load_state_dict(ckpt['selector_q_net'])
+            selector.target_q_net.load_state_dict(ckpt['selector_target_q_net'])
+            actuator.actor.load_state_dict(ckpt['actuator_actor'])
+            actuator.actor_target.load_state_dict(ckpt['actuator_actor_target'])
+            actuator.critic.load_state_dict(ckpt['actuator_critic'])
+            actuator.critic_target.load_state_dict(ckpt['actuator_critic_target'])
+
+            # 恢复优化器状态
+            selector.optimizer.load_state_dict(ckpt['selector_optimizer'])
+            actuator.actor_optimizer.load_state_dict(ckpt['actuator_actor_optimizer'])
+            actuator.critic_optimizer.load_state_dict(ckpt['actuator_critic_optimizer'])
+
+            # 恢复训练状态
+            start_episode = ckpt['episode'] + 1
+            global_step = ckpt['global_step']
+            best_reward = ckpt['best_reward']
+            selector.epsilon = ckpt['epsilon']
+            actuator.total_it = ckpt['actuator_total_it']
+
+            # 恢复训练历史
+            training_history = ckpt.get('training_history', training_history)
+
+            # 恢复 MPC Scheduler 成功历史
+            saved_success_history = ckpt.get('mpc_success_history', [])
+            mpc_scheduler.success_history = deque(
+                saved_success_history, maxlen=args.success_window)
+
+            print(f"[Resume] 从 Episode {start_episode} 继续训练")
+            print(f"[Resume] global_step={global_step}, "
+                  f"best_reward={best_reward:.2f}, "
+                  f"epsilon={selector.epsilon:.4f}, "
+                  f"success_rate={mpc_scheduler.get_success_rate():.2f}")
+        else:
+            print(f"\n[Resume] 检查点不存在: {resume_path}, 将从头开始训练")
 
     print(f"\n{'=' * 60}")
     print(f"  Training Start — {NUM_TARGETS}T/{NUM_OBSTACLES}O")
     print(f"  MPC Decay: Dawood Exponential (p0={args.mpc_p0}, p_min={args.mpc_p_min})")
     print(f"  Max Episodes: {args.max_episodes}")
+    if start_episode > 0:
+        print(f"  Resuming from Episode: {start_episode}")
     print(f"{'=' * 60}\n")
 
     # ======================== Episode Loop ========================
-    for episode in range(args.max_episodes):
+    for episode in range(start_episode, args.max_episodes):
         # ---- 环境重置 (固定 3 目标 6 障碍物) ----
         active_targets = NUM_TARGETS
 
@@ -952,7 +1021,12 @@ def train_mpc_hrl(args):
 
         # ---- 记录成功率 ----
         all_active_reached = (targets_reached_count >= active_targets)
-        mpc_scheduler.record_episode(all_active_reached and not crush)
+        ep_success = all_active_reached and not crush
+        mpc_scheduler.record_episode(ep_success)
+
+        # 记录训练历史 (样本效率)
+        training_history['episode_steps'].append(total_steps)
+        training_history['episode_successes'].append(bool(ep_success))
 
         # ---- Logging ----
         success_rate = mpc_scheduler.get_success_rate()
@@ -984,17 +1058,42 @@ def train_mpc_hrl(args):
         writer.add_scalar('Buffer/Actuator', len(actuator_buffer), episode)
         writer.add_scalar('Buffer/Selector', len(selector_buffer), episode)
 
-        # ---- 定期保存检查点 ----
+        # ---- 定期保存检查点 (完整训练快照, 支持断点续训) ----
         if (episode + 1) % args.checkpoint_interval == 0:
             ckpt_dir = os.path.join(args.output_dir, "checkpoints", f"ep_{episode + 1}")
             os.makedirs(ckpt_dir, exist_ok=True)
+            checkpoint = {
+                # 网络权重 (含 target 网络)
+                'selector_q_net': selector.q_net.state_dict(),
+                'selector_target_q_net': selector.target_q_net.state_dict(),
+                'actuator_actor': actuator.actor.state_dict(),
+                'actuator_actor_target': actuator.actor_target.state_dict(),
+                'actuator_critic': actuator.critic.state_dict(),
+                'actuator_critic_target': actuator.critic_target.state_dict(),
+                # 优化器状态
+                'selector_optimizer': selector.optimizer.state_dict(),
+                'actuator_actor_optimizer': actuator.actor_optimizer.state_dict(),
+                'actuator_critic_optimizer': actuator.critic_optimizer.state_dict(),
+                # 训练状态
+                'episode': episode,
+                'global_step': global_step,
+                'best_reward': best_reward,
+                'epsilon': selector.epsilon,
+                'actuator_total_it': actuator.total_it,
+                # 训练历史 (样本效率)
+                'training_history': training_history,
+                # MPC 调度器成功历史
+                'mpc_success_history': list(mpc_scheduler.success_history),
+            }
+            torch.save(checkpoint, os.path.join(ckpt_dir, "checkpoint.pth"))
+            # 同时保存独立权重文件 (兼容评估加载)
             torch.save(selector.q_net.state_dict(),
                        os.path.join(ckpt_dir, "selector.pth"))
             torch.save(actuator.actor.state_dict(),
                        os.path.join(ckpt_dir, "actuator_actor.pth"))
             torch.save(actuator.critic.state_dict(),
                        os.path.join(ckpt_dir, "actuator_critic.pth"))
-            print(f"  [Checkpoint] Saved at episode {episode + 1}")
+            print(f"  [Checkpoint] Saved at episode {episode + 1} (完整快照)")
 
         # ---- 保存最佳模型 ----
         total_reward = episode_actuator_reward + episode_selector_reward
@@ -1018,6 +1117,12 @@ def train_mpc_hrl(args):
                os.path.join(args.output_dir, "actuator_actor.pth"))
     torch.save(actuator.critic.state_dict(),
                os.path.join(args.output_dir, "actuator_critic.pth"))
+
+    # 保存训练历史 (样本效率评估需要)
+    history_path = os.path.join(args.output_dir, "training_history.json")
+    with open(history_path, 'w') as f:
+        json.dump(training_history, f)
+    print(f"训练历史已保存至: {history_path}")
 
     writer.close()
     print(f"\nTraining Complete. Episodes: {args.max_episodes}")
@@ -1235,6 +1340,64 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     print(f"  Total Time:   {total_eval_time:.2f}s")
     print(f"  Collisions:   {collision_count}")
 
+    # ====================================================================
+    # 综合评估: 6 项指标计算 + 雷达图
+    # ====================================================================
+    if save_csv:
+        print(f"\n--- 运行综合指标评估 (6 项指标) ---")
+
+        # 海流速度获取函数
+        flow_fn = lambda x, y: env.get_flow_velocity(x, y)
+
+        # 加载训练历史 (用于样本效率评估, 仅训练后可用)
+        history_path = os.path.join(args.output_dir, "training_history.json")
+        episode_steps_train = None
+        episode_successes_train = None
+        if os.path.exists(history_path):
+            with open(history_path, 'r') as f:
+                history = json.load(f)
+            episode_steps_train = history.get('episode_steps')
+            episode_successes_train = history.get('episode_successes')
+            print(f"已加载训练历史 ({len(episode_steps_train)} episodes)")
+        else:
+            print(f"未找到训练历史 ({history_path}), 样本效率指标将跳过")
+
+        # 运行综合评估
+        report = evaluate_all_episodes(
+            eval_results=eval_results,
+            csv_dir=eval_dir,
+            env=env,
+            eval_mode=eval_mode,
+            flow_fn=flow_fn,
+            dt=env.dt,
+            episode_steps_train=episode_steps_train,
+            episode_successes_train=episode_successes_train,
+        )
+
+        # 打印评估报告
+        algo_name = 'MPC-HRL (RL)' if eval_mode == 'rl' else 'MPC-HRL (MPC)'
+        print_evaluation_report(report, algorithm_name=algo_name)
+
+        # 获取雷达图数据并绘制
+        radar_metrics = get_normalized_metrics_for_radar(report)
+        radar_save = os.path.join(eval_dir, f"radar_{eval_mode}.png")
+        plot_single_radar(
+            radar_metrics,
+            algorithm_name=algo_name,
+            save_path=radar_save,
+            show=False
+        )
+
+        # 保存评估结果到文本
+        result_file = os.path.join(eval_dir, f"evaluation_report_{eval_mode}.txt")
+        with open(result_file, 'w', encoding='utf-8') as f:
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print_evaluation_report(report, algorithm_name=algo_name)
+            f.write(buf.getvalue())
+        print(f"评估报告已保存至: {result_file}")
+
 
 # ============================================================================
 # ========================= Main Entry Point =================================
@@ -1317,6 +1480,13 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_interval", default=200, type=int)
     parser.add_argument("--log_interval", default=50, type=int,
                         help="每 N 个 episode 打印日志")
+
+    # --- 断点续训 ---
+    parser.add_argument("--resume", default=None, type=str,
+                        help="从检查点恢复训练。可传入: "
+                             "(1) episode 编号, 如 '200'; "
+                             "(2) checkpoint 目录, 如 'mpc_hrl_output/checkpoints/ep_200'; "
+                             "(3) checkpoint.pth 文件完整路径")
 
     # --- 模式 ---
     parser.add_argument("--do_train", action="store_true")

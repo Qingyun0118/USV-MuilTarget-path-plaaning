@@ -662,6 +662,26 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done):
 # ========================= Training Loop ====================================
 # ============================================================================
 
+def set_global_seed(seed: int):
+    """
+    固定所有随机源, 确保训练可复现
+
+    覆盖:
+    - Python random
+    - NumPy
+    - PyTorch CPU / CUDA
+    - cuDNN 确定性模式
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # 多 GPU
+    torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False  #会降低GPU性能, 但保证完全可复现
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+
 def train_mpc_hrl(args):
     """
     MPC-Guided Two-Layer HRL 训练主循环
@@ -673,6 +693,10 @@ def train_mpc_hrl(args):
     4. 经验存入 Replay Buffer
     5. 训练 Actuator (TD3) 和 Selector (DQN)
     """
+    # ---- 0. 全局种子固定 (可复现性) ----
+    set_global_seed(args.seed)
+    print(f"Global seed set to {args.seed} (deterministic mode)")
+
     # ---- 1. 环境初始化 ----
     NUM_TARGETS = args.train_targets
     NUM_OBSTACLES = args.train_obstacles

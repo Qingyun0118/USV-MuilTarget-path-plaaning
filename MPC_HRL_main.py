@@ -1427,7 +1427,7 @@ if __name__ == "__main__":
                         help="导航到单个目标的最大步数")
     parser.add_argument("--warmup_steps", default=1000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
-    parser.add_argument("--fixed_env_episodes", default=80, type=int,
+    parser.add_argument("--fixed_env_episodes", default=0, type=int,
                         help="前 N 个 episode 使用固定种子环境")
 
     # --- 学习率 ---
@@ -1466,13 +1466,13 @@ if __name__ == "__main__":
     # --- MPC 概率衰减参数 (Dawood et al. 指数衰减) ---
     parser.add_argument("--mpc_p0", default=1.0, type=float,
                         help="MPC 初始使用概率")
-    parser.add_argument("--mpc_p_min", default=0.25, type=float,
+    parser.add_argument("--mpc_p_min", default=0.5, type=float,
                         help="MPC 最低使用概率")
     parser.add_argument("--success_window", default=100, type=int,
                         help="成功率统计滑动窗口大小")
 
     # --- 行为克隆参数 (BC Loss) ---
-    parser.add_argument("--bc_weight", default=2.0, type=float,
+    parser.add_argument("--bc_weight", default=3.0, type=float,
                         help="行为克隆损失基础权重 (实际权重 = bc_weight * mpc_prob)")
 
     # --- 输出参数 ---

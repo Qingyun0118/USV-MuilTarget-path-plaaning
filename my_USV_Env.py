@@ -123,62 +123,32 @@ class Obstacle():
     # draw the obstacle on the environment
     def show_obstacle(self, ax, label_obstacle=None, label_core=None, label_safety=None):
         """绘制障碍物"""
+        obs_face = '#A0A0A0'
+        obs_edge = '#404040'
+        danger_edge = '#D62728'
+        
+        def _draw_zone_and_body(geometry, danger_zone):
+            # 危险区域（仅虚线边框）
+            dv = list(danger_zone.exterior.coords)[:-1]
+            ax.add_patch(MplPolygon(dv, closed=True, facecolor='none',
+                                    edgecolor=danger_edge, linestyle='--',
+                                    linewidth=0.8, label=label_core, zorder=2))
+            # 障碍物本体
+            verts = list(geometry.exterior.coords)[:-1]
+            ax.add_patch(MplPolygon(verts, closed=True, facecolor=obs_face,
+                                    edgecolor=obs_edge, linewidth=0.8,
+                                    label=label_obstacle, zorder=3))
+        
         if self.shape == ObstacleShape.CIRCLE:
-            circle_ob = plt.Circle((self.x, self.y), self.radius_o, 
-                                   color='gray', fill=True, label=label_obstacle, zorder=3)
-            ax.add_patch(circle_ob)
-            circle_c = plt.Circle((self.x, self.y), self.radius_o + self.rou_c, 
-                                  color='red', linestyle='--', fill=False, 
-                                  label=label_core, zorder=2)
-            ax.add_patch(circle_c)
-            circle_s = plt.Circle((self.x, self.y), self.radius_o + self.rou_c + self.rou_s, 
-                                  color='brown', linestyle='--', fill=False, 
-                                  label=label_safety, zorder=2)
-            ax.add_patch(circle_s)
-        
-        elif self.shape == ObstacleShape.RECTANGLE:
-            # 绘制矩形障碍物
-            vertices = list(self.geometry.exterior.coords)[:-1]
-            rect_patch = MplPolygon(vertices, closed=True, 
-                                    facecolor='gray',
-                                    label=label_obstacle, zorder=3)
-            ax.add_patch(rect_patch)
-            
-            # 绘制危险区域
-            danger_vertices = list(self.danger_zone.exterior.coords)[:-1]
-            danger_patch = MplPolygon(danger_vertices, closed=True,
-                                      facecolor='none', edgecolor='red',
-                                      linestyle='--', label=label_core, zorder=2)
-            ax.add_patch(danger_patch)
-            
-            # 绘制安全区域
-            safety_vertices = list(self.safety_zone.exterior.coords)[:-1]
-            safety_patch = MplPolygon(safety_vertices, closed=True,
-                                      facecolor='none', edgecolor='brown',
-                                      linestyle='--', label=label_safety, zorder=2)
-            ax.add_patch(safety_patch)
-        
-        elif self.shape == ObstacleShape.POLYGON:
-            # 绘制多边形障碍物
-            vertices = list(self.geometry.exterior.coords)[:-1]
-            poly_patch = MplPolygon(vertices, closed=True,
-                                    facecolor='gray',
-                                    label=label_obstacle, zorder=3)
-            ax.add_patch(poly_patch)
-            
-            # 绘制危险区域
-            danger_vertices = list(self.danger_zone.exterior.coords)[:-1]
-            danger_patch = MplPolygon(danger_vertices, closed=True,
-                                      facecolor='none', edgecolor='red',
-                                      linestyle='--', label=label_core, zorder=2)
-            ax.add_patch(danger_patch)
-            
-            # 绘制安全区域
-            safety_vertices = list(self.safety_zone.exterior.coords)[:-1]
-            safety_patch = MplPolygon(safety_vertices, closed=True,
-                                      facecolor='none', edgecolor='brown',
-                                      linestyle='--', label=label_safety, zorder=2)
-            ax.add_patch(safety_patch)
+            ax.add_patch(plt.Circle((self.x, self.y), self.radius_o + self.rou_c,
+                                    facecolor='none', edgecolor=danger_edge,
+                                    linestyle='--', linewidth=0.8,
+                                    label=label_core, zorder=2))
+            ax.add_patch(plt.Circle((self.x, self.y), self.radius_o,
+                                    facecolor=obs_face, edgecolor=obs_edge,
+                                    linewidth=0.8, label=label_obstacle, zorder=3))
+        else:
+            _draw_zone_and_body(self.geometry, self.danger_zone)
 
 
 # define the target area class
@@ -205,12 +175,20 @@ class Target():
         
     # draw the target on the environment
     def show_target(self, ax, prio_num=None, label=None):
-        plt.plot(self.x, self.y, 'g*', label=label, markersize=10, zorder=5)
-        ax.text(self.x + self.radius_t, self.y + self.radius_t, str(prio_num), 
-                color='green', fontsize=12, ha='center', va='center')
-        circle_t = plt.Circle((self.x, self.y), self.radius_t, 
-                              color='green', linestyle='--', fill=False, zorder=4)
+        """绘制目标"""
+        # 目标区域虚线圆
+        circle_t = plt.Circle((self.x, self.y), self.radius_t,
+                              facecolor='none', edgecolor='#2CA02C',
+                              linestyle='--', linewidth=0.9, zorder=4)
         ax.add_patch(circle_t)
+        # 目标中心标记
+        ax.plot(self.x, self.y, marker='*', color='#2CA02C',
+                markersize=10, markeredgewidth=0.5, label=label, zorder=5)
+        # 序号
+        if prio_num is not None:
+            ax.text(self.x + self.radius_t + 0.5, self.y + self.radius_t + 0.5,
+                    str(prio_num), fontsize=9, color='#2CA02C',
+                    ha='left', va='bottom', zorder=6)
 
 
 # define the boundary of the environment
@@ -231,6 +209,7 @@ class MyUsvEnv():
     def __init__(self, 
                  num_targets=3, 
                  num_obstacles=5,
+                 dt=0.05,
                  seed=None,
                  record_flag=False,
                  usv_length=3.0,
@@ -331,7 +310,7 @@ class MyUsvEnv():
         # 海流数据
         self.X, self.Y = np.meshgrid(np.arange(0, 100, 1), np.arange(0, 100, 1))
         self.U, self.V = self._load_current_data()
-        self.dt = 0.05
+        self.dt = dt
         self.current_time = 0.0
 
     def _get_observation(self):
@@ -849,138 +828,234 @@ class MyUsvEnv():
     
     def visualize_env(self, time_step=None):
         """可视化环境"""
-        plt.rcParams['figure.figsize'] = (8.0, 9.0)
-        fig, ax = plt.subplots()
-        
+        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
+                             'mathtext.fontset': 'cm'})
+        fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
-        ax.set_facecolor('#F5F5F5')
+        ax.set_facecolor('white')
         
-        # 如果指定了时间步，重新计算该时刻的海流
+        # 海流场
         if time_step is not None and self.current_type == "generated":
             U, V = self._generate_current_data(t=time_step)
         else:
             U, V = self.U, self.V
-            
-        # 绘制海流
-        quiver = ax.quiver(self.X, self.Y, U[:100, :100].T, V[:100, :100].T,
-                          width=0.002, scale=20, color='blue', alpha=0.3)
+        # 稀疏采样，每隔3格取一个箭头
+        step = 3
+        Xs, Ys = self.X[::step, ::step], self.Y[::step, ::step]
+        Us, Vs = U[:100, :100].T[::step, ::step], V[:100, :100].T[::step, ::step]
+        ax.quiver(Xs, Ys, Us, Vs, color='#7FB3D8', alpha=0.5,
+                  width=0.002, scale=25, zorder=1)
         
-        # 绘制起始位置
-        ax.plot(self.start_pos[0], self.start_pos[1], 'r*', markersize=15, zorder=5)
+        # 障碍物
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
         
-        # 绘制USV
-        self.usv.show_usv(ax, color='blue', alpha=0.7)
-        
-        # 绘制目标
+        # 目标
         for i, target in enumerate(self.targets):
             target.show_target(ax, i)
         
-        # 绘制障碍物
-        for i, obs in enumerate(self.obstacles):
-            obs.show_obstacle(ax)
+        # 起始位置
+        ax.plot(self.start_pos[0], self.start_pos[1],
+                'r*', markersize=12, zorder=8)
+        
+        # USV
+        self.usv.show_usv(ax, color='#1F77B4', alpha=0.8)
         
         # 图例
         legend_elements = [
-            Line2D([0], [0], marker='*', color='red', markeredgecolor='red',
-                   markersize=10, label='Start Point', linewidth=0),
-            MplPolygon([(0, 0)], closed=True, facecolor='blue', edgecolor='darkblue',
-                       alpha=0.7, label='USV'),
-            Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
-            Patch(facecolor='red', edgecolor='red', label='Obstacle'),
-            Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
-            # Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
-            Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current')
+            Line2D([0], [0], marker='*', color='r', markersize=8,
+                   label='Start', linewidth=0),
+            MplPolygon([(0,0)], closed=True, facecolor='#1F77B4',
+                       edgecolor='k', alpha=0.8, label='USV'),
+            Line2D([0], [0], marker='*', color='#2CA02C', markersize=8,
+                   label='Target', linewidth=0),
+            Patch(facecolor='#A0A0A0', edgecolor='#404040', label='Obstacle'),
+            Patch(facecolor='none', edgecolor='#D62728',
+                  linestyle='--', label='Danger zone'),
+            Line2D([0], [0], color='#7FB3D8', alpha=0.5,
+                   linewidth=1.5, label='Current'),
         ]
-        
         ax.legend(handles=legend_elements, loc='upper center',
-                 bbox_to_anchor=(0.5, -0.08), ncol=3, framealpha=0.9)
+                  bbox_to_anchor=(0.5, -0.04), ncol=3,
+                  fontsize=9, frameon=True, edgecolor='gray',
+                  framealpha=1.0, handletextpad=0.4, columnspacing=1.0)
         
-        plt.xlabel('X Coordinate')
-        plt.ylabel('Y Coordinate')
-        plt.title(f'Multi-Target USV Path Planning Environment\n'
-                 f'(Targets: {self.num_targets}, Obstacles: {self.num_obstacles}, Seed: {self.seed})')
-        
-        plt.xlim(X_MIN, X_MAX)
-        plt.ylim(Y_MIN, Y_MAX)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout(rect=[0, 0.08, 1, 0.95])
-        plt.show()
-
-    def animate_currents(self, duration=20, interval=200, save_path="currents_animation.gif"):
-        """
-        以动画形式可视化海流随时间的变化
-        
-        Args:
-            duration: 动画持续时间（仿真时间单位）
-            interval: 帧间隔（毫秒）
-            save_path: 保存路径
-        """
-        from matplotlib.animation import FuncAnimation
-        
-        if self.current_type != "generated":
-            print("警告：仅在 'generated' 模式下支持海流动画")
-            return
-
-        plt.rcParams['figure.figsize'] = (8.0, 9.0)
-        fig, ax = plt.subplots()
-        fig.patch.set_facecolor('white')
-        ax.set_facecolor('#F5F5F5')
-        
-        # 初始化绘图元素
-        # 绘制障碍物
-        for obs in self.obstacles:
-            obs.show_obstacle(ax)
-            
-        # 绘制目标
-        for i, target in enumerate(self.targets):
-            target.show_target(ax, i)
-            
-        # 绘制起始位置
-        ax.plot(self.start_pos[0], self.start_pos[1], 'r*', markersize=15, zorder=5)
-        
-        # 初始化海流 Quiver
-        # 先计算初始时刻的海流
-        U0, V0 = self._generate_current_data(t=0)
-        quiver = ax.quiver(self.X, self.Y, U0[:100, :100].T, V0[:100, :100].T,
-                          width=0.002, scale=20, color='blue', alpha=0.3)
-        
-        # 设置标题和标签
-        title = ax.set_title(f'Time-Varying Currents (t=0.00)')
-        ax.set_xlabel('X Coordinate')
-        ax.set_ylabel('Y Coordinate')
+        ax.set_xlabel('$x$ / m')
+        ax.set_ylabel('$y$ / m')
+        ax.set_title(f'Environment  (targets={self.num_targets}, '
+                     f'obstacles={self.num_obstacles}, seed={self.seed})',
+                     fontsize=11, pad=8)
         ax.set_xlim(X_MIN, X_MAX)
         ax.set_ylim(Y_MIN, Y_MAX)
-        ax.grid(True, alpha=0.3)
-        
-        # 动画更新函数
-        def update(frame):
-            t = frame * self.dt
+        ax.set_aspect('equal')
+        ax.grid(True, linewidth=0.3, alpha=0.4)
+        ax.tick_params(direction='in', length=3)
+        plt.tight_layout(rect=[0, 0.05, 1, 1])
+        plt.show()
+
+    def animate(self, csv_file=None, duration=20, interval=100,
+                save_path="animation.gif", trail_length=0, speed=1):
+        """
+        动态可视化动画（海流 + 可选的 USV 轨迹回放）
+
+        当提供 csv_file 时，同时播放时变海流与 USV 运动轨迹；
+        当 csv_file 为 None 时，仅播放时变海流。
+
+        Args:
+            csv_file:     路径点 CSV 文件（列: x, y, heading），为 None 则仅显示海流
+            duration:     仅海流模式下的动画时长（仿真时间单位），有 CSV 时自动按轨迹长度决定
+            interval:     帧间隔（毫秒）
+            save_path:    保存路径，为 None 则直接显示
+            trail_length: 尾迹保留长度（0 = 保留全部已走过轨迹），仅轨迹模式有效
+            speed:        每帧前进的点数（加速回放），仅轨迹模式有效
+        """
+        from matplotlib.animation import FuncAnimation
+
+        if self.current_type != "generated":
+            print("警告：仅在 'generated' 模式下支持时变海流动画")
+            return
+
+        # ---------- 读取 CSV（若有） ----------
+        has_path = csv_file is not None
+        x_pts, y_pts, headings = [], [], []
+
+        if has_path:
+            with open(csv_file, 'r') as f:
+                reader = csv.reader(f)
+                try:
+                    header = next(reader)
+                    has_heading = len(header) >= 3 and 'heading' in header[2].lower()
+                except StopIteration:
+                    print("CSV 文件为空"); return
+                for row in reader:
+                    if len(row) >= 2 and row[0] and row[1]:
+                        try:
+                            x, y = float(row[0]), float(row[1])
+                            x_pts.append(x); y_pts.append(y)
+                            headings.append(float(row[2]) if len(row) >= 3 and row[2] else 0.0)
+                        except ValueError:
+                            continue
+            if len(x_pts) < 2:
+                print("有效路径点不足"); return
+
+            # 补算航向
+            if not has_heading or all(h == 0.0 for h in headings):
+                for i in range(len(x_pts)):
+                    if i < len(x_pts) - 1:
+                        headings[i] = np.arctan2(y_pts[i+1] - y_pts[i],
+                                                 x_pts[i+1] - x_pts[i])
+                    else:
+                        headings[i] = headings[i-1] if i > 0 else 0.0
+
+        # ---------- 画布 ----------
+        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
+                             'mathtext.fontset': 'cm'})
+        fig, ax = plt.subplots(figsize=(7, 7))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+
+        # 静态元素: 障碍物、目标
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
+        for i, target in enumerate(self.targets):
+            target.show_target(ax, i)
+
+        # 起始位置
+        start_x = x_pts[0] if has_path else self.start_pos[0]
+        start_y = y_pts[0] if has_path else self.start_pos[1]
+        ax.plot(start_x, start_y, 'r*', markersize=12, zorder=8)
+
+        # 海流 Quiver（稀疏采样，时变更新）
+        step = 3
+        Xs, Ys = self.X[::step, ::step], self.Y[::step, ::step]
+        U0, V0 = self._generate_current_data(t=0)
+        Us0 = U0[:100, :100].T[::step, ::step]
+        Vs0 = V0[:100, :100].T[::step, ::step]
+        quiver = ax.quiver(Xs, Ys, Us0, Vs0,
+                           width=0.002, scale=25, color='#7FB3D8', alpha=0.5, zorder=1)
+
+        # 轨迹相关动态元素
+        trail_line = None
+        _prev_artists = []
+        obs_geoms = []
+        if has_path:
+            trail_line, = ax.plot([], [], color='#D62728', linewidth=1.2,
+                                  alpha=0.85, zorder=5)
+            obs_geoms = [ob.geometry for ob in self.obstacles]
+
+        # 坐标轴设置
+        title = ax.set_title('', fontsize=11, pad=8)
+        ax.set_xlabel('$x$ / m')
+        ax.set_ylabel('$y$ / m')
+        ax.set_xlim(X_MIN, X_MAX)
+        ax.set_ylim(Y_MIN, Y_MAX)
+        ax.set_aspect('equal')
+        ax.grid(True, linewidth=0.3, alpha=0.4)
+        ax.tick_params(direction='in', length=3)
+
+        # ---------- 帧数计算 ----------
+        if has_path:
+            total_frames = (len(x_pts) - 1) // speed + 1
+        else:
+            total_frames = int(duration / self.dt)
+
+        # ---------- 更新函数 ----------
+        def _update(frame):
+            nonlocal _prev_artists
+
+            # 1) 更新时变海流
+            if has_path:
+                t = frame * speed * self.dt
+            else:
+                t = frame * self.dt
             U, V = self._generate_current_data(t=t)
-            
-            # 更新 Quiver 数据
-            # quiver.set_UVC 需要展平的数组或者与 X, Y 形状匹配的数组
-            # 注意：matplotlib quiver 的 U, V 通常对应 X, Y 的网格
-            # 这里 self.X, self.Y 是 meshgrid 生成的
-            # self.U, self.V 是 (100, 100)
-            # 需要注意转置问题，与 visualize_env 保持一致
-            quiver.set_UVC(U[:100, :100].T, V[:100, :100].T)
-            
-            title.set_text(f'Time-Varying Currents (t={t:.2f})')
-            return quiver, title
-            
-        # 计算帧数
-        frames = int(duration / self.dt)
-        
-        anim = FuncAnimation(fig, update, frames=frames, interval=interval, blit=False)
-        
-        try:
-            anim.save(save_path, writer='pillow')
-            print(f"动画已保存至 {save_path}")
-        except Exception as e:
-            print(f"保存动画失败: {e}")
-            print("请确保安装了 pillow (pip install pillow) 或其他动画写入器")
-            
-        plt.close()
+            Us = U[:100, :100].T[::step, ::step]
+            Vs = V[:100, :100].T[::step, ::step]
+            quiver.set_UVC(Us, Vs)
+
+            # 2) 更新轨迹 & USV
+            if has_path:
+                idx = min(frame * speed, len(x_pts) - 1)
+
+                # 尾迹
+                s = max(0, idx - trail_length) if trail_length > 0 else 0
+                trail_line.set_data(x_pts[s:idx+1], y_pts[s:idx+1])
+
+                # 移除上一帧 USV artists
+                for a in _prev_artists:
+                    a.remove()
+                _prev_artists.clear()
+
+                n_patches = len(ax.patches)
+                n_lines = len(ax.lines)
+
+                usv_now = USV(x_pts[idx], y_pts[idx], heading=headings[idx],
+                              length=self.usv_length, width=self.usv_width)
+                usv_now.detect_obstacles(obs_geoms)
+                usv_now.show_usv(ax, color='#1F77B4', alpha=0.85)
+
+                _prev_artists.extend(ax.patches[n_patches:])
+                _prev_artists.extend(ax.lines[n_lines:])
+
+                title.set_text(f'Step {idx}/{len(x_pts)-1}  '
+                               f'$t={t:.1f}$  pos=({x_pts[idx]:.1f}, {y_pts[idx]:.1f})')
+            else:
+                title.set_text(f'Time-varying currents ($t={t:.2f}$)')
+
+            return quiver,
+
+        anim = FuncAnimation(fig, _update, frames=total_frames,
+                             interval=interval, blit=False, repeat=False)
+
+        if save_path is not None:
+            try:
+                anim.save(save_path, writer='pillow')
+                print(f"动画已保存至 {save_path}  ({total_frames} 帧)")
+            except Exception as e:
+                print(f"保存动画失败: {e}")
+            plt.close()
+        else:
+            plt.show()
     
     def record_points(self, point, csv_file="usv_path_points.csv", heading=None):
         """记录路径点和航向
@@ -1031,30 +1106,31 @@ class MyUsvEnv():
             savePath: 保存路径
             max_episode: 最大episode数量
             show_usv_shape: 是否使用USV形状绘制轨迹节点
-            usv_interval: 每隔多少个点绘制一个USV形状（避免过于密集）
+            usv_interval: 每隔多少个点绘制一个USV形状
         """
-        plt.rcParams['figure.figsize'] = (10.0, 11.0)
-        fig, ax = plt.subplots()
-        
+        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
+                             'mathtext.fontset': 'cm'})
+        fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
-        ax.set_facecolor('#F5F5F5')
+        ax.set_facecolor('white')
         
-        # 绘制海流
-        quiver = ax.quiver(self.X, self.Y, self.U[:100, :100].T, self.V[:100, :100].T,
-                          width=0.002, scale=20, color='blue', alpha=0.3)
+        # 海流场（稀疏箭头）
+        step = 3
+        Xs, Ys = self.X[::step, ::step], self.Y[::step, ::step]
+        Us = self.U[:100, :100].T[::step, ::step]
+        Vs = self.V[:100, :100].T[::step, ::step]
+        ax.quiver(Xs, Ys, Us, Vs, color='#7FB3D8', alpha=0.4,
+                  width=0.002, scale=25, zorder=1)
         
-        # 绘制目标
+        # 障碍物 & 目标
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
         for i, target in enumerate(self.targets):
             target.show_target(ax, i)
         
-        # 绘制障碍物
-        for obs in self.obstacles:
-            obs.show_obstacle(ax)
-        
         try:
-            colors = ['#FF6B35', '#4ECDC4', '#45B7D1', '#96CEB4', '#F7DC6F',
-                     '#BB8FCE', '#85C1E9', '#F8C471', '#82E0AA', '#F1948A']
-            
+            path_colors = ['#D62728', '#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD',
+                           '#8C564B', '#E377C2', '#17BECF', '#BCBD22', '#7F7F7F']
             paths_drawn = 0
             
             for episode in range(1, max_episode + 1):
@@ -1075,94 +1151,66 @@ class MyUsvEnv():
                     print(f"Path file {episode_file} does not exist")
                     continue
                 
-                x_points = []
-                y_points = []
-                headings = []
+                x_points, y_points, headings = [], [], []
                 with open(episode_file, 'r') as f:
                     reader = csv.reader(f)
                     try:
                         header = next(reader)
                         has_heading = len(header) >= 3 and 'heading' in header[2].lower()
                     except StopIteration:
-                        print(f"File {episode_file} is empty")
                         continue
-                    
                     for row in reader:
                         if len(row) >= 2 and row[0] and row[1]:
                             try:
-                                x = float(row[0])
-                                y = float(row[1])
+                                x, y = float(row[0]), float(row[1])
                                 if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
                                     x_points.append(x)
                                     y_points.append(y)
-                                    # 读取航向，如果没有则计算
-                                    if len(row) >= 3 and row[2]:
-                                        headings.append(float(row[2]))
-                                    else:
-                                        headings.append(0.0)
+                                    headings.append(float(row[2]) if len(row) >= 3 and row[2] else 0.0)
                             except ValueError:
                                 continue
                 
                 if len(x_points) < 2:
-                    print(f"Only {len(x_points)} valid points in {episode_file}, need at least 2")
                     continue
                 
-                # 如果没有航向数据，根据相邻点计算航向
                 if not has_heading or all(h == 0.0 for h in headings):
                     for i in range(len(x_points)):
                         if i < len(x_points) - 1:
-                            dx = x_points[i+1] - x_points[i]
-                            dy = y_points[i+1] - y_points[i]
-                            headings[i] = np.arctan2(dy, dx)
+                            headings[i] = np.arctan2(y_points[i+1]-y_points[i],
+                                                     x_points[i+1]-x_points[i])
                         else:
                             headings[i] = headings[i-1] if i > 0 else 0.0
                 
-                color = colors[(episode - 1) % len(colors)] if max_episode > 1 else '#FF6B35'
+                color = path_colors[(episode-1) % len(path_colors)] if max_episode > 1 else '#D62728'
+                label = f'Episode {episode}' if max_episode > 1 else 'Path'
                 
-                # 绘制路径线
-                label = f'Episode {episode}' if max_episode > 1 else 'USV Path'
-                ax.plot(x_points, y_points,
-                       color=color,
-                       linewidth=1.5,
-                       linestyle='--',
-                       alpha=0.7,
-                       zorder=4,
-                       label=label)
+                # 路径线
+                ax.plot(x_points, y_points, color=color, linewidth=1.2,
+                        alpha=0.85, zorder=5, label=label)
                 
-                # 绘制USV形状或圆点
+                # USV形状标记
                 if show_usv_shape:
-                    # 使用USV形状绘制轨迹节点
                     for i in range(0, len(x_points), usv_interval):
-                        usv_marker = USV(x_points[i], y_points[i], heading=headings[i],
-                                        length=self.usv_length * 0.8,
-                                        width=self.usv_width * 0.8)
-                        # 使用渐变透明度
-                        alpha = 0.3 + 0.5 * (i / len(x_points))
-                        vertices = usv_marker.get_vertices()
-                        polygon_patch = MplPolygon(vertices, closed=True,
-                                                   facecolor=color, edgecolor='darkblue',
-                                                   alpha=alpha, linewidth=0.5, zorder=5)
-                        ax.add_patch(polygon_patch)
-                else:
-                    # 使用圆点标记
-                    ax.scatter(x_points[::usv_interval], y_points[::usv_interval],
-                              c=color, s=20, marker='o', zorder=5,
-                              edgecolors='white', linewidths=0.5)
+                        usv_m = USV(x_points[i], y_points[i], heading=headings[i],
+                                    length=self.usv_length*0.6, width=self.usv_width*0.6)
+                        verts = usv_m.get_vertices()
+                        ax.add_patch(MplPolygon(verts, closed=True, facecolor=color,
+                                               edgecolor='k', alpha=0.5,
+                                               linewidth=0.4, zorder=6))
                 
-                # 提取障碍物几何体供探测使用
                 obs_geoms = [obs.geometry for obs in self.obstacles]
-
-                # 绘制起点（使用USV形状，绿色）
+                
+                # 起点
                 start_usv = USV(x_points[0], y_points[0], heading=headings[0],
                                length=self.usv_length, width=self.usv_width)
                 start_usv.detect_obstacles(obs_geoms)
-                start_usv.show_usv(ax, color='green', alpha=0.8)
-
-                # 绘制终点（使用USV形状，红色）
+                start_usv.show_usv(ax, color='#2CA02C', alpha=0.8)
+                
+                # 终点
                 end_usv = USV(x_points[-1], y_points[-1], heading=headings[-1],
                              length=self.usv_length, width=self.usv_width)
                 end_usv.detect_obstacles(obs_geoms)
-                end_usv.show_usv(ax, color='red', alpha=0.9)
+                end_usv.show_usv(ax, color='#D62728', alpha=0.8)
                 
                 paths_drawn += 1
             
@@ -1171,38 +1219,40 @@ class MyUsvEnv():
                 return
             
             legend_elements = [
-                MplPolygon([(0, 0)], closed=True, facecolor='green', edgecolor='darkblue',
-                          alpha=0.8, label='Start USV'),
-                Patch(facecolor='none', edgecolor='green', linestyle='--', label='Target Area'),
-                Patch(facecolor='gray', edgecolor='gray', label='Obstacle'),
-                Patch(facecolor='none', edgecolor='red', linestyle='--', label='Danger Area'),
-                # Patch(facecolor='none', edgecolor='brown', linestyle='--', label='Safety Area'),
-                Line2D([0], [0], color='blue', alpha=0.3, label='Ocean Current'),
-                Line2D([0], [0], color='#FF6B35', label='USV Path', linewidth=1.5, linestyle='--'),
-                MplPolygon([(0, 0)], closed=True, facecolor='red', edgecolor='darkblue',
-                          alpha=0.9, label='End USV'),
+                MplPolygon([(0,0)], closed=True, facecolor='#2CA02C',
+                           edgecolor='k', alpha=0.8, label='Start'),
+                MplPolygon([(0,0)], closed=True, facecolor='#D62728',
+                           edgecolor='k', alpha=0.8, label='End'),
+                Line2D([0],[0], marker='*', color='#2CA02C', markersize=8,
+                       label='Target', linewidth=0),
+                Patch(facecolor='#A0A0A0', edgecolor='#404040', label='Obstacle'),
+                Patch(facecolor='none', edgecolor='#D62728',
+                      linestyle='--', label='Danger zone'),
+                Line2D([0],[0], color='#7FB3D8', alpha=0.5,
+                       linewidth=1.5, label='Current'),
+                Line2D([0],[0], color=path_colors[0], linewidth=1.2,
+                       label='Path'),
             ]
-            
             ax.legend(handles=legend_elements, loc='upper center',
-                     bbox_to_anchor=(0.5, -0.08 if max_episode == 1 else -0.12),
-                     ncol=4, framealpha=0.9)
+                      bbox_to_anchor=(0.5, -0.04), ncol=4,
+                      fontsize=9, frameon=True, edgecolor='gray',
+                      framealpha=1.0, handletextpad=0.4, columnspacing=1.0)
             
-            plt.title(f'Multi-Target USV Path Planning \n'
-                     f'(Targets: {self.num_targets}, Obstacles: {self.num_obstacles}, Seed: {self.seed})')
-            plt.xlabel('X Coordinate')
-            plt.ylabel('Y Coordinate')
-            plt.grid(True, alpha=0.3)
-            plt.xlim(X_MIN, X_MAX)
-            plt.ylim(Y_MIN, Y_MAX)
-            
-            bottom_margin = 0.06 if max_episode == 1 else 0.1
-            plt.tight_layout(rect=[0, bottom_margin, 1, 0.95])
+            ax.set_title(f'Path planning  (targets={self.num_targets}, '
+                         f'obstacles={self.num_obstacles}, seed={self.seed})',
+                         fontsize=11, pad=8)
+            ax.set_xlabel('$x$ / m')
+            ax.set_ylabel('$y$ / m')
+            ax.grid(True, linewidth=0.3, alpha=0.4)
+            ax.set_xlim(X_MIN, X_MAX)
+            ax.set_ylim(Y_MIN, Y_MAX)
+            ax.set_aspect('equal')
+            ax.tick_params(direction='in', length=3)
+            plt.tight_layout(rect=[0, 0.05, 1, 1])
             
             if ifsave:
-                if max_episode > 1:
-                    save_filename = f"all_episodes_paths.png"
-                else:
-                    save_filename = f"{os.path.basename(csv_file).split('.')[0]}.png"
+                save_filename = (f"all_episodes_paths.png" if max_episode > 1
+                                 else f"{os.path.basename(csv_file).split('.')[0]}.png")
                 plt.savefig(os.path.join(savePath, save_filename), dpi=300, bbox_inches='tight')
                 print(f"Image saved to {os.path.join(savePath, save_filename)}")
             if ifshow:

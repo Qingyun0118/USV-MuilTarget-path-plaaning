@@ -1032,7 +1032,7 @@ def train_mpc_hrl(args):
         success_rate = mpc_scheduler.get_success_rate()
 
         if episode % args.log_interval == 0 or episode < 10:
-            print(f"EP {episode} [3T/6O] | "
+            print(f"EP {episode} [{NUM_TARGETS}T/{NUM_OBSTACLES}O] | "
                   f"R_act:{episode_actuator_reward:.1f} R_sel:{episode_selector_reward:.1f} | "
                   f"Tgt:{targets_reached_count}/{active_targets} | "
                   f"Dist:{episode_total_distance:.0f} | "
@@ -1310,12 +1310,12 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
               f"Time: {ep_elapsed:.2f}s | "
               f"Order: {target_order}")
 
-        # 绘制路径
-        if save_csv and os.path.exists(csv_file):
-            try:
-                env.draw_path(csv_file, ifshow=False, ifsave=True, savePath=eval_dir)
-            except Exception as e:
-                print(f"  Warning: Draw path failed: {e}")
+        # 绘制路径 (仅在未指定 --eval_save_csv 时绘制, 该参数表示只保存 CSV)
+        # if save_csv and os.path.exists(csv_file):
+        #     try:
+        #         env.draw_path(csv_file, ifshow=False, ifsave=True, savePath=eval_dir)
+        #     except Exception as e:
+        #         print(f"  Warning: Draw path failed: {e}")
 
     # 汇总
     total_eval_time = time.time() - total_eval_start
@@ -1343,7 +1343,7 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     # ====================================================================
     # 综合评估: 6 项指标计算 + 雷达图
     # ====================================================================
-    if save_csv:
+    if save_eval_report := getattr(args, 'save_eval_report', True):
         print(f"\n--- 运行综合指标评估 (6 项指标) ---")
 
         # 海流速度获取函数
@@ -1388,15 +1388,61 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
             show=False
         )
 
-        # 保存评估结果到文本
+        # 保存评估结果到文本 (追加模式, 带时间戳和参数)
         result_file = os.path.join(eval_dir, f"evaluation_report_{eval_mode}.txt")
-        with open(result_file, 'w', encoding='utf-8') as f:
+        with open(result_file, 'a', encoding='utf-8') as f:
             import io, contextlib
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"\n{'=' * 70}\n")
+            f.write(f"  评估时间: {timestamp}\n")
+            f.write(f"{'=' * 70}\n")
+            # 环境参数
+            f.write(f"\n--- 环境参数 ---\n")
+            f.write(f"  评估模式:       {eval_mode}\n")
+            f.write(f"  目标数量:       {args.eval_targets}\n")
+            f.write(f"  障碍物数量:     {args.eval_obstacles}\n")
+            f.write(f"  评估 episodes:  {args.eval_episodes}\n")
+            f.write(f"  评估种子:       {args.eval_seed}\n")
+            f.write(f"  USV 尺寸:       {args.usv_length} x {args.usv_width} m\n")
+            f.write(f"  目标半径:       {args.target_radius} m\n")
+            f.write(f"  障碍物半径:     {args.obstacle_radius_min}~{args.obstacle_radius_max} m\n")
+            f.write(f"  随机形状:       {args.use_random_shapes}\n")
+            f.write(f"  模型目录:       {args.output_dir}\n")
+            # 训练参数 (重要)
+            f.write(f"\n--- 训练参数 ---\n")
+            f.write(f"  训练 episodes:  {args.max_episodes}\n")
+            f.write(f"  每目标最大步数: {args.max_steps_per_target}\n")
+            f.write(f"  Actor LR:       {args.lr_actor}\n")
+            f.write(f"  Critic LR:      {args.lr_critic}\n")
+            f.write(f"  Selector LR:    {args.lr_selector}\n")
+            f.write(f"  TD3 tau:        {args.tau}\n")
+            f.write(f"  Policy noise:   {args.policy_noise}\n")
+            f.write(f"  MPC p0:         {args.mpc_p0}\n")
+            f.write(f"  MPC p_min:      {args.mpc_p_min}\n")
+            f.write(f"  BC weight:      {args.bc_weight}\n")
+            f.write(f"  Seed:           {args.seed}\n")
+            # 汇总
+            f.write(f"\n--- 评估结果汇总 ---\n")
+            f.write(f"  Success Rate: {success_count}/{len(eval_results)} "
+                    f"({100 * success_count / max(len(eval_results), 1):.0f}%)\n")
+            if success_results:
+                avg_distance = np.mean([r['total_distance'] for r in success_results])
+                avg_time = np.mean([r['time'] for r in success_results])
+                f.write(f"  Avg Distance: {avg_distance:.1f}  (success only)\n")
+                f.write(f"  Avg Time:     {avg_time:.2f}s per episode  (success only)\n")
+            else:
+                f.write(f"  Avg Distance: N/A  (no successful episode)\n")
+                f.write(f"  Avg Time:     N/A  (no successful episode)\n")
+            f.write(f"  Total Time:   {total_eval_time:.2f}s\n")
+            f.write(f"  Collisions:   {collision_count}\n")
+            # 评估报告
+            f.write(f"\n--- 综合评估报告 ---\n")
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 print_evaluation_report(report, algorithm_name=algo_name)
             f.write(buf.getvalue())
-        print(f"评估报告已保存至: {result_file}")
+            f.write(f"\n{'─' * 70}\n\n")
+        print(f"评估报告已追加至: {result_file}")
 
 
 # ============================================================================
@@ -1501,7 +1547,9 @@ if __name__ == "__main__":
                         help="评估时障碍物数量")
     parser.add_argument("--eval_seed", default=42, type=int)
     parser.add_argument("--eval_save_csv", action="store_true",
-                        help="评估时保存路径 CSV 文件和路径图")
+                        help="评估时保存路径 CSV 文件")
+    parser.add_argument("--save_eval_report", action="store_true",
+                        help="评估后保存综合评估报告文本")
 
     args = parser.parse_args()
 

@@ -20,8 +20,11 @@ from typing import Dict, List, Optional, Tuple
 import os
 
 # 字体设置: 支持中文
+matplotlib.rcParams['font.family'] = ['SimHei', 'Microsoft YaHei', 'sans-serif']
 matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
+matplotlib.rcParams['font.serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Serif']
 matplotlib.rcParams['axes.unicode_minus'] = False
+matplotlib.rcParams['mathtext.fontset'] = 'cm'
 
 
 # 指标标签 (中英文)

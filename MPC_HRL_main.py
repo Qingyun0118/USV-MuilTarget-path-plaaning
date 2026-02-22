@@ -758,7 +758,8 @@ def train_mpc_hrl(args):
     mpc_scheduler = DawoodMPCScheduler(
         p0=args.mpc_p0,
         p_min=args.mpc_p_min,
-        total_episodes=args.max_episodes,
+        # total_episodes=args.max_episodes,
+        total_episodes=1000,
         success_window=args.success_window
     )
 
@@ -789,7 +790,7 @@ def train_mpc_hrl(args):
 
         if os.path.exists(resume_path):
             print(f"\n[Resume] 正在从检查点恢复: {resume_path}")
-            ckpt = torch.load(resume_path, map_location=device)
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
 
             # 恢复网络权重
             selector.q_net.load_state_dict(ckpt['selector_q_net'])
@@ -1180,11 +1181,11 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     try:
         selector.q_net.load_state_dict(torch.load(
             os.path.join(model_dir, f"{model_prefix}selector.pth"),
-            map_location=device))
+            map_location=device, weights_only=False))
         if eval_mode == 'rl':
             actuator.actor.load_state_dict(torch.load(
                 os.path.join(model_dir, f"{model_prefix}actuator_actor.pth"),
-                map_location=device))
+                map_location=device, weights_only=False))
             print("Models loaded successfully (Selector + Actuator).")
         else:
             print("Selector model loaded. Actuator using MPC control.")
@@ -1196,8 +1197,18 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     os.makedirs(eval_dir, exist_ok=True)
 
     save_csv = getattr(args, 'eval_save_csv', False)
+    tb_motion = getattr(args, 'eval_tb_motion', False)
     eval_results = []
     total_eval_start = time.time()
+
+    # TensorBoard: 记录每步 USV 运动参数 (可选)
+    eval_writer = None
+    eval_tb_dir = None
+    if tb_motion:
+        eval_tb_dir = os.path.join(eval_dir, 'runs',
+                                   f'eval_{eval_mode}_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        eval_writer = SummaryWriter(eval_tb_dir)
+        print(f"  TensorBoard eval log: {eval_tb_dir}")
 
     for ep in range(args.eval_episodes):
         obs_dict = env.reset(seed=args.eval_seed + ep)
@@ -1260,6 +1271,43 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
                 next_obs_dict, sub_done, crush, truncated, info = env.step(
                     action, target_pos_abs)
 
+                # ---- TensorBoard: 记录 USV 运动参数 (每步, 可选) ----
+                if tb_motion:
+                    _tb_tag = f'ep{ep+1}'  # 按 episode 分组
+                    _tb_step = total_steps
+                    # 动作
+                    eval_writer.add_scalar(f'{_tb_tag}/Action/throttle', float(action[0]), _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Action/rudder', float(action[1]), _tb_step)
+                    # 位置
+                    eval_writer.add_scalar(f'{_tb_tag}/Position/x', env.usv.x, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Position/y', env.usv.y, _tb_step)
+                    # 航向角
+                    eval_writer.add_scalar(f'{_tb_tag}/Heading/rad', env.usv.heading, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Heading/deg', np.degrees(env.usv.heading), _tb_step)
+                    # 速度 (体坐标系)
+                    eval_writer.add_scalar(f'{_tb_tag}/Velocity/surge_u', env.usv.u, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Velocity/sway_v', env.usv.v, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Velocity/yaw_rate_r', env.usv.r, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Velocity/speed',
+                                           np.sqrt(env.usv.u**2 + env.usv.v**2), _tb_step)
+                    # 传感器 (障碍物距离)
+                    _sensor = np.array(env.usv.sensor_readings)
+                    eval_writer.add_scalar(f'{_tb_tag}/Sensor/min_distance', _sensor.min(), _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Sensor/mean_distance', _sensor.mean(), _tb_step)
+                    for _si, _sd in enumerate(_sensor):
+                        eval_writer.add_scalar(f'{_tb_tag}/Sensor/ray_{_si}', _sd, _tb_step)
+                    # 海流
+                    _flow_u, _flow_v = env.get_flow_velocity(env.usv.x, env.usv.y, env.current_time)
+                    eval_writer.add_scalar(f'{_tb_tag}/Flow/u', _flow_u, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Flow/v', _flow_v, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Flow/speed',
+                                           np.sqrt(_flow_u**2 + _flow_v**2), _tb_step)
+                    # 到当前目标的距离
+                    _dist_to_target = np.linalg.norm(
+                        np.array([env.usv.x, env.usv.y]) - target_pos_abs)
+                    eval_writer.add_scalar(f'{_tb_tag}/Navigation/dist_to_target', _dist_to_target, _tb_step)
+                    eval_writer.add_scalar(f'{_tb_tag}/Navigation/current_target_idx', target_idx, _tb_step)
+
                 # 记录路径
                 if save_csv:
                     env.record_points(np.array([env.usv.x, env.usv.y]),
@@ -1289,6 +1337,15 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
 
         env.close_writer()
 
+        # TensorBoard: 记录 episode 级汇总 (可选)
+        if tb_motion:
+            eval_writer.add_scalar('Summary/targets_reached', targets_reached, ep + 1)
+            eval_writer.add_scalar('Summary/total_distance', total_distance, ep + 1)
+            eval_writer.add_scalar('Summary/collision', float(crush), ep + 1)
+            eval_writer.add_scalar('Summary/total_steps', total_steps, ep + 1)
+            eval_writer.add_scalar('Summary/success',
+                                   float(targets_reached >= num_targets and not crush), ep + 1)
+
         ep_elapsed = time.time() - ep_start_time
 
         result = {
@@ -1310,12 +1367,17 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
               f"Time: {ep_elapsed:.2f}s | "
               f"Order: {target_order}")
 
-        # 绘制路径 (仅在未指定 --eval_save_csv 时绘制, 该参数表示只保存 CSV)
-        # if save_csv and os.path.exists(csv_file):
-        #     try:
-        #         env.draw_path(csv_file, ifshow=False, ifsave=True, savePath=eval_dir)
-        #     except Exception as e:
-        #         print(f"  Warning: Draw path failed: {e}")
+        #绘制路径 (仅在未指定 --eval_save_csv 时绘制, 该参数表示只保存 CSV)
+        if save_csv and os.path.exists(csv_file):
+            try:
+                env.draw_path(csv_file, ifshow=False, ifsave=True, savePath=eval_dir)
+            except Exception as e:
+                print(f"  Warning: Draw path failed: {e}")
+
+    # 关闭评估 TensorBoard writer (可选)
+    if tb_motion and eval_writer is not None:
+        eval_writer.close()
+        print(f"  TensorBoard eval log saved to: {eval_tb_dir}")
 
     # 汇总
     total_eval_time = time.time() - total_eval_start
@@ -1467,7 +1529,7 @@ if __name__ == "__main__":
                         help="训练时障碍物数量")
 
     # --- 训练参数 ---
-    parser.add_argument("--max_episodes", default=1000, type=int,
+    parser.add_argument("--max_episodes", default=1500, type=int,
                         help="总训练 episode 数")
     parser.add_argument("--max_steps_per_target", default=1000, type=int,
                         help="导航到单个目标的最大步数")
@@ -1548,6 +1610,8 @@ if __name__ == "__main__":
     parser.add_argument("--eval_seed", default=42, type=int)
     parser.add_argument("--eval_save_csv", action="store_true",
                         help="评估时保存路径 CSV 文件")
+    parser.add_argument("--eval_tb_motion", action="store_true",
+                        help="评估时用 TensorBoard 记录 USV 运动参数 (油门/航向/传感器等)")
     parser.add_argument("--save_eval_report", action="store_true",
                         help="评估后保存综合评估报告文本")
 

@@ -1,7 +1,7 @@
 """诊断 MPC 碰撞时的传感器读数和障碍物位置关系"""
 import numpy as np
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from MPC_HRL_main import MPCController
+from MPC_HRL_td3_main import MPCController
 
 crash_seeds = [42, 200, 1000]
 mpc = MPCController()

@@ -5,7 +5,7 @@
 import numpy as np
 import os
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from MPC_HRL_main import MPCController
+from MPC_HRL_td3_main import MPCController
 
 SCALE = np.array([X_MAX, Y_MAX])
 mpc = MPCController()

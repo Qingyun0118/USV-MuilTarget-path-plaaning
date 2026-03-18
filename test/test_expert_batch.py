@@ -1,14 +1,14 @@
 """
-批量测试 MPC 控制器在多个随机环境中的鲁棒性
+批量测试 Expert 控制器在多个随机环境中的鲁棒性
 6 障碍物 + 3 目标, 测试 10 个不同种子
 """
 import numpy as np
 import os
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from MPC_HRL_td3_main import MPCController
+from Expert_HRL_td3_main import ReactiveController
 
 SCALE = np.array([X_MAX, Y_MAX])
-mpc = MPCController()
+expert = ReactiveController()
 
 seeds = [2025, 42, 100, 123, 200, 333, 456, 789, 1000, 2024]
 results = []
@@ -35,7 +35,7 @@ for seed in range(2026+80, 2026+80+920):
 
         for step in range(1500):
             total_steps += 1
-            action = mpc.compute_action(
+            action = expert.compute_action(
                 env.usv.x, env.usv.y, env.usv.heading,
                 goal_abs[0], goal_abs[1],
                 obs['o_detector'], usv_u=env.usv.u

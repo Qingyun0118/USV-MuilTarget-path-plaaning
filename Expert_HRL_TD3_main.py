@@ -1,20 +1,20 @@
 """
-MPC-Guided Two-Layer HRL for USV Multi-Target Navigation
+Expert-Guided Two-Layer HRL for USV Multi-Target Navigation
 
 参考文献:
-- Dawood et al., "Handling Sparse Rewards in RL Using MPC", Applied Intelligence, 2023
+- Dawood et al., "Handling Sparse Rewards in RL Using Expert", Applied Intelligence, 2023
 - Yan et al., "Hierarchical RL for Multi-Goal Navigation", AIR 2024
 
 架构 (简化为两层):
   Selector (DQN) → Actuator (TD3, Goal-Conditioned) → USV Environment
-  + MPC 教师在训练初期提供专家示范
+  + Expert 教师在训练初期提供专家示范
 
 核心改进:
 1. 去掉 Upper Actuator 层, 减少分层复杂度
-2. 训练初期通过 MPC (比例导航 + 反应式避障) 控制 USV, 生成成功经验
-3. MPC 概率按 Dawood et al. 指数衰减方式随训练推进下降, RL 逐渐接管控制
-4. 行为克隆损失 (BC Loss): 在 MPC transition 上显式教 actor 模仿专家动作
-5. Q-filtered BC: 仅在 MPC 动作比当前策略更好时才模仿, 避免模仿劣质 MPC
+2. 训练初期通过 Expert (比例导航 + 反应式避障) 控制 USV, 生成成功经验
+3. Expert 概率按 Dawood et al. 指数衰减方式随训练推进下降, RL 逐渐接管控制
+4. 行为克隆损失 (BC Loss): 在 Expert transition 上显式教 actor 模仿专家动作
+5. Q-filtered BC: 仅在 Expert 动作比当前策略更好时才模仿, 避免模仿劣质 Expert
 6. Selector 增加总距离惩罚, 鼓励最短路径目标序列
 7. 直接在 3目标 6障碍物 环境中训练 (无课程学习)
 8. 移除 HER/HGG/DGT, 简化训练流程
@@ -43,8 +43,8 @@ from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
 # --- 公共模块导入 ---
 from hrl_config import device, SCALE, set_global_seed
 from buffers import ReplayBuffer, GoalConditionedReplayBuffer
-from mpc_controller import MPCController
-from mpc_scheduler import DawoodMPCScheduler
+from reactive_controller import ReactiveController
+from expert_scheduler import DawoodExpertScheduler
 from selector_agent import SelectorAgent
 from hrl_helpers import (
     get_selector_state, get_actuator_state,
@@ -58,14 +58,14 @@ from td3_agent import TD3ActuatorAgent
 # ========================= Training Loop ====================================
 # ============================================================================
 
-def train_mpc_hrl(args):
+def train_expert_hrl(args):
     """
-    MPC-Guided Two-Layer HRL 训练主循环
+    Expert-Guided Two-Layer HRL 训练主循环
 
     流程:
     1. 固定  目标  障碍物环境
     2. Selector 选择目标
-    3. Actuator 导航到目标 (MPC 或 RL 决策, MPC 概率按 Dawood 指数衰减)
+    3. Actuator 导航到目标 (Expert 或 RL 决策, Expert 概率按 Dawood 指数衰减)
     4. 经验存入 Replay Buffer
     5. 训练 Actuator (TD3) 和 Selector (DQN)
     """
@@ -91,19 +91,17 @@ def train_mpc_hrl(args):
 
     # 获取维度
     obs = env.reset()
-    selector_state_dim = get_selector_state(obs).shape[0]  # 2 + 3*3 = 11
     actuator_state_dim = get_actuator_state(obs).shape[0]  # 7 + 15 + 4 = 26
     actuator_goal_dim = 2  # 相对目标位置
     actuator_action_dim = 2  # (throttle, rudder)
 
-    print(f"State Dims — Selector: {selector_state_dim}, Actuator: {actuator_state_dim}")
+    print(f"State Dims — Actuator: {actuator_state_dim}")
     print(f"Goal Dim: {actuator_goal_dim}, Action Dim: {actuator_action_dim}")
     print(f"Environment: {NUM_TARGETS} targets, {NUM_OBSTACLES} obstacles")
     print(f"Device: {device}")
 
     # ---- 2. 智能体初始化 ----
     selector = SelectorAgent(
-        selector_state_dim, NUM_TARGETS,
         lr=args.lr_selector, epsilon=args.epsilon_start
     )
     actuator = TD3ActuatorAgent(
@@ -118,24 +116,24 @@ def train_mpc_hrl(args):
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
     actuator_buffer = GoalConditionedReplayBuffer(args.actuator_buffer_size)
 
-    # ---- 4. MPC Controller ----
-    mpc = MPCController()
+    # ---- 4. Expert Controller ----
+    expert = ReactiveController()
 
-    # ---- 5. Dawood MPC Probability Scheduler ----
-    mpc_scheduler = DawoodMPCScheduler(
-        p0=args.mpc_p0,
-        p_min=args.mpc_p_min,
-        # total_episodes=args.max_episodes,
-        total_episodes=1000,
+    # ---- 5. Dawood Expert Probability Scheduler ----
+    expert_scheduler = DawoodExpertScheduler(
+        p0=args.expert_p0,
+        p_min=args.expert_p_min,
+        total_episodes=args.max_episodes,
         success_window=args.success_window
     )
 
     # ---- 6. Logging ----
-    run_name = f'MPC_HRL_TD3_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    run_name = f'Expert_HRL_TD3_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}'
     writer = SummaryWriter(os.path.join(args.output_dir, 'runs', run_name))
 
     global_step = 0
     best_reward = -float('inf')
+    best_reward_episode = 0
     start_episode = 0
 
     # 训练历史记录 (用于样本效率评估)
@@ -182,22 +180,22 @@ def train_mpc_hrl(args):
             # 恢复训练历史
             training_history = ckpt.get('training_history', training_history)
 
-            # 恢复 MPC Scheduler 成功历史
-            saved_success_history = ckpt.get('mpc_success_history', [])
-            mpc_scheduler.success_history = deque(
+            # 恢复 Expert Scheduler 成功历史
+            saved_success_history = ckpt.get('expert_success_history', [])
+            expert_scheduler.success_history = deque(
                 saved_success_history, maxlen=args.success_window)
 
             print(f"[Resume] 从 Episode {start_episode} 继续训练")
             print(f"[Resume] global_step={global_step}, "
                   f"best_reward={best_reward:.2f}, "
                   f"epsilon={selector.epsilon:.4f}, "
-                  f"success_rate={mpc_scheduler.get_success_rate():.2f}")
+                  f"success_rate={expert_scheduler.get_success_rate():.2f}")
         else:
             print(f"\n[Resume] 检查点不存在: {resume_path}, 将从头开始训练")
 
     print(f"\n{'=' * 60}")
     print(f"  Training Start — {NUM_TARGETS}T/{NUM_OBSTACLES}O")
-    print(f"  MPC Decay: Dawood Exponential (p0={args.mpc_p0}, p_min={args.mpc_p_min})")
+    print(f"  Expert Decay: Dawood Exponential (p0={args.expert_p0}, p_min={args.expert_p_min})")
     print(f"  Max Episodes: {args.max_episodes}")
     if start_episode > 0:
         print(f"  Resuming from Episode: {start_episode}")
@@ -214,8 +212,8 @@ def train_mpc_hrl(args):
         else:
             obs_dict = env.reset(seed=args.seed + episode)
 
-        # ---- MPC 概率 (Dawood 指数衰减) & 探索噪声 ----
-        mpc_prob = mpc_scheduler.get_mpc_probability(episode)
+        # ---- Expert 概率 (Dawood 指数衰减) & 探索噪声 ----
+        expert_prob = expert_scheduler.get_expert_probability(episode)
         exploration_noise = args.exploration_noise * max(
             0.3, 1.0 - episode / args.noise_decay_episodes)
 
@@ -226,7 +224,7 @@ def train_mpc_hrl(args):
         episode_actuator_reward = 0.0
         episode_selector_reward = 0.0
         targets_reached_count = 0
-        mpc_steps = 0
+        expert_steps = 0
         rl_steps = 0
 
         ep_done = False  # 所有活跃目标完成
@@ -276,11 +274,11 @@ def train_mpc_hrl(args):
                 relative_goal = target_pos_norm - curr_usv_pos
                 prev_dist = np.linalg.norm(relative_goal)
 
-                # ---- 动作选择: MPC 或 RL ----
-                use_mpc = (random.random() < mpc_prob)
+                # ---- 动作选择: Expert 或 RL ----
+                use_expert = (random.random() < expert_prob)
 
-                if use_mpc:
-                    action = mpc.compute_action(
+                if use_expert:
+                    action = expert.compute_action(
                         env.usv.x, env.usv.y, env.usv.heading,
                         target_pos_abs[0], target_pos_abs[1],
                         obs_dict['o_detector'], usv_u=env.usv.u
@@ -288,7 +286,7 @@ def train_mpc_hrl(args):
                     # 添加小噪声增加多样性
                     action = action + np.random.normal(0, 0.03, size=action.shape)
                     action = np.clip(action, -1.0, 1.0)
-                    mpc_steps += 1
+                    expert_steps += 1
                 else:
                     action = actuator.select_action(
                         actuator_state, relative_goal, noise=exploration_noise)
@@ -311,20 +309,21 @@ def train_mpc_hrl(args):
                 # ---- 执行器奖励 ----
                 min_sensor = float(np.min(next_obs_dict['o_detector']))
                 r_actuator = compute_actuator_reward(
-                    prev_dist, next_dist, min_sensor, crush, sub_done)
+                    prev_dist, next_dist, min_sensor, crush, sub_done,
+                    usv_pos_norm=info.get('usv_pos_raw_norm', next_usv_pos))
                 episode_actuator_reward += r_actuator
 
-                # ---- 存入 Replay Buffer (带 MPC 标志) ----
+                # ---- 存入 Replay Buffer (带 Expert 标志) ----
                 is_terminal = crush or sub_done
                 actuator_buffer.push(
                     actuator_state, action, r_actuator,
                     next_actuator_state, float(is_terminal), relative_goal,
-                    is_mpc=use_mpc
+                    is_expert=use_expert
                 )
 
                 # ---- 训练 Actuator (带行为克隆损失) ----
-                # BC 权重与 MPC 概率成正比: 前期强模仿, 后期弱模仿
-                bc_w = args.bc_weight * mpc_prob
+                # BC 权重与 Expert 概率成正比: 前期强模仿, 后期弱模仿
+                bc_w = args.bc_weight * expert_prob
                 if len(actuator_buffer) >= args.warmup_steps:
                     for _ in range(args.actuator_train_iters):
                         actuator.train(actuator_buffer, args.actuator_batch_size,
@@ -390,14 +389,14 @@ def train_mpc_hrl(args):
         # ---- 记录成功率 ----
         all_active_reached = (targets_reached_count >= active_targets)
         ep_success = all_active_reached and not crush
-        mpc_scheduler.record_episode(ep_success)
+        expert_scheduler.record_episode(ep_success)
 
         # 记录训练历史 (样本效率)
         training_history['episode_steps'].append(total_steps)
         training_history['episode_successes'].append(bool(ep_success))
 
         # ---- Logging ----
-        success_rate = mpc_scheduler.get_success_rate()
+        success_rate = expert_scheduler.get_success_rate()
 
         if episode % args.log_interval == 0 or episode < 10:
             print(f"EP {episode} [{NUM_TARGETS}T/{NUM_OBSTACLES}O] | "
@@ -405,7 +404,7 @@ def train_mpc_hrl(args):
                   f"Tgt:{targets_reached_count}/{active_targets} | "
                   f"Dist:{episode_total_distance:.0f} | "
                   f"Crush:{crush} | "
-                  f"MPC/RL:{mpc_steps}/{rl_steps} p={mpc_prob:.3f} | "
+                  f"Expert/RL:{expert_steps}/{rl_steps} p={expert_prob:.3f} | "
                   f"Eps:{selector.epsilon:.3f} | "
                   f"SR:{success_rate:.2f} | "
                   f"Steps:{total_steps}")
@@ -417,12 +416,12 @@ def train_mpc_hrl(args):
         writer.add_scalar('Metrics/Collision', float(crush), episode)
         writer.add_scalar('Metrics/SuccessRate', success_rate, episode)
         writer.add_scalar('Metrics/AllReached', float(all_active_reached), episode)
-        writer.add_scalar('Training/MPC_Probability', mpc_prob, episode)
-        writer.add_scalar('Training/MPC_Steps', mpc_steps, episode)
+        writer.add_scalar('Training/Expert_Probability', expert_prob, episode)
+        writer.add_scalar('Training/Expert_Steps', expert_steps, episode)
         writer.add_scalar('Training/RL_Steps', rl_steps, episode)
         writer.add_scalar('Training/Epsilon', selector.epsilon, episode)
         writer.add_scalar('Training/ExplorationNoise', exploration_noise, episode)
-        writer.add_scalar('Training/BC_Weight', args.bc_weight * mpc_prob, episode)
+        writer.add_scalar('Training/BC_Weight', args.bc_weight * expert_prob, episode)
         writer.add_scalar('Buffer/Actuator', len(actuator_buffer), episode)
         writer.add_scalar('Buffer/Selector', len(selector_buffer), episode)
 
@@ -450,8 +449,8 @@ def train_mpc_hrl(args):
                 'actuator_total_it': actuator.total_it,
                 # 训练历史 (样本效率)
                 'training_history': training_history,
-                # MPC 调度器成功历史
-                'mpc_success_history': list(mpc_scheduler.success_history),
+                # Expert 调度器成功历史
+                'expert_success_history': list(expert_scheduler.success_history),
             }
             torch.save(checkpoint, os.path.join(ckpt_dir, "checkpoint.pth"))
             # 同时保存独立权重文件 (兼容评估加载)
@@ -501,17 +500,17 @@ def train_mpc_hrl(args):
 # ========================= Evaluation =======================================
 # ============================================================================
 
-def evaluate_mpc_hrl(args, eval_mode='rl'):
+def evaluate_expert_hrl(args, eval_mode='rl'):
     """
     评估函数
 
     Args:
         args: 命令行参数
         eval_mode: 评估模式
-            - 'rl':  执行器使用纯 RL 策略 (无 MPC)
-            - 'mpc': 执行器使用纯 MPC 控制, 决策器仍使用 RL
+            - 'rl':  执行器使用纯 RL 策略 (无 Expert)
+            - 'expert': 执行器使用纯 Expert 控制, 决策器仍使用 RL
     """
-    mode_desc = {'rl': '纯 RL Actuator', 'mpc': 'MPC Actuator + RL Selector'}
+    mode_desc = {'rl': '纯 RL Actuator', 'expert': 'Expert Actuator + RL Selector'}
     print("=" * 60)
     print(f"  Evaluation — {mode_desc.get(eval_mode, eval_mode)}")
     print("=" * 60)
@@ -533,13 +532,12 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     )
 
     obs = env.reset()
-    selector_state_dim = get_selector_state(obs).shape[0]
     actuator_state_dim = get_actuator_state(obs).shape[0]
 
     # 2. 创建 Agent 并加载模型
-    selector = SelectorAgent(selector_state_dim, num_targets)
+    selector = SelectorAgent()
     actuator = TD3ActuatorAgent(actuator_state_dim, 2, 2, max_action=1.0)
-    mpc = MPCController()  # MPC 控制器 (mpc 模式下使用)
+    expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
     model_dir = args.output_dir
     model_prefix = "best_" if os.path.exists(
@@ -555,7 +553,7 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
                 map_location=device, weights_only=False))
             print("Models loaded successfully (Selector + Actuator).")
         else:
-            print("Selector model loaded. Actuator using MPC control.")
+            print("Selector model loaded. Actuator using Expert control.")
     except FileNotFoundError:
         print("WARNING: No models found, running with random weights.")
 
@@ -579,7 +577,7 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
 
     for ep in range(args.eval_episodes):
         obs_dict = env.reset(seed=args.eval_seed + ep)
-        csv_file = os.path.join(eval_dir, f"mpc_hrl_path_{eval_mode}_ep_{ep + 1}.csv")
+        csv_file = os.path.join(eval_dir, f"expert_hrl_path_{eval_mode}_ep_{ep + 1}.csv")
         if save_csv and os.path.exists(csv_file):
             os.remove(csv_file)
 
@@ -623,9 +621,9 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
                 curr_usv_pos = get_usv_pos(obs_dict)
                 relative_goal = target_pos_norm - curr_usv_pos
 
-                if eval_mode == 'mpc':
-                    # MPC 控制执行器
-                    action = mpc.compute_action(
+                if eval_mode == 'expert':
+                    # Expert 控制执行器
+                    action = expert.compute_action(
                         env.usv.x, env.usv.y, env.usv.heading,
                         target_pos_abs[0], target_pos_abs[1],
                         obs_dict['o_detector'], usv_u=env.usv.u
@@ -773,49 +771,49 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
     # 综合评估: 6 项指标计算 + 雷达图
     # ====================================================================
     if save_eval_report := getattr(args, 'save_eval_report', True):
-        print(f"\n--- 运行综合指标评估 (6 项指标) ---")
+        # print(f"\n--- 运行综合指标评估 (6 项指标) ---")
 
-        # 海流速度获取函数
-        flow_fn = lambda x, y: env.get_flow_velocity(x, y)
+        # # 海流速度获取函数
+        # flow_fn = lambda x, y: env.get_flow_velocity(x, y)
 
-        # 加载训练历史 (用于样本效率评估, 仅训练后可用)
-        history_path = os.path.join(args.output_dir, "training_history.json")
-        episode_steps_train = None
-        episode_successes_train = None
-        if os.path.exists(history_path):
-            with open(history_path, 'r') as f:
-                history = json.load(f)
-            episode_steps_train = history.get('episode_steps')
-            episode_successes_train = history.get('episode_successes')
-            print(f"已加载训练历史 ({len(episode_steps_train)} episodes)")
-        else:
-            print(f"未找到训练历史 ({history_path}), 样本效率指标将跳过")
+        # # 加载训练历史 (用于样本效率评估, 仅训练后可用)
+        # history_path = os.path.join(args.output_dir, "training_history.json")
+        # episode_steps_train = None
+        # episode_successes_train = None
+        # if os.path.exists(history_path):
+        #     with open(history_path, 'r') as f:
+        #         history = json.load(f)
+        #     episode_steps_train = history.get('episode_steps')
+        #     episode_successes_train = history.get('episode_successes')
+        #     print(f"已加载训练历史 ({len(episode_steps_train)} episodes)")
+        # else:
+        #     print(f"未找到训练历史 ({history_path}), 样本效率指标将跳过")
 
-        # 运行综合评估
-        report = evaluate_all_episodes(
-            eval_results=eval_results,
-            csv_dir=eval_dir,
-            env=env,
-            eval_mode=eval_mode,
-            flow_fn=flow_fn,
-            dt=env.dt,
-            episode_steps_train=episode_steps_train,
-            episode_successes_train=episode_successes_train,
-        )
+        # # 运行综合评估
+        # report = evaluate_all_episodes(
+        #     eval_results=eval_results,
+        #     csv_dir=eval_dir,
+        #     env=env,
+        #     eval_mode=eval_mode,
+        #     flow_fn=flow_fn,
+        #     dt=env.dt,
+        #     episode_steps_train=episode_steps_train,
+        #     episode_successes_train=episode_successes_train,
+        # )
 
-        # 打印评估报告
-        algo_name = 'MPC-HRL (RL)' if eval_mode == 'rl' else 'MPC-HRL (MPC)'
-        print_evaluation_report(report, algorithm_name=algo_name)
+        # # 打印评估报告
+        # algo_name = 'Expert-HRL (RL)' if eval_mode == 'rl' else 'Expert-HRL (Expert)'
+        # print_evaluation_report(report, algorithm_name=algo_name)
 
-        # 获取雷达图数据并绘制
-        radar_metrics = get_normalized_metrics_for_radar(report)
-        radar_save = os.path.join(eval_dir, f"radar_{eval_mode}.png")
-        plot_single_radar(
-            radar_metrics,
-            algorithm_name=algo_name,
-            save_path=radar_save,
-            show=False
-        )
+        # # 获取雷达图数据并绘制
+        # radar_metrics = get_normalized_metrics_for_radar(report)
+        # radar_save = os.path.join(eval_dir, f"radar_{eval_mode}.png")
+        # plot_single_radar(
+        #     radar_metrics,
+        #     algorithm_name=algo_name,
+        #     save_path=radar_save,
+        #     show=False
+        # )
 
         # 保存评估结果到文本 (追加模式, 带时间戳和参数)
         result_file = os.path.join(eval_dir, f"evaluation_report_{eval_mode}.txt")
@@ -846,8 +844,8 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
             f.write(f"  Selector LR:    {args.lr_selector}\n")
             f.write(f"  TD3 tau:        {args.tau}\n")
             f.write(f"  Policy noise:   {args.policy_noise}\n")
-            f.write(f"  MPC p0:         {args.mpc_p0}\n")
-            f.write(f"  MPC p_min:      {args.mpc_p_min}\n")
+            f.write(f"  Expert p0:         {args.expert_p0}\n")
+            f.write(f"  Expert p_min:      {args.expert_p_min}\n")
             f.write(f"  BC weight:      {args.bc_weight}\n")
             f.write(f"  Seed:           {args.seed}\n")
             # 汇总
@@ -865,11 +863,11 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
             f.write(f"  Total Time:   {total_eval_time:.2f}s\n")
             f.write(f"  Collisions:   {collision_count}\n")
             # 评估报告
-            f.write(f"\n--- 综合评估报告 ---\n")
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                print_evaluation_report(report, algorithm_name=algo_name)
-            f.write(buf.getvalue())
+            # f.write(f"\n--- 综合评估报告 ---\n")
+            # buf = io.StringIO()
+            # with contextlib.redirect_stdout(buf):
+            #     print_evaluation_report(report, algorithm_name=algo_name)
+            # f.write(buf.getvalue())
             f.write(f"\n{'─' * 70}\n\n")
         print(f"评估报告已追加至: {result_file}")
 
@@ -880,7 +878,7 @@ def evaluate_mpc_hrl(args, eval_mode='rl'):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="MPC-Guided Two-Layer HRL for USV Multi-Target Navigation")
+        description="Expert-Guided Two-Layer HRL for USV Multi-Target Navigation")
 
     # --- 环境参数 ---
     parser.add_argument("--seed", default=2026, type=int)
@@ -938,20 +936,20 @@ if __name__ == "__main__":
     parser.add_argument("--noise_decay_episodes", default=3000, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
 
-    # --- MPC 概率衰减参数 (Dawood et al. 指数衰减) ---
-    parser.add_argument("--mpc_p0", default=1.0, type=float,
-                        help="MPC 初始使用概率")
-    parser.add_argument("--mpc_p_min", default=0.5, type=float,
-                        help="MPC 最低使用概率")
+    # --- Expert 概率衰减参数 (Dawood et al. 指数衰减) ---
+    parser.add_argument("--expert_p0", default=0.5, type=float,
+                        help="Expert 初始使用概率")
+    parser.add_argument("--expert_p_min", default=0.05, type=float,
+                        help="Expert 最低使用概率")
     parser.add_argument("--success_window", default=100, type=int,
                         help="成功率统计滑动窗口大小")
 
     # --- 行为克隆参数 (BC Loss) ---
     parser.add_argument("--bc_weight", default=3.0, type=float,
-                        help="行为克隆损失基础权重 (实际权重 = bc_weight * mpc_prob)")
+                        help="行为克隆损失基础权重 (实际权重 = bc_weight * expert_prob)")
 
     # --- 输出参数 ---
-    parser.add_argument("--output_dir", default="mpc_hrl_td3_output", type=str)
+    parser.add_argument("--output_dir", default="expert_hrl_td3_output", type=str)
     parser.add_argument("--checkpoint_interval", default=200, type=int)
     parser.add_argument("--log_interval", default=50, type=int,
                         help="每 N 个 episode 打印日志")
@@ -960,15 +958,15 @@ if __name__ == "__main__":
     parser.add_argument("--resume", default=None, type=str,
                         help="从检查点恢复训练。可传入: "
                              "(1) episode 编号, 如 '200'; "
-                             "(2) checkpoint 目录, 如 'mpc_hrl_td3_output/checkpoints/ep_200'; "
+                             "(2) checkpoint 目录, 如 'expert_hrl_td3_output/checkpoints/ep_200'; "
                              "(3) checkpoint.pth 文件完整路径")
 
     # --- 模式 ---
     parser.add_argument("--do_train", action="store_true")
     parser.add_argument("--do_eval", action="store_true",
                         help="评估纯 RL 控制效果")
-    parser.add_argument("--do_eval_mpc", action="store_true",
-                        help="评估纯 MPC 控制效果 (决策器仍用 RL)")
+    parser.add_argument("--do_eval_expert", action="store_true",
+                        help="评估纯 Expert 控制效果 (决策器仍用 RL)")
     parser.add_argument("--eval_episodes", default=5, type=int)
     parser.add_argument("--eval_targets", default=3, type=int,
                         help="评估时目标数量")
@@ -985,16 +983,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.do_train:
-        train_mpc_hrl(args)
+        train_expert_hrl(args)
 
     if args.do_eval:
-        evaluate_mpc_hrl(args, eval_mode='rl')
+        evaluate_expert_hrl(args, eval_mode='rl')
 
-    if args.do_eval_mpc:
-        evaluate_mpc_hrl(args, eval_mode='mpc')
+    if args.do_eval_expert:
+        evaluate_expert_hrl(args, eval_mode='expert')
 
-    if not args.do_train and not args.do_eval and not args.do_eval_mpc:
-        print("请指定 --do_train / --do_eval / --do_eval_mpc")
-        print("示例: python MPC_HRL_main.py --do_train")
-        print("      python MPC_HRL_main.py --do_eval        # 评估 RL")
-        print("      python MPC_HRL_main.py --do_eval_mpc    # 评估 MPC")
+    if not args.do_train and not args.do_eval and not args.do_eval_expert:
+        print("请指定 --do_train / --do_eval / --do_eval_expert")
+        print("示例: python Expert_HRL_TD3_main.py --do_train")
+        print("      python Expert_HRL_TD3_main.py --do_eval        # 评估 RL")
+        print("      python Expert_HRL_TD3_main.py --do_eval_expert    # 评估 Expert")

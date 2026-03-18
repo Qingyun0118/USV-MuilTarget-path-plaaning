@@ -114,15 +114,15 @@ class TD3ActuatorAgent:
         TD3 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss)
 
         参考 DDPGfD / TD3fD 的做法:
-        - 对 MPC 专家生成的 transition, 除了标准 Q-maximization 外,
-          额外添加 BC loss 让 actor 直接模仿 MPC 动作
-        - BC loss 权重随训练推进衰减 (与 MPC 概率同步)
+        - 对 Expert 专家生成的 transition, 除了标准 Q-maximization 外,
+          额外添加 BC loss 让 actor 直接模仿 Expert 动作
+        - BC loss 权重随训练推进衰减 (与 Expert 概率同步)
 
         联合 Actor 损失:
-          L_actor = -E[Q(s,g,π(s,g))] + bc_weight * E_{mpc}[||π(s,g) - a_mpc||²]
+          L_actor = -E[Q(s,g,π(s,g))] + bc_weight * E_{expert}[||π(s,g) - a_expert||²]
 
-        其中第二项仅在 MPC transition 上计算, 仅当 Q(s,g,a_mpc) > Q(s,g,π(s,g))
-        时施加 (即只在 MPC 动作确实比当前策略好时才模仿, 避免模仿劣质 MPC 动作)
+        其中第二项仅在 Expert transition 上计算, 仅当 Q(s,g,a_expert) > Q(s,g,π(s,g))
+        时施加 (即只在 Expert 动作确实比当前策略好时才模仿, 避免模仿劣质 Expert 动作)
 
         Args:
             replay_buffer: 经验回放缓冲区
@@ -132,7 +132,7 @@ class TD3ActuatorAgent:
         if len(replay_buffer) < batch_size:
             return 0.0, 0.0, 0.0
 
-        state, action, reward, next_state, done, goal, is_mpc = \
+        state, action, reward, next_state, done, goal, is_expert = \
             replay_buffer.sample(batch_size)
         self.total_it += 1
 
@@ -163,26 +163,26 @@ class TD3ActuatorAgent:
             # 标准 RL 目标: 最大化 Q 值
             rl_loss = -self.critic.Q1(state, goal, pi_action).mean()
 
-            # 行为克隆损失: 仅在 MPC transition 上, 且仅当 MPC 动作比
+            # 行为克隆损失: 仅在 Expert transition 上, 且仅当 Expert 动作比
             # 当前策略动作的 Q 值更高时才施加 (filtered BC)
             bc_loss = torch.tensor(0.0, device=device)
-            if bc_weight > 0.0 and is_mpc.sum() > 0:
-                mpc_mask = (is_mpc > 0.5).squeeze()  # (batch,)
-                if mpc_mask.any():
-                    mpc_states = state[mpc_mask]
-                    mpc_goals = goal[mpc_mask]
-                    mpc_actions = action[mpc_mask]  # MPC 专家动作
-                    pi_mpc = pi_action[mpc_mask]    # actor 当前输出
+            if bc_weight > 0.0 and is_expert.sum() > 0:
+                expert_mask = (is_expert > 0.5).squeeze()  # (batch,)
+                if expert_mask.any():
+                    expert_states = state[expert_mask]
+                    expert_goals = goal[expert_mask]
+                    expert_actions = action[expert_mask]  # Expert 专家动作
+                    pi_expert = pi_action[expert_mask]    # actor 当前输出
 
-                    # Q-filter: 只在 Q(s,g,a_mpc) > Q(s,g,π(s,g)) 时模仿
+                    # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
                     with torch.no_grad():
-                        q_mpc = self.critic.Q1(mpc_states, mpc_goals, mpc_actions)
-                        q_pi = self.critic.Q1(mpc_states, mpc_goals, pi_mpc)
-                        bc_filter = (q_mpc > q_pi).squeeze()  # (n_mpc,)
+                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                        q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
+                        bc_filter = (q_expert > q_pi).squeeze()  # (n_expert,)
 
                     if bc_filter.any():
                         bc_loss = F.mse_loss(
-                            pi_mpc[bc_filter], mpc_actions[bc_filter])
+                            pi_expert[bc_filter], expert_actions[bc_filter])
 
             total_actor_loss = rl_loss + bc_weight * bc_loss
 

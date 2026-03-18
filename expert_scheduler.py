@@ -1,18 +1,18 @@
 """
-Dawood et al. (2023) 指数衰减 MPC 使用概率调度器
+Dawood et al. (2023) 指数衰减 Expert 使用概率调度器
 
 参考: Handling Sparse Rewards in RL Using Model Predictive Control,
       Applied Intelligence, 2023.
 
 核心思想:
-- 训练初期以高概率使用 MPC 专家策略, 为 RL 提供成功经验
-- 随训练推进, MPC 概率按指数衰减, RL 逐渐接管控制
+- 训练初期以高概率使用 Expert 专家策略, 为 RL 提供成功经验
+- 随训练推进, Expert 概率按指数衰减, RL 逐渐接管控制
 - 指数衰减公式:
-    p_MPC(e) = max(p_min, p_0 * exp(-λ * e / E_total))
-  其中 λ = ln(p_0 / p_min), 确保在 E_total 集结束时 p_MPC ≈ p_min
+    p_Expert(e) = max(p_min, p_0 * exp(-λ * e / E_total))
+  其中 λ = ln(p_0 / p_min), 确保在 E_total 集结束时 p_Expert ≈ p_min
 
 与线性/分阶段衰减相比, 指数衰减的优势:
-1. 训练初期 MPC 概率下降缓慢, 保证充足的专家经验
+1. 训练初期 Expert 概率下降缓慢, 保证充足的专家经验
 2. 中后期衰减加速, 让 RL 更快获得独立探索机会
 3. 平滑过渡, 避免阶段跳变带来的训练不稳定
 """
@@ -21,17 +21,17 @@ import numpy as np
 from collections import deque
 
 
-class DawoodMPCScheduler:
+class DawoodExpertScheduler:
     """
-    Dawood et al. (2023) 指数衰减 MPC 使用概率调度器
+    Dawood et al. (2023) 指数衰减 Expert 使用概率调度器
     """
 
     def __init__(self, p0=0.9, p_min=0.01, total_episodes=5000,
                  success_window=100):
         """
         Args:
-            p0: 初始 MPC 使用概率
-            p_min: 最低 MPC 使用概率 (保留少量 MPC 防止遗忘)
+            p0: 初始 Expert 使用概率
+            p_min: 最低 Expert 使用概率 (保留少量 Expert 防止遗忘)
             total_episodes: 总训练 episode 数 (用于计算衰减速率)
             success_window: 成功率统计滑动窗口大小
         """
@@ -42,11 +42,11 @@ class DawoodMPCScheduler:
         self.decay_lambda = np.log(p0 / max(p_min, 1e-8))
         self.success_history = deque(maxlen=success_window)
 
-    def get_mpc_probability(self, episode: int) -> float:
+    def get_expert_probability(self, episode: int) -> float:
         """
-        计算当前 episode 的 MPC 使用概率 (Dawood 指数衰减)
+        计算当前 episode 的 Expert 使用概率 (Dawood 指数衰减)
 
-        p_MPC(e) = max(p_min, p_0 * exp(-λ * e / E_total))
+        p_Expert(e) = max(p_min, p_0 * exp(-λ * e / E_total))
         """
         p = self.p0 * np.exp(-self.decay_lambda * episode / self.total_episodes)
         return max(self.p_min, p)

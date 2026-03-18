@@ -358,12 +358,15 @@ class MyUsvEnv():
             flow_speed = np.sqrt(flow_u**2 + flow_v**2)
             flow_angle = np.arctan2(flow_v, flow_u)
             
-            o_current = np.array([
-                flow_u / flow_speed, # 也可以只给 u, v
-                flow_v / flow_speed,
-                np.sin(flow_angle),
-                np.cos(flow_angle)
-            ], dtype=np.float32)
+            if flow_speed > 1e-8:
+                o_current = np.array([
+                    flow_u / flow_speed,
+                    flow_v / flow_speed,
+                    np.sin(flow_angle),
+                    np.cos(flow_angle)
+                ], dtype=np.float32)
+            else:
+                o_current = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
             
             # Part 4: 探测器信息 (o_detector)
             # 直接使用 USV 的传感器读数，归一化到 [0, 1]
@@ -760,6 +763,8 @@ class MyUsvEnv():
         self.usv.y += flow_v * self.dt
         # # 强制更新几何体 (因为手动修改了x,y)  
         # self.usv.update_position(self.usv.x, self.usv.y) 
+        # 保存 clip 前的归一化位置 (用于边界惩罚计算)
+        usv_pos_raw_norm = np.array([self.usv.x / X_MAX, self.usv.y / Y_MAX])
         # 边界限制
         self.usv.x = np.clip(self.usv.x, X_MIN, X_MAX)
         self.usv.y = np.clip(self.usv.y, Y_MIN, Y_MAX)
@@ -780,7 +785,8 @@ class MyUsvEnv():
             "collision": self.collision_flag,
             "reached_targets": self.reached_targets,
             "flow": (flow_u, flow_v),
-            "target_status": self.target_status.copy()
+            "target_status": self.target_status.copy(),
+            "usv_pos_raw_norm": usv_pos_raw_norm
         }
         
         if self.record_flag:

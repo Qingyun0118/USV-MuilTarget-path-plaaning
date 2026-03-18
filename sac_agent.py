@@ -200,10 +200,10 @@ class SACActuatorAgent:
         SAC 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss)
 
         联合 Actor 损失:
-          L_actor = E[α * log π(a|s,g) - Q(s,g,a)] + bc_weight * E_{mpc}[||μ(s,g) - a_mpc||²]
+          L_actor = E[α * log π(a|s,g) - Q(s,g,a)] + bc_weight * E_{expert}[||μ(s,g) - a_expert||²]
 
-        BC loss 使用 actor 的 mean 输出 (确定性部分) 与 MPC 动作的 MSE,
-        仅在 Q(s,g,a_mpc) > Q(s,g,π(s,g)) 时施加 (Q-filtered BC)。
+        BC loss 使用 actor 的 mean 输出 (确定性部分) 与 Expert 动作的 MSE,
+        仅在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时施加 (Q-filtered BC)。
 
         Returns:
             critic_loss, actor_loss (RL部分), bc_loss
@@ -211,7 +211,7 @@ class SACActuatorAgent:
         if len(replay_buffer) < batch_size:
             return 0.0, 0.0, 0.0
 
-        state, action, reward, next_state, done, goal, is_mpc = \
+        state, action, reward, next_state, done, goal, is_expert = \
             replay_buffer.sample(batch_size)
         self.total_it += 1
 
@@ -240,24 +240,24 @@ class SACActuatorAgent:
 
         # 行为克隆损失 (Q-filtered BC)
         bc_loss = torch.tensor(0.0, device=device)
-        if bc_weight > 0.0 and is_mpc.sum() > 0:
-            mpc_mask = (is_mpc > 0.5).squeeze()
-            if mpc_mask.any():
-                mpc_states = state[mpc_mask]
-                mpc_goals = goal[mpc_mask]
-                mpc_actions = action[mpc_mask]
+        if bc_weight > 0.0 and is_expert.sum() > 0:
+            expert_mask = (is_expert > 0.5).squeeze()
+            if expert_mask.any():
+                expert_states = state[expert_mask]
+                expert_goals = goal[expert_mask]
+                expert_actions = action[expert_mask]
                 # 使用 actor 的 mean 输出进行 BC (确定性部分)
-                mpc_pi_mean = pi_mean[mpc_mask]
+                expert_pi_mean = pi_mean[expert_mask]
 
-                # Q-filter: 只在 Q(s,g,a_mpc) > Q(s,g,π(s,g)) 时模仿
+                # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
                 with torch.no_grad():
-                    q_mpc = self.critic.Q1(mpc_states, mpc_goals, mpc_actions)
-                    q_pi = self.critic.Q1(mpc_states, mpc_goals, mpc_pi_mean)
-                    bc_filter = (q_mpc > q_pi).squeeze()
+                    q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                    q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
+                    bc_filter = (q_expert > q_pi).squeeze()
 
                 if bc_filter.any():
                     bc_loss = F.mse_loss(
-                        mpc_pi_mean[bc_filter], mpc_actions[bc_filter])
+                        expert_pi_mean[bc_filter], expert_actions[bc_filter])
 
         total_actor_loss = rl_loss + bc_weight * bc_loss
 

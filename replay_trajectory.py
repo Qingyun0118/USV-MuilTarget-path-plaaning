@@ -2,17 +2,17 @@
 轨迹回放模块 — 根据评估报告自动重建环境并生成动态 GIF
 
 用法:
-    # 回放 mpc_hrl_output 目录下 MPC 模式 episode 3 的轨迹
-    python replay_trajectory.py --output_dir mpc_hrl_output --mode mpc --episode 3
+    # 回放 expert_hrl_output 目录下 Expert 模式 episode 3 的轨迹
+    python replay_trajectory.py --output_dir expert_hrl_output --mode expert --episode 3
 
     # 回放 RL 模式 episode 1~5, 加速 10 倍
-    python replay_trajectory.py --output_dir mpc_hrl_output --mode rl --episode 1 2 3 4 5 --speed 10
+    python replay_trajectory.py --output_dir expert_hrl_output --mode rl --episode 1 2 3 4 5 --speed 10
 
     # 仅显示海流动画（不传 --episode）
-    python replay_trajectory.py --output_dir mpc_hrl_output --mode mpc --currents_only --duration 15
+    python replay_trajectory.py --output_dir expert_hrl_output --mode expert --currents_only --duration 15
 
     # 自定义覆盖 seed（不从报告读取）
-    python replay_trajectory.py --output_dir mpc_hrl_output --mode mpc --episode 3 --eval_seed 42
+    python replay_trajectory.py --output_dir expert_hrl_output --mode expert --episode 3 --eval_seed 42
 """
 
 import os
@@ -80,8 +80,8 @@ def replay(output_dir: str, mode: str, episode: int, *,
     回放指定 episode 的运动轨迹并保存 GIF。
 
     Args:
-        output_dir:   训练输出目录 (如 'mpc_hrl_output')
-        mode:         评估模式 ('mpc' 或 'rl')
+        output_dir:   训练输出目录 (如 'expert_hrl_output')
+        mode:         评估模式 ('expert' 或 'rl')
         episode:      episode 编号 (1-based)
         eval_seed:    评估种子 (若为 None 则从报告自动读取)
         interval:     帧间隔 (ms)
@@ -103,14 +103,14 @@ def replay(output_dir: str, mode: str, episode: int, *,
             f"报告路径: {report_path}")
 
     # 2. 定位 CSV 文件
-    csv_file = os.path.join(eval_dir, f"mpc_hrl_path_{mode}_ep_{episode}.csv")
+    csv_file = os.path.join(eval_dir, f"expert_hrl_sac_path_{mode}_ep_{episode}.csv")
     if not os.path.exists(csv_file):
         raise FileNotFoundError(f"CSV 文件不存在: {csv_file}")
 
     # 3. 确定 GIF 保存路径
     if save_path is None:
         save_path = os.path.join(eval_dir,
-                                 f"mpc_hrl_path_{mode}_ep_{episode}.gif")
+                                 f"expert_hrl_sac_path_{mode}_ep_{episode}.gif")
 
     # 4. 重建环境 (与评估时完全一致)
     ep_seed = params['eval_seed'] + episode - 1
@@ -212,11 +212,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="USV 轨迹回放 — 从评估报告自动重建环境并生成 GIF 动画")
 
-    parser.add_argument("--output_dir", type=str, default="mpc_hrl_output",
-                        help="训练输出目录 (如 mpc_hrl_output)")
-    parser.add_argument("--mode", type=str, default="mpc",
-                        choices=["mpc", "rl"],
-                        help="评估模式: mpc 或 rl")
+    parser.add_argument("--output_dir", type=str, default="expert_hrl_output",
+                        help="训练输出目录 (如 expert_hrl_output)")
+    parser.add_argument("--mode", type=str, default="expert",
+                        choices=["expert", "rl"],
+                        help="评估模式: expert 或 rl")
     parser.add_argument("--episode", type=int, nargs='*', default=None,
                         help="要回放的 episode 编号 (可多个, 如 1 2 3)")
 
@@ -261,7 +261,7 @@ if __name__ == "__main__":
             if args.save_dir:
                 os.makedirs(args.save_dir, exist_ok=True)
                 save = os.path.join(args.save_dir,
-                                    f"mpc_hrl_path_{args.mode}_ep_{ep}.gif")
+                                    f"expert_hrl_path_{args.mode}_ep_{ep}.gif")
             replay(
                 output_dir=args.output_dir,
                 mode=args.mode,

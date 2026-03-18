@@ -1,27 +1,27 @@
 """
-MPC 控制器: 比例导航 + 反应式避障
+Expert 控制器: 比例导航 + 反应式避障
 
 参考 Dawood et al. 2023 的思路, 在训练初期提供 "专家" 示范:
 1. 比例导航: 计算期望航向, 按比例施加油门和舵角
 2. 反应式避障: 利用传感器读数检测障碍物, 进行转向规避
-3. 将 MPC 动作存入 Replay Buffer, 作为执行器的学习依据
+3. 将 Expert 动作存入 Replay Buffer, 作为执行器的学习依据
 
-Note: MPC 不需要完美, 只需要偶尔成功到达目标即可提供正向经验。
+Note: Expert 不需要完美, 只需要偶尔成功到达目标即可提供正向经验。
 """
 
 import numpy as np
 
 
-class MPCController:
+class ReactiveController:
     """
-    MPC 控制器: 比例导航 + 反应式避障
+    Expert 控制器: 比例导航 + 反应式避障
     """
 
     def __init__(self, kp_heading=2.0, kp_throttle=0.0006,
                  obs_avoid_threshold=0.8, obs_critical_threshold=0.45,
                  min_throttle_for_turn=0.03, max_throttle=0.04):
         """
-        MPC 控制器参数
+        Expert 控制器参数
 
         注意: USV 动力学中阻力极低 (a12=-0.00125), 因此:
         - max_throttle 必须很小 (~0.04) 以限制巡航速度 ~5-6 m/s

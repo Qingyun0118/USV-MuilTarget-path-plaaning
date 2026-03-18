@@ -1,10 +1,10 @@
-"""诊断 MPC 碰撞时的传感器读数和障碍物位置关系"""
+"""诊断 Expert 碰撞时的传感器读数和障碍物位置关系"""
 import numpy as np
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from MPC_HRL_td3_main import MPCController
+from Expert_HRL_td3_main import ReactiveController
 
 crash_seeds = [42, 200, 1000]
-mpc = MPCController()
+expert = ReactiveController()
 
 for seed in crash_seeds:
     env = MyUsvEnv(num_targets=3, num_obstacles=6, seed=seed,
@@ -32,7 +32,7 @@ for seed in crash_seeds:
     history = []
     for step in range(500):
         min_sensor = float(np.min(obs['o_detector']))
-        action = mpc.compute_action(env.usv.x, env.usv.y, env.usv.heading,
+        action = expert.compute_action(env.usv.x, env.usv.y, env.usv.heading,
                                     goal_abs[0], goal_abs[1], obs['o_detector'],
                                     usv_u=env.usv.u)
         

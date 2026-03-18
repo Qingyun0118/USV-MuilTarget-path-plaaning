@@ -1,10 +1,10 @@
 """
-测试 MPC 控制器在m障碍物 + n目标的环境中能否顺序导航到所有目标
+测试 Expert 控制器在m障碍物 + n目标的环境中能否顺序导航到所有目标
 """
 import numpy as np
 import os
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from MPC_HRL_td3_main import MPCController
+from Expert_HRL_td3_main import ReactiveController
 
 SCALE = np.array([X_MAX, Y_MAX])
 num_t=5
@@ -20,7 +20,7 @@ obs = env.reset()
 # 打印环境信息
 info = env.get_environment_info()
 print('=' * 60)
-print('MPC 导航测试: 6障碍物 + 3目标')
+print('Expert 导航测试: 6障碍物 + 3目标')
 print('=' * 60)
 start = info['start_pos']
 print(f"起始位置: ({start[0]:.1f}, {start[1]:.1f})")
@@ -29,11 +29,11 @@ for i, t in enumerate(info['targets']):
 for i, o in enumerate(info['obstacles']):
     print(f"障碍{i}: center=({o['x']:.1f}, {o['y']:.1f}), shape={o['shape']}")
 
-# MPC控制器
-mpc = MPCController()
+# Expert控制器
+expert = ReactiveController()
 
 # 路径记录
-csv_file = 'mpc_test_path.csv'
+csv_file = 'expert_test_path.csv'
 if os.path.exists(csv_file):
     os.remove(csv_file)
 
@@ -55,8 +55,8 @@ for tidx in target_order:
 
     for step in range(1500):
         total_steps += 1
-        # MPC 动作
-        action = mpc.compute_action(
+        # Expert 动作
+        action = expert.compute_action(
             env.usv.x, env.usv.y, env.usv.heading,
             goal_abs[0], goal_abs[1],
             obs['o_detector'], usv_u=env.usv.u

@@ -47,16 +47,16 @@ class ReplayBuffer:
 class GoalConditionedReplayBuffer:
     """
     Goal-Conditioned Replay Buffer for Actuator (TD3/SAC)
-    存储 (state, action, reward, next_state, done, goal, is_mpc) 七元组
+    存储 (state, action, reward, next_state, done, goal, is_expert) 七元组
 
-    is_mpc 标志用于区分 MPC 专家生成的 transition 和 RL 策略生成的 transition,
-    以便在训练时对 MPC transition 施加行为克隆损失 (Behavioral Cloning Loss)。
+    is_expert 标志用于区分 Expert 专家生成的 transition 和 RL 策略生成的 transition,
+    以便在训练时对 Expert transition 施加行为克隆损失 (Behavioral Cloning Loss)。
     """
 
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, state, action, reward, next_state, done, goal, is_mpc=False):
+    def push(self, state, action, reward, next_state, done, goal, is_expert=False):
         self.buffer.append((
             np.array(state, dtype=np.float32),
             np.array(action, dtype=np.float32),
@@ -64,12 +64,12 @@ class GoalConditionedReplayBuffer:
             np.array(next_state, dtype=np.float32),
             float(done),
             np.array(goal, dtype=np.float32),
-            float(is_mpc)
+            float(is_expert)
         ))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones, goals, is_mpcs = zip(*batch)
+        states, actions, rewards, next_states, dones, goals, is_experts = zip(*batch)
         return (
             torch.FloatTensor(np.array(states)).to(device),
             torch.FloatTensor(np.array(actions)).to(device),
@@ -77,7 +77,7 @@ class GoalConditionedReplayBuffer:
             torch.FloatTensor(np.array(next_states)).to(device),
             torch.FloatTensor(np.array(dones)).reshape(-1, 1).to(device),
             torch.FloatTensor(np.array(goals)).to(device),
-            torch.FloatTensor(np.array(is_mpcs)).reshape(-1, 1).to(device),
+            torch.FloatTensor(np.array(is_experts)).reshape(-1, 1).to(device),
         )
 
     def __len__(self):

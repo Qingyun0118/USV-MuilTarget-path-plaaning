@@ -333,7 +333,7 @@ def plot_metrics_bar_chart(metrics_dict: Dict[str, Dict[str, float]],
 if __name__ == '__main__':
     # 示例数据: 模拟三种算法的评估结果
     demo_metrics = {
-        'MPC-HRL (Ours)': {
+        'Expert-HRL (Ours)': {
             '路径长度': 0.82,
             '路径平滑度': 0.75,
             '能效': 0.68,
@@ -349,7 +349,7 @@ if __name__ == '__main__':
             '样本效率': 0.40,
             '任务成功率': 0.60,
         },
-        'Pure MPC': {
+        'Pure Expert': {
             '路径长度': 0.70,
             '路径平滑度': 0.85,
             '能效': 0.72,
@@ -361,8 +361,8 @@ if __name__ == '__main__':
 
     print("绘制单算法雷达图...")
     plot_single_radar(
-        demo_metrics['MPC-HRL (Ours)'],
-        algorithm_name='MPC-HRL (Ours)',
+        demo_metrics['Expert-HRL (Ours)'],
+        algorithm_name='Expert-HRL (Ours)',
         save_path='radar_single_demo.png',
         show=False
     )

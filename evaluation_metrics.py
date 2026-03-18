@@ -525,7 +525,7 @@ def evaluate_single_episode(csv_file: str,
     Args:
         csv_file:    路径 CSV 文件
         env:         MyUsvEnv 实例 (用于获取障碍物、目标等信息)
-        result_dict: evaluate_mpc_hrl 函数返回的单 episode 结果字典,
+        result_dict: evaluate_expert_hrl 函数返回的单 episode 结果字典,
                      需包含: 'success', 'collision', 'total_distance',
                              'target_order', 'total_steps'
         flow_fn:     海流速度函数 flow_fn(x, y) -> (u, v), 可选
@@ -601,7 +601,7 @@ def evaluate_all_episodes(eval_results: List[Dict],
         eval_results:          评估结果列表
         csv_dir:               CSV 文件目录
         env:                   MyUsvEnv 实例
-        eval_mode:             评估模式 ('rl' 或 'mpc')
+        eval_mode:             评估模式 ('rl' 或 'expert')
         flow_fn:               海流速度函数
         dt:                    时间步长
         episode_steps_train:   训练过程中每 episode 步数 (用于样本效率)
@@ -615,7 +615,7 @@ def evaluate_all_episodes(eval_results: List[Dict],
 
     for ep_result in eval_results:
         ep_idx = ep_result['episode']
-        csv_file = os.path.join(csv_dir, f"mpc_hrl_path_{eval_mode}_ep_{ep_idx}.csv")
+        csv_file = os.path.join(csv_dir, f"expert_hrl_path_{eval_mode}_ep_{ep_idx}.csv")
 
         ep_metrics = evaluate_single_episode(
             csv_file, env, ep_result, flow_fn=flow_fn, dt=dt)

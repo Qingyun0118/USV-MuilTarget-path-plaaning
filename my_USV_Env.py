@@ -399,7 +399,7 @@ class MyUsvEnv():
         
         # 创建USV对象
         self.usv = USV(self.start_pos[0], self.start_pos[1],
-                       heading=self.rng.uniform(0.0,360.0), length=self.usv_length, width=self.usv_width)
+                   heading=self.rng.uniform(0.0, 2 * np.pi), length=self.usv_length, width=self.usv_width)
         
         # 生成目标（需要避开障碍物和起始位置）
         if self.fixed_targets is not None:
@@ -1394,6 +1394,324 @@ class MyUsvEnv():
             s0_list.append(s0)
             g_list.append(g)
         return np.array(s0_list, dtype=np.float32), np.array(g_list, dtype=np.float32)
+
+
+class MultiUsvEnv(MyUsvEnv):
+    """多USV环境: 继承单USV环境并扩展为并行多艇仿真。"""
+
+    def __init__(self,
+                 num_usvs=2,
+                 min_start_separation=8.0,
+                 usv_collision_buffer=0.5,
+                 per_usv_max_steps=2000,
+                 fixed_start_positions=None,
+                 **kwargs):
+        self.num_usvs = int(max(1, num_usvs))
+        self.min_start_separation = float(max(0.0, min_start_separation))
+        self.usv_collision_buffer = float(max(0.0, usv_collision_buffer))
+        self.per_usv_max_steps = int(max(1, per_usv_max_steps))
+        self.fixed_start_positions = fixed_start_positions
+
+        self.usvs = []
+        self.start_positions = []
+        self.current_positions = None
+        self.per_usv_steps = np.zeros(self.num_usvs, dtype=np.int32)
+
+        super().__init__(**kwargs)
+
+        self.single_observation_space = self.observation_space
+        self.observation_space = Dict({
+            f"usv_{i}": self.single_observation_space for i in range(self.num_usvs)
+        })
+        self.action_space = Box(
+            low=-1.0,
+            high=1.0,
+            shape=(self.num_usvs, 2),
+            dtype=np.float32
+        )
+
+    def _generate_start_positions(self):
+        """生成多USV起点, 要求避开障碍并满足艇间最小间距。"""
+        if self.fixed_start_positions is not None:
+            if len(self.fixed_start_positions) != self.num_usvs:
+                raise ValueError("fixed_start_positions length must equal num_usvs")
+            return [np.array(p, dtype=np.float32) for p in self.fixed_start_positions]
+
+        usv_bounding_radius = max(self.usv_length, self.usv_width) / 2 * 1.2
+        margin = usv_bounding_radius + self.rou_c + self.rou_s + 5
+        max_attempts = 400
+        starts = []
+
+        for _ in range(self.num_usvs):
+            found = False
+            for _ in range(max_attempts):
+                x = self.rng.uniform(margin, X_MAX - margin)
+                y = self.rng.uniform(margin, Y_MAX - margin)
+                candidate = np.array([x, y], dtype=np.float32)
+
+                valid = True
+                for obs in self.obstacles:
+                    if obs.is_point_in_safety_zone(candidate):
+                        valid = False
+                        break
+
+                if valid:
+                    for existing in starts:
+                        if np.linalg.norm(candidate - existing) < self.min_start_separation:
+                            valid = False
+                            break
+
+                if valid:
+                    starts.append(candidate)
+                    found = True
+                    break
+
+            if not found:
+                starts.append(np.array([5.0 + len(starts) * 3.0, 5.0], dtype=np.float32))
+
+        return starts
+
+    def _generate_environment(self):
+        """生成多USV环境配置（共享障碍物和目标，多起点）。"""
+        if self.fixed_obstacles is not None:
+            self.obstacles = self._create_fixed_obstacles(self.fixed_obstacles)
+        else:
+            self.obstacles = self._generate_obstacles()
+
+        self.start_positions = self._generate_start_positions()
+        self.start_pos = self.start_positions[0].copy()  # 兼容旧接口
+
+        self.usvs = []
+        for pos in self.start_positions:
+            usv = USV(
+                pos[0], pos[1],
+                heading=self.rng.uniform(0.0, 2 * np.pi),
+                length=self.usv_length,
+                width=self.usv_width
+            )
+            self.usvs.append(usv)
+
+        self.usv = self.usvs[0]  # 兼容旧接口
+
+        if self.fixed_targets is not None:
+            self.targets = self._create_fixed_targets(self.fixed_targets)
+        else:
+            self.targets = self._generate_targets()
+
+        self.current_positions = np.array(self.start_positions, dtype=np.float32)
+        self.current_pos = self.current_positions[0].copy()  # 兼容旧接口
+        self.target_status = np.zeros(self.num_targets, dtype=np.float32)
+        self.per_usv_steps = np.zeros(self.num_usvs, dtype=np.int32)
+
+    def _get_single_observation(self, usv_idx):
+        usv = self.usvs[usv_idx]
+
+        x, y = usv.x, usv.y
+        heading = usv.heading
+        u, v, r = usv.u, usv.v, usv.r
+        flow_u, flow_v = self.get_flow_velocity(x, y, self.current_time)
+
+        o_usv = np.array([
+            x / X_MAX,
+            y / Y_MAX,
+            u / usv.max_u,
+            v / usv.max_v,
+            r / usv.max_r,
+            np.sin(heading),
+            np.cos(heading)
+        ], dtype=np.float32)
+
+        targets_info = []
+        for i, target in enumerate(self.targets):
+            targets_info.extend([
+                target.x / X_MAX,
+                target.y / Y_MAX,
+                self.target_status[i]
+            ])
+        o_targets = np.array(targets_info, dtype=np.float32)
+
+        flow_speed = np.sqrt(flow_u ** 2 + flow_v ** 2)
+        flow_angle = np.arctan2(flow_v, flow_u)
+        if flow_speed > 1e-8:
+            o_current = np.array([
+                flow_u / flow_speed,
+                flow_v / flow_speed,
+                np.sin(flow_angle),
+                np.cos(flow_angle)
+            ], dtype=np.float32)
+        else:
+            o_current = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+
+        readings = np.array(usv.sensor_readings, dtype=np.float32)
+        o_detector = readings / usv.sensor_range
+
+        return {
+            "o_usv": o_usv,
+            "targets": o_targets,
+            "o_current": o_current,
+            "o_detector": o_detector
+        }
+
+    def _get_observation(self):
+        return {f"usv_{i}": self._get_single_observation(i) for i in range(self.num_usvs)}
+
+    def _update_sensors(self):
+        static_obstacles = [obs.geometry for obs in self.obstacles]
+        for i, usv in enumerate(self.usvs):
+            dynamic_obstacles = []
+            for j, other in enumerate(self.usvs):
+                if i == j or other.polygon is None:
+                    continue
+                dynamic_obstacles.append(other.polygon.buffer(self.usv_collision_buffer))
+            usv.detect_obstacles(static_obstacles + dynamic_obstacles)
+
+    def _update_global_target_status(self):
+        for i, target in enumerate(self.targets):
+            if self.target_status[i] == 1.0:
+                continue
+            target_pos = np.array([target.x, target.y], dtype=np.float32)
+            for pos in self.current_positions:
+                if np.linalg.norm(pos - target_pos) < target.radius_t:
+                    self.target_status[i] = 1.0
+                    break
+
+    def _check_collisions(self):
+        obstacle_collisions = [False] * self.num_usvs
+        usv_collision_pairs = []
+
+        for i, usv in enumerate(self.usvs):
+            for obs in self.obstacles:
+                if usv.is_colliding_with(obs.geometry):
+                    obstacle_collisions[i] = True
+                    break
+
+        for i in range(self.num_usvs):
+            for j in range(i + 1, self.num_usvs):
+                ui = self.usvs[i]
+                uj = self.usvs[j]
+                d = np.linalg.norm(np.array([ui.x - uj.x, ui.y - uj.y], dtype=np.float32))
+                thresh = ui.get_bounding_radius() + uj.get_bounding_radius() + self.usv_collision_buffer
+                inter = False
+                if ui.polygon is not None and uj.polygon is not None:
+                    inter = ui.polygon.intersects(uj.polygon)
+                if inter or d <= thresh:
+                    usv_collision_pairs.append((i, j))
+
+        return obstacle_collisions, usv_collision_pairs
+
+    def reset(self, seed=None):
+        if seed is not None:
+            self.seed = seed
+            np.random.seed(seed)
+            random.seed(seed)
+            self.rng = np.random.RandomState(seed)
+
+        self.step_counter = 0
+        self.current_time = 0.0
+
+        self._generate_environment()
+        self.U, self.V = self._load_current_data()
+        self.target_status = np.zeros(self.num_targets, dtype=np.float32)
+
+        self._update_sensors()
+        return self._get_observation()
+
+    def step(self, actions, goal_positions_global, usv_active_mask=None):
+        """
+        多USV并行步进。
+
+        Args:
+            actions: shape=(num_usvs,2) 的动作数组
+            goal_positions_global: 每艘USV当前目标点（全局坐标）列表
+            usv_active_mask: 可选激活掩码。False 表示该USV已完成序列，不再推进
+        """
+        actions = np.asarray(actions, dtype=np.float32)
+        if actions.shape != (self.num_usvs, 2):
+            raise ValueError(f"actions shape must be ({self.num_usvs}, 2)")
+        if len(goal_positions_global) != self.num_usvs:
+            raise ValueError("goal_positions_global length must equal num_usvs")
+
+        if usv_active_mask is None:
+            active_mask = np.ones(self.num_usvs, dtype=bool)
+        else:
+            active_mask = np.asarray(usv_active_mask, dtype=bool)
+            if active_mask.shape != (self.num_usvs,):
+                raise ValueError(f"usv_active_mask shape must be ({self.num_usvs},)")
+
+        self.step_counter += 1
+        self.current_time += self.dt
+
+        usv_pos_raw_norm = np.zeros((self.num_usvs, 2), dtype=np.float32)
+        reached_goals = [False] * self.num_usvs
+
+        for i, usv in enumerate(self.usvs):
+            if not active_mask[i]:
+                self.current_positions[i] = np.array([usv.x, usv.y], dtype=np.float32)
+                continue
+
+            action = actions[i]
+            throttle = float(action[0])
+            rudder = float(action[1] * np.radians(60))
+
+            usv.step(throttle, rudder)
+
+            flow_u, flow_v = self.get_flow_velocity(usv.x, usv.y, self.current_time)
+            usv.x += flow_u * self.dt
+            usv.y += flow_v * self.dt
+
+            usv_pos_raw_norm[i] = np.array([usv.x / X_MAX, usv.y / Y_MAX], dtype=np.float32)
+
+            usv.x = np.clip(usv.x, X_MIN, X_MAX)
+            usv.y = np.clip(usv.y, Y_MIN, Y_MAX)
+            usv._update_polygon()
+
+            self.current_positions[i] = np.array([usv.x, usv.y], dtype=np.float32)
+            self.per_usv_steps[i] += 1
+
+            goal = np.array(goal_positions_global[i], dtype=np.float32)
+            reached_goals[i] = np.linalg.norm(self.current_positions[i] - goal) < self.target_radius
+
+        self.current_pos = self.current_positions[0].copy()
+        self.usv = self.usvs[0]
+
+        self._update_global_target_status()
+        self._update_sensors()
+        obstacle_collisions, usv_collision_pairs = self._check_collisions()
+
+        crush = any(obstacle_collisions) or len(usv_collision_pairs) > 0
+
+        all_sequence_done = np.all(~active_mask)
+
+        active_indices = np.where(active_mask)[0]
+        if len(active_indices) == 0:
+            all_active_timeout = False
+        else:
+            all_active_timeout = all(self.per_usv_steps[i] >= self.per_usv_max_steps for i in active_indices)
+
+        done = crush or all_sequence_done or all_active_timeout
+        truncated = bool(all_active_timeout and not crush)
+
+        if crush:
+            termination_reason = "collision"
+        elif all_sequence_done:
+            termination_reason = "all_sequence_completed"
+        elif all_active_timeout:
+            termination_reason = "all_active_timeout"
+        else:
+            termination_reason = "running"
+
+        info = {
+            "obstacle_collisions": obstacle_collisions,
+            "usv_collision_pairs": usv_collision_pairs,
+            "reached_goals": reached_goals,
+            "target_status": self.target_status.copy(),
+            "per_usv_steps": self.per_usv_steps.copy(),
+            "usv_positions": self.current_positions.copy(),
+            "usv_pos_raw_norm": usv_pos_raw_norm,
+            "termination_reason": termination_reason
+        }
+
+        return self._get_observation(), done, crush, truncated, info
 
 
 # 兼容性：保留旧的全局变量定义

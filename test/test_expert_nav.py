@@ -4,7 +4,7 @@
 import numpy as np
 import os
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from Expert_HRL_td3_main import ReactiveController
+from reactive_controller import ReactiveController
 
 SCALE = np.array([X_MAX, Y_MAX])
 num_t=5

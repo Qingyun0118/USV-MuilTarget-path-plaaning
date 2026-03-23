@@ -1,7 +1,7 @@
 """诊断 Expert 碰撞时的传感器读数和障碍物位置关系"""
 import numpy as np
 from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
-from Expert_HRL_td3_main import ReactiveController
+from reactive_controller import ReactiveController
 
 crash_seeds = [42, 200, 1000]
 expert = ReactiveController()

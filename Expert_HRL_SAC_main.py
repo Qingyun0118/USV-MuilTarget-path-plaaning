@@ -209,7 +209,9 @@ def train_expert_hrl(args):
         else:
             obs_dict = env.reset(seed=args.seed + episode)
 
-        expert_prob = expert_scheduler.get_expert_probability(episode)
+        # Expert 衰减从固定环境阶段结束后才开始, 确保进入随机环境时仍有充足专家指导
+        effective_ep = max(0, episode - args.fixed_env_episodes)
+        expert_prob = expert_scheduler.get_expert_probability(effective_ep)
 
         # SAC 自带探索 (通过随机策略), 无需额外的探索噪声
         usv_pos = get_usv_pos(obs_dict)
@@ -308,6 +310,23 @@ def train_expert_hrl(args):
                     next_actuator_state, float(is_terminal), relative_goal,
                     is_expert=use_expert
                 )
+
+                # ---- 碰撞回溯惩罚 ----
+                # 碰撞不仅是最后一步的错, 之前接近障碍物的步骤也有责任
+                # 向 buffer 末尾的最近 N 步追加额外负奖励的 transition
+                if crush:
+                    backtrack_steps = min(nav_steps, 10)
+                    buf = actuator_buffer.buffer
+                    for k in range(2, backtrack_steps + 1):
+                        idx = len(buf) - k
+                        if idx < 0:
+                            break
+                        old = buf[idx]
+                        # 距碰撞越近惩罚越大: -5, -4.5, -4, ...
+                        extra_penalty = -5.0 * (1.0 - (k - 1) / backtrack_steps)
+                        new_reward = old[2] + extra_penalty
+                        buf[idx] = (old[0], old[1], new_reward,
+                                    old[3], old[4], old[5], old[6])
 
                 # ---- 训练 Actuator (SAC + BC) ----
                 bc_w = args.bc_weight * expert_prob
@@ -844,14 +863,14 @@ if __name__ == "__main__":
                         help="训练时障碍物数量")
 
     # --- 训练参数 ---
-    parser.add_argument("--max_episodes", default=1500, type=int,
+    parser.add_argument("--max_episodes", default=1000, type=int,
                         help="总训练 episode 数")
-    parser.add_argument("--max_steps_per_target", default=1000, type=int,
-                        help="导航到单个目标的最大步数")
+    parser.add_argument("--max_steps_per_target", default=600, type=int,
+                        help="导航到单个目标的最大步数 ")
     parser.add_argument("--warmup_steps", default=1000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
     parser.add_argument("--fixed_env_episodes", default=0, type=int,
-                        help="前 N 个 episode 使用固定种子环境")
+                        help="前 N 个 episode 使用固定种子环境 (先学会一个环境再泛化)")
 
     # --- 学习率 ---
     parser.add_argument("--lr_actor", default=3e-4, type=float,
@@ -882,14 +901,14 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_start", default=1.0, type=float)
     parser.add_argument("--epsilon_end", default=0.05, type=float)
     parser.add_argument("--epsilon_decay", default=0.999, type=float)
-    parser.add_argument("--distance_penalty_coeff", default=3.0, type=float,
+    parser.add_argument("--distance_penalty_coeff", default=2.0, type=float,
                         help="Selector 总距离惩罚系数")
 
     # --- Expert 概率衰减参数 ---
-    parser.add_argument("--expert_p0", default=0.5, type=float,
-                        help="Expert 初始使用概率")
-    parser.add_argument("--expert_p_min", default=0.00, type=float,
-                        help="Expert 最低使用概率")
+    parser.add_argument("--expert_p0", default=0.9, type=float,
+                        help="Expert 初始使用概率 (训练初期高概率使用专家)")
+    parser.add_argument("--expert_p_min", default=0.05, type=float,
+                        help="Expert 最低使用概率 (保留少量专家指导防止遗忘)")
     parser.add_argument("--success_window", default=100, type=int,
                         help="成功率统计滑动窗口大小")
 

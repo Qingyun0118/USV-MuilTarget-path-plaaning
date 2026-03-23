@@ -208,7 +208,7 @@ class SACActuatorAgent:
     """
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
+                 lr_actor=3e-4, lr_critic=3e-4, gamma=0.98, tau=0.005,
                  alpha=0.2, automatic_entropy_tuning=True,
                  target_update_interval=1, sensor_dim=15):
         # Actor (Gaussian Policy + Sensor CNN)

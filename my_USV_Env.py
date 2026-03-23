@@ -360,8 +360,8 @@ class MyUsvEnv():
             
             if flow_speed > 1e-8:
                 o_current = np.array([
-                    flow_u / flow_speed,
-                    flow_v / flow_speed,
+                    flow_u ,
+                    flow_v ,
                     np.sin(flow_angle),
                     np.cos(flow_angle)
                 ], dtype=np.float32)

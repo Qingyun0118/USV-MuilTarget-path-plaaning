@@ -135,7 +135,7 @@ class TD3ActuatorAgent:
     """
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 lr_actor=1e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
+                 lr_actor=1e-4, lr_critic=3e-4, gamma=0.98, tau=0.005,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2,
                  sensor_dim=15):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action, sensor_dim).to(device)

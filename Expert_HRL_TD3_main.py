@@ -340,9 +340,9 @@ def train_expert_hrl(args):
                         target_reached = True
                         selector_step_reward = 1.0
                     else:
-                        # 非选中目标被意外到达, 给予部分奖励并中断重选
+                        # 非选中目标被意外到达, 给予少量奖励
                         target_reached = True
-                        selector_step_reward = 0.5
+                        selector_step_reward = 0.1
 
                 # 更新状态
                 obs_dict = next_obs_dict
@@ -356,6 +356,10 @@ def train_expert_hrl(args):
             # ---- End of Actuator Navigation Loop ----
 
             # ---- Selector 奖励计算 ----
+            if crush:
+                # 碰撞惩罚: 让 Selector 学会避免选择危险路径上的目标
+                selector_step_reward = -2.0
+
             if ep_done:
                 # 所有目标完成 — 基础大奖励 + 总距离惩罚
                 max_possible_dist = active_targets * np.sqrt(X_MAX ** 2 + Y_MAX ** 2)
@@ -363,8 +367,8 @@ def train_expert_hrl(args):
                 distance_penalty = -args.distance_penalty_coeff * distance_ratio
                 selector_step_reward += 2.0 + distance_penalty
 
-            if not target_reached and not ep_done:
-                selector_step_reward = -0.1  # 未到达目标
+            if not target_reached and not ep_done and not crush:
+                selector_step_reward = -0.3  # 未到达目标
 
             # 存入 Selector Buffer
             next_selector_state = get_selector_state(obs_dict)

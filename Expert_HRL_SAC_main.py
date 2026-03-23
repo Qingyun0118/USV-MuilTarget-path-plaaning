@@ -118,7 +118,7 @@ def train_expert_hrl(args):
     expert_scheduler = DawoodExpertScheduler(
         p0=args.expert_p0,
         p_min=args.expert_p_min,
-        total_episodes=args.max_episodes,
+        total_episodes=args.max_episodes-500,
         success_window=args.success_window
     )
  
@@ -326,8 +326,9 @@ def train_expert_hrl(args):
                         target_reached = True
                         selector_step_reward = 1.0
                     else:
+                        # 非选中目标被意外到达, 给予少量奖励
                         target_reached = True
-                        selector_step_reward = 0.5
+                        selector_step_reward = 0.1
 
                 obs_dict = next_obs_dict
                 usv_pos = next_usv_pos
@@ -339,14 +340,18 @@ def train_expert_hrl(args):
             # ---- End of Actuator Navigation Loop ----
 
             # ---- Selector 奖励计算 ----
+            if crush:
+                # 碰撞惩罚: 让 Selector 学会避免选择危险路径上的目标
+                selector_step_reward = -2.0
+
             if ep_done:
                 max_possible_dist = active_targets * np.sqrt(X_MAX ** 2 + Y_MAX ** 2)
                 distance_ratio = episode_total_distance / max_possible_dist
                 distance_penalty = -args.distance_penalty_coeff * distance_ratio
                 selector_step_reward += 2.0 + distance_penalty
 
-            if not target_reached and not ep_done:
-                selector_step_reward = -0.1
+            if not target_reached and not ep_done and not crush:
+                selector_step_reward = -0.3
 
             next_selector_state = get_selector_state(obs_dict)
             selector_buffer.push(
@@ -877,13 +882,13 @@ if __name__ == "__main__":
     parser.add_argument("--epsilon_start", default=1.0, type=float)
     parser.add_argument("--epsilon_end", default=0.05, type=float)
     parser.add_argument("--epsilon_decay", default=0.999, type=float)
-    parser.add_argument("--distance_penalty_coeff", default=1.0, type=float,
+    parser.add_argument("--distance_penalty_coeff", default=3.0, type=float,
                         help="Selector 总距离惩罚系数")
 
     # --- Expert 概率衰减参数 ---
     parser.add_argument("--expert_p0", default=0.5, type=float,
                         help="Expert 初始使用概率")
-    parser.add_argument("--expert_p_min", default=0.05, type=float,
+    parser.add_argument("--expert_p_min", default=0.00, type=float,
                         help="Expert 最低使用概率")
     parser.add_argument("--success_window", default=100, type=int,
                         help="成功率统计滑动窗口大小")

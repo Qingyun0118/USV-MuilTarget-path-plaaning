@@ -221,51 +221,78 @@ class USV:
         self._update_polygon()  
   
     def detect_obstacles(self, obstacles):  
-        """传感器探测逻辑"""  
-        self.sensor_readings = []  
-          
+        """向量化传感器探测 — 批量射线-线段求交 (替代逐条 Shapely 调用)"""  
+        n_rays = self.num_detection_lines
+        sr = self.sensor_range
+
+        # 1. 所有射线方向 (单位向量)
         angles = np.linspace(  
             self.heading - self.sensor_fov / 2,  
             self.heading + self.sensor_fov / 2,  
-            self.num_detection_lines  
+            n_rays  
         )  
-          
-        start_point = Point(self.x, self.y)  
-          
-        for angle in angles:  
-            end_x = self.x + self.sensor_range * np.cos(angle)  
-            end_y = self.y + self.sensor_range * np.sin(angle)  
-            ray = LineString([(self.x, self.y), (end_x, end_y)])  
-              
-            min_dist = self.sensor_range  
-              
-            for obs in obstacles:
-                try:
-                    if ray.intersects(obs):
-                        intersection = ray.intersection(obs)
-                        # 处理不同类型的交集结果
-                        if intersection.is_empty:
-                            continue
-                        
-                        dist = self.sensor_range # 默认最大
-                        
-                        if intersection.geom_type == 'Point':
-                            dist = start_point.distance(intersection)
-                        elif intersection.geom_type == 'MultiPoint':
-                            # 找最近的点
-                            dists = [start_point.distance(p) for p in intersection.geoms]
-                            dist = min(dists)
-                        elif intersection.geom_type in ['LineString', 'MultiLineString', 'GeometryCollection']:
-                            dist = start_point.distance(intersection)
-                        
-                        if dist < min_dist:
-                            min_dist = dist
-                except Exception as e:
-                    # print(f"Warning: Geometry error in sensor detection: {e}")
-                    continue
-              
-            self.sensor_readings.append(min_dist)  
-              
+        ray_dx = np.cos(angles)  # (N,)
+        ray_dy = np.sin(angles)  # (N,)
+        ox, oy = self.x, self.y
+
+        # 2. 收集所有障碍物边界线段
+        seg_starts_list = []
+        seg_ends_list = []
+        for obs in obstacles:
+            try:
+                if obs.geom_type == 'Polygon':
+                    coords = np.array(obs.exterior.coords)
+                    seg_starts_list.append(coords[:-1])
+                    seg_ends_list.append(coords[1:])
+                elif obs.geom_type == 'MultiPolygon':
+                    for poly in obs.geoms:
+                        coords = np.array(poly.exterior.coords)
+                        seg_starts_list.append(coords[:-1])
+                        seg_ends_list.append(coords[1:])
+            except Exception:
+                continue
+
+        if not seg_starts_list:
+            self.sensor_readings = [sr] * n_rays
+            return self.sensor_readings
+
+        A = np.vstack(seg_starts_list)  # (S, 2) 线段起点
+        B = np.vstack(seg_ends_list)    # (S, 2) 线段终点
+
+        # 3. 向量化射线-线段求交
+        #    射线: P + t * D,  D = (ray_dx, ray_dy), t ∈ (0, sensor_range]
+        #    线段: A + s * E,  E = B - A,            s ∈ [0, 1]
+        #    解: t = cross(F, E) / cross(D, E)
+        #        s = cross(F, D) / cross(D, E)
+        #    其中 F = A - P
+        Ex = B[:, 0] - A[:, 0]  # (S,)
+        Ey = B[:, 1] - A[:, 1]  # (S,)
+        Fx = A[:, 0] - ox       # (S,)
+        Fy = A[:, 1] - oy       # (S,)
+
+        # cross(D_i, E_j) = D_ix * E_jy - D_iy * E_jx → (N, S)
+        denom = ray_dx[:, None] * Ey[None, :] - ray_dy[:, None] * Ex[None, :]
+
+        # cross(F_j, E_j) = F_jx * E_jy - F_jy * E_jx → (S,), 与射线无关
+        cross_FE = Fx * Ey - Fy * Ex  # (S,)
+
+        # cross(F_j, D_i) = F_jx * D_iy - F_jy * D_ix → (N, S)
+        cross_FD = Fx[None, :] * ray_dy[:, None] - Fy[None, :] * ray_dx[:, None]
+
+        # 避免除以零 (平行情况)
+        parallel = np.abs(denom) < 1e-10
+        safe_denom = np.where(parallel, 1.0, denom)
+
+        t = cross_FE[None, :] / safe_denom  # (N, S) 射线上的距离
+        s = cross_FD / safe_denom            # (N, S) 线段上的比例
+
+        # 有效交点: 非平行, t ∈ (0, sensor_range], s ∈ [0, 1]
+        valid = (~parallel) & (t > 1e-6) & (t <= sr) & (s >= 0.0) & (s <= 1.0)
+
+        # 无效交点设为 sensor_range, 取每条射线的最小值
+        t_masked = np.where(valid, t, sr)
+        self.sensor_readings = np.min(t_masked, axis=1).tolist()
+
         return self.sensor_readings  
   
     def get_vertices(self):  

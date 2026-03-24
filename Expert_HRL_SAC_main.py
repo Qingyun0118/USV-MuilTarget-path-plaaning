@@ -118,7 +118,7 @@ def train_expert_hrl(args):
     expert_scheduler = DawoodExpertScheduler(
         p0=args.expert_p0,
         p_min=args.expert_p_min,
-        total_episodes=args.max_episodes-500,
+        total_episodes=args.max_episodes,
         success_window=args.success_window
     )
  
@@ -865,7 +865,7 @@ if __name__ == "__main__":
     # --- 训练参数 ---
     parser.add_argument("--max_episodes", default=1000, type=int,
                         help="总训练 episode 数")
-    parser.add_argument("--max_steps_per_target", default=600, type=int,
+    parser.add_argument("--max_steps_per_target", default=800, type=int,
                         help="导航到单个目标的最大步数 ")
     parser.add_argument("--warmup_steps", default=1000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
@@ -905,7 +905,7 @@ if __name__ == "__main__":
                         help="Selector 总距离惩罚系数")
 
     # --- Expert 概率衰减参数 ---
-    parser.add_argument("--expert_p0", default=0.9, type=float,
+    parser.add_argument("--expert_p0", default=0.5, type=float,
                         help="Expert 初始使用概率 (训练初期高概率使用专家)")
     parser.add_argument("--expert_p_min", default=0.05, type=float,
                         help="Expert 最低使用概率 (保留少量专家指导防止遗忘)")

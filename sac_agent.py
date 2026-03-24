@@ -230,9 +230,10 @@ class SACActuatorAgent:
         # 熵正则化
         self.automatic_entropy_tuning = automatic_entropy_tuning
         if automatic_entropy_tuning:
-            # 目标熵 = -dim(action)
-            self.target_entropy = -float(action_dim)
-            self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+            # 目标熵 = -0.5 * dim(action), 社区常用启发式
+            self.target_entropy = -0.5 * float(action_dim)
+            import numpy as _np
+            self.log_alpha = torch.tensor([_np.log(alpha)], requires_grad=True, device=device)
             self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr_actor)
             self.alpha = self.log_alpha.exp().item()
         else:

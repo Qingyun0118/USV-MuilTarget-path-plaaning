@@ -208,9 +208,10 @@ class SACActuatorAgent:
     """
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 lr_actor=3e-4, lr_critic=3e-4, gamma=0.98, tau=0.005,
+                 lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
                  alpha=0.2, automatic_entropy_tuning=True,
-                 target_update_interval=1, sensor_dim=15):
+                 target_update_interval=1, sensor_dim=15,
+                 lr_alpha=None):
         # Actor (Gaussian Policy + Sensor CNN)
         self.actor = GaussianActor(state_dim, goal_dim, action_dim, max_action, sensor_dim).to(device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
@@ -234,8 +235,10 @@ class SACActuatorAgent:
             self.target_entropy = -0.5 * float(action_dim)
             import numpy as _np
             self.log_alpha = torch.tensor([_np.log(alpha)], requires_grad=True, device=device)
-            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr_actor)
+            _lr_alpha = lr_alpha if lr_alpha is not None else 1e-4
+            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=_lr_alpha)
             self.alpha = self.log_alpha.exp().item()
+            self.log_alpha_min = _np.log(0.01)   # alpha 下限 0.01, 防止坍塌
         else:
             self.alpha = alpha
 
@@ -334,6 +337,9 @@ class SACActuatorAgent:
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
+            # 防止 alpha 坍塌到 0: 限制 log_alpha 下界
+            with torch.no_grad():
+                self.log_alpha.data.clamp_(min=self.log_alpha_min)
             self.alpha = self.log_alpha.exp().item()
 
         # ---- Soft update target critic ----

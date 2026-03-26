@@ -62,7 +62,7 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done,
 
     # 边界惩罚: 距边界 5% 内开始渐进惩罚, 超出边界时更强
     boundary_penalty = 0.0
-    boundary_margin = 0.05  # 归一化 5% ≈ 5m
+    boundary_margin = 0.05
     if usv_pos_norm is not None:
         for coord in usv_pos_norm:
             if coord < 0.0:

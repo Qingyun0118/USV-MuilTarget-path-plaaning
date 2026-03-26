@@ -102,9 +102,10 @@ def train_expert_hrl(args):
         actuator_state_dim, actuator_goal_dim, actuator_action_dim,
         max_action=1.0,
         lr_actor=args.lr_actor, lr_critic=args.lr_critic,
-        tau=args.tau, alpha=args.sac_alpha,
+        gamma=args.gamma, tau=args.tau, alpha=args.sac_alpha,
         automatic_entropy_tuning=args.automatic_entropy_tuning,
-        target_update_interval=args.target_update_interval
+        target_update_interval=args.target_update_interval,
+        lr_alpha=args.lr_alpha
     )
 
     # ---- 3. Replay Buffers ----
@@ -865,11 +866,11 @@ if __name__ == "__main__":
     # --- 训练参数 ---
     parser.add_argument("--max_episodes", default=1000, type=int,
                         help="总训练 episode 数")
-    parser.add_argument("--max_steps_per_target", default=800, type=int,
+    parser.add_argument("--max_steps_per_target", default=600, type=int,
                         help="导航到单个目标的最大步数 ")
     parser.add_argument("--warmup_steps", default=1000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
-    parser.add_argument("--fixed_env_episodes", default=0, type=int,
+    parser.add_argument("--fixed_env_episodes", default=500, type=int,
                         help="前 N 个 episode 使用固定种子环境 (先学会一个环境再泛化)")
 
     # --- 学习率 ---
@@ -879,10 +880,14 @@ if __name__ == "__main__":
     parser.add_argument("--lr_selector", default=1e-4, type=float)
 
     # --- SAC 参数 ---
+    parser.add_argument("--gamma", default=0.98, type=float,
+                        help="折扣因子 (0.98 适合短 horizon 任务)")
     parser.add_argument("--tau", default=0.005, type=float,
                         help="Target critic soft update 系数")
     parser.add_argument("--sac_alpha", default=0.2, type=float,
                         help="SAC 温度参数初始值 (熵正则化系数)")
+    parser.add_argument("--lr_alpha", default=1e-4, type=float,
+                        help="SAC 温度参数 alpha 的学习率 (低于 actor lr 防止坍塌)")
     parser.add_argument("--automatic_entropy_tuning", action="store_true", default=True,
                         help="是否启用自动熵温度调节")
     parser.add_argument("--no_automatic_entropy_tuning", dest="automatic_entropy_tuning",
@@ -905,7 +910,7 @@ if __name__ == "__main__":
                         help="Selector 总距离惩罚系数")
 
     # --- Expert 概率衰减参数 ---
-    parser.add_argument("--expert_p0", default=0.5, type=float,
+    parser.add_argument("--expert_p0", default=0.9, type=float,
                         help="Expert 初始使用概率 (训练初期高概率使用专家)")
     parser.add_argument("--expert_p_min", default=0.05, type=float,
                         help="Expert 最低使用概率 (保留少量专家指导防止遗忘)")

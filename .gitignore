@@ -26,3 +26,4 @@ Paper/Ma 等 - 2018 - Multi-objective path planning for unmanned surface vehicle
 Paper/NeurIPS-2019-exploration-via-hindsight-goal-generation-Paper.pdf
 Paper/Yan 等 - 2024 - Hierarchical reinforcement learning for handling sparse rewards in multi-goal navigation.pdf
 expert_hrl_sac_output/debugLog/
+*.gif

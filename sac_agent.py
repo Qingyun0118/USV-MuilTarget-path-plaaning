@@ -12,6 +12,7 @@ SAC (Soft Actor-Critic) Actuator Agent — Goal-Conditioned
 5. 动作采样自带随机性, 无需显式添加探索噪声
 """
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,64 +25,93 @@ LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
 SAC_EPSILON = 1e-6
 
-# Actuator state 结构: [o_usv(7) | o_detector(sensor_dim) | o_current(4)]
-_USV_DIM = 7          # USV 状态维度 (state 前 7 维: x,y,u,v,r,sin,cos)
-_SENSOR_CNN_OUT = 32  # 传感器 CNN 输出特征维度
-
-
-class SensorCNN(nn.Module):
-    """
-    1D CNN 处理传感器扇形探测数据
-
-    利用传感器读数的空间排列结构 (15 条探测线从右到左均匀分布在 150° 扇形内),
-    通过卷积核提取局部空间特征 (如 "左侧有缺口", "正前方通道变窄" 等模式)
-    """
-
-    def __init__(self, sensor_dim=15):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-
-    def forward(self, sensor):
-        # sensor: [B, sensor_dim]
-        x = sensor.unsqueeze(1)        # [B, 1, sensor_dim]
-        x = F.relu(self.conv1(x))      # [B, 16, sensor_dim]
-        x = F.relu(self.conv2(x))      # [B, 32, sensor_dim]
-        x = self.pool(x).squeeze(-1)   # [B, 32]
-        return x
-
 
 # ============================================================================
 # ========================= Neural Networks ==================================
 # ============================================================================
 
+# 状态维度布局: [o_usv(7) | o_detector(15) | o_current(4)] = 26
+SENSOR_START = 7   # o_detector 在 state 中的起始索引
+SENSOR_END = 22    # o_detector 在 state 中的结束索引 (不含)
+SENSOR_DIM = SENSOR_END - SENSOR_START  # 15
+
+
+class SensorCNN(nn.Module):
+    """
+    传感器 CNN: 保留空间分辨率, 提取障碍物空间特征
+
+    与之前的 AdaptiveAvgPool 版本不同, 这里使用 Flatten + FC,
+    保留左/右方向的空间信息, 使 Agent 能区分障碍物方位。
+
+    Input:  (batch, sensor_dim)  e.g. (batch, 15)
+    Output: (batch, output_dim)  e.g. (batch, 64)
+    """
+
+    def __init__(self, sensor_dim=SENSOR_DIM, output_dim=64):
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
+        self.fc = nn.Linear(32 * sensor_dim, output_dim)
+
+    def forward(self, sensor):
+        # sensor: (batch, sensor_dim)
+        x = sensor.unsqueeze(1)              # (batch, 1, sensor_dim)
+        x = F.relu(self.conv1(x))            # (batch, 16, sensor_dim)
+        x = F.relu(self.conv2(x))            # (batch, 32, sensor_dim)
+        x = x.view(x.size(0), -1)           # (batch, 32 * sensor_dim)
+        return F.relu(self.fc(x))            # (batch, output_dim)
+
+
+def _split_state(state):
+    """将 state 拆分为 non_sensor 和 sensor 两部分"""
+    non_sensor = torch.cat([state[:, :SENSOR_START],
+                            state[:, SENSOR_END:]], dim=1)
+    sensor = state[:, SENSOR_START:SENSOR_END]
+    return non_sensor, sensor
+
+
 class GaussianActor(nn.Module):
     """
-    SAC Gaussian Actor (Goal-Conditioned):
-    (State, Goal) → mean, log_std → action via reparameterization trick
+    SAC Gaussian Actor (Goal-Conditioned) — 改进版
 
+    改进:
+    1. SensorCNN 处理传感器数据, 保留空间分辨率
+    2. 早期目标融合: goal 在第一层就参与计算
+    3. 3 层隐藏层 + LayerNorm, 增强表达能力和训练稳定性
+    4. 输入特征 LayerNorm 归一化
+
+    (State, Goal) → mean, log_std → action via reparameterization trick
     使用 tanh 压缩输出到 [-max_action, max_action]
     """
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 sensor_dim=15):
+                 cnn_output_dim=64, hidden_dim=256):
         super().__init__()
-        self.sensor_dim = sensor_dim
-        non_sensor_dim = state_dim - sensor_dim  # o_usv + o_current
-
-        # 传感器 CNN 分支
-        self.sensor_cnn = SensorCNN(sensor_dim)
-
-        # 融合层: non_sensor + CNN_out + goal
-        combined_dim = non_sensor_dim + _SENSOR_CNN_OUT + goal_dim
-        self.fc1 = nn.Linear(combined_dim, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.mean_linear = nn.Linear(256, action_dim)
-        self.log_std_linear = nn.Linear(256, action_dim)
         self.max_action = max_action
+        non_sensor_dim = state_dim - SENSOR_DIM  # 26 - 15 = 11
 
-        # 权重初始化 (仅对 Linear 层, Conv1d 保持默认 kaiming 初始化)
+        # 传感器 CNN
+        self.sensor_cnn = SensorCNN(SENSOR_DIM, cnn_output_dim)
+
+        # 输入维度: non_sensor(11) + cnn_out(64) + goal(2) = 77
+        fused_dim = non_sensor_dim + cnn_output_dim + goal_dim
+
+        # 输入归一化
+        self.input_ln = nn.LayerNorm(fused_dim)
+
+        # 3 层隐藏层 + LayerNorm
+        self.fc1 = nn.Linear(fused_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln3 = nn.LayerNorm(hidden_dim)
+
+        # 输出头
+        self.mean_linear = nn.Linear(hidden_dim, action_dim)
+        self.log_std_linear = nn.Linear(hidden_dim, action_dim)
+
+        # 权重初始化
         self.apply(self._init_weights)
 
     @staticmethod
@@ -90,19 +120,18 @@ class GaussianActor(nn.Module):
             torch.nn.init.xavier_uniform_(m.weight, gain=1)
             torch.nn.init.constant_(m.bias, 0)
 
-    def _split_state(self, state):
-        """将 flat state 拆分为非传感器特征和传感器特征"""
-        usv = state[:, :_USV_DIM]
-        sensor = state[:, _USV_DIM:_USV_DIM + self.sensor_dim]
-        current = state[:, _USV_DIM + self.sensor_dim:]
-        return torch.cat([usv, current], dim=1), sensor
-
     def forward(self, state, goal):
-        non_sensor, sensor = self._split_state(state)
-        sensor_feat = self.sensor_cnn(sensor)
-        x = torch.cat([non_sensor, sensor_feat, goal], dim=1)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        non_sensor, sensor = _split_state(state)
+        cnn_out = self.sensor_cnn(sensor)
+
+        # 早期目标融合: goal 从第一层就参与
+        x = torch.cat([non_sensor, cnn_out, goal], dim=1)
+        x = self.input_ln(x)
+
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = F.relu(self.ln2(self.fc2(x)))
+        x = F.relu(self.ln3(self.fc3(x)))
+
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)
         log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
@@ -140,53 +169,75 @@ class GaussianActor(nn.Module):
 
 class SACCritic(nn.Module):
     """
-    SAC Twin Critic (Goal-Conditioned): (State, Goal, Action) → Q1, Q2
-    使用 1D CNN 提取传感器空间特征
+    SAC Twin Critic (Goal-Conditioned) — 改进版
+
+    改进:
+    1. Q1/Q2 各自拥有独立的 SensorCNN, 确保 Twin Q 真正独立
+    2. 3 层隐藏层 + LayerNorm
+    3. 输入归一化
+
+    (State, Goal, Action) → Q1, Q2
     """
 
-    def __init__(self, state_dim, goal_dim, action_dim, sensor_dim=15):
+    def __init__(self, state_dim, goal_dim, action_dim,
+                 cnn_output_dim=64, hidden_dim=256):
         super().__init__()
-        self.sensor_dim = sensor_dim
-        non_sensor_dim = state_dim - sensor_dim
+        non_sensor_dim = state_dim - SENSOR_DIM  # 11
 
-        # 传感器 CNN (Q1/Q2 共享特征提取)
-        self.sensor_cnn = SensorCNN(sensor_dim)
+        # 独立 SensorCNN
+        self.sensor_cnn1 = SensorCNN(SENSOR_DIM, cnn_output_dim)
+        self.sensor_cnn2 = SensorCNN(SENSOR_DIM, cnn_output_dim)
 
-        total_dim = non_sensor_dim + _SENSOR_CNN_OUT + goal_dim + action_dim
-        # Q1
-        self.l1 = nn.Linear(total_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, 1)
-        # Q2
-        self.l4 = nn.Linear(total_dim, 256)
-        self.l5 = nn.Linear(256, 256)
-        self.l6 = nn.Linear(256, 1)
+        # 输入维度: non_sensor(11) + cnn_out(64) + goal(2) + action(2) = 79
+        fused_dim = non_sensor_dim + cnn_output_dim + goal_dim + action_dim
 
-    def _encode_state(self, state):
-        """提取传感器 CNN 特征并与其他状态拼接"""
-        usv = state[:, :_USV_DIM]
-        sensor = state[:, _USV_DIM:_USV_DIM + self.sensor_dim]
-        current = state[:, _USV_DIM + self.sensor_dim:]
-        sensor_feat = self.sensor_cnn(sensor)
-        return torch.cat([usv, sensor_feat, current], dim=1)
+        # Q1 网络
+        self.ln1_input = nn.LayerNorm(fused_dim)
+        self.l1 = nn.Linear(fused_dim, hidden_dim)
+        self.ln1_1 = nn.LayerNorm(hidden_dim)
+        self.l2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln1_2 = nn.LayerNorm(hidden_dim)
+        self.l3 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln1_3 = nn.LayerNorm(hidden_dim)
+        self.l3_out = nn.Linear(hidden_dim, 1)
+
+        # Q2 网络
+        self.ln2_input = nn.LayerNorm(fused_dim)
+        self.l4 = nn.Linear(fused_dim, hidden_dim)
+        self.ln2_1 = nn.LayerNorm(hidden_dim)
+        self.l5 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2_2 = nn.LayerNorm(hidden_dim)
+        self.l6 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2_3 = nn.LayerNorm(hidden_dim)
+        self.l6_out = nn.Linear(hidden_dim, 1)
+
+    def _q1_forward(self, non_sensor, sensor, goal, action):
+        cnn_out = self.sensor_cnn1(sensor)
+        x = torch.cat([non_sensor, cnn_out, goal, action], dim=1)
+        x = self.ln1_input(x)
+        x = F.relu(self.ln1_1(self.l1(x)))
+        x = F.relu(self.ln1_2(self.l2(x)))
+        x = F.relu(self.ln1_3(self.l3(x)))
+        return self.l3_out(x)
+
+    def _q2_forward(self, non_sensor, sensor, goal, action):
+        cnn_out = self.sensor_cnn2(sensor)
+        x = torch.cat([non_sensor, cnn_out, goal, action], dim=1)
+        x = self.ln2_input(x)
+        x = F.relu(self.ln2_1(self.l4(x)))
+        x = F.relu(self.ln2_2(self.l5(x)))
+        x = F.relu(self.ln2_3(self.l6(x)))
+        return self.l6_out(x)
 
     def forward(self, state, goal, action):
-        encoded = self._encode_state(state)
-        sa = torch.cat([encoded, goal, action], 1)
-        q1 = F.relu(self.l1(sa))
-        q1 = F.relu(self.l2(q1))
-        q1 = self.l3(q1)
-        q2 = F.relu(self.l4(sa))
-        q2 = F.relu(self.l5(q2))
-        q2 = self.l6(q2)
+        non_sensor, sensor = _split_state(state)
+        q1 = self._q1_forward(non_sensor, sensor, goal, action)
+        q2 = self._q2_forward(non_sensor, sensor, goal, action)
         return q1, q2
 
     def Q1(self, state, goal, action):
-        encoded = self._encode_state(state)
-        sa = torch.cat([encoded, goal, action], 1)
-        q1 = F.relu(self.l1(sa))
-        q1 = F.relu(self.l2(q1))
-        return self.l3(q1)
+        non_sensor, sensor = _split_state(state)
+        return self._q1_forward(non_sensor, sensor, goal, action)
 
 
 # ============================================================================
@@ -210,15 +261,14 @@ class SACActuatorAgent:
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
                  lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
                  alpha=0.2, automatic_entropy_tuning=True,
-                 target_update_interval=1, sensor_dim=15,
-                 lr_alpha=None):
-        # Actor (Gaussian Policy + Sensor CNN)
-        self.actor = GaussianActor(state_dim, goal_dim, action_dim, max_action, sensor_dim).to(device)
+                 target_update_interval=1, lr_alpha=None):
+        # Actor (Gaussian Policy)
+        self.actor = GaussianActor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
 
-        # Critic (Twin Q-Networks + Sensor CNN)
-        self.critic = SACCritic(state_dim, goal_dim, action_dim, sensor_dim).to(device)
-        self.critic_target = SACCritic(state_dim, goal_dim, action_dim, sensor_dim).to(device)
+        # Critic (Twin Q-Networks)
+        self.critic = SACCritic(state_dim, goal_dim, action_dim).to(device)
+        self.critic_target = SACCritic(state_dim, goal_dim, action_dim).to(device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
 
@@ -230,15 +280,15 @@ class SACActuatorAgent:
 
         # 熵正则化
         self.automatic_entropy_tuning = automatic_entropy_tuning
+        if lr_alpha is None:
+            lr_alpha = lr_actor
         if automatic_entropy_tuning:
-            # 目标熵 = -0.5 * dim(action), 社区常用启发式
+            # 目标熵 = -0.5 * dim(action)
             self.target_entropy = -0.5 * float(action_dim)
-            import numpy as _np
-            self.log_alpha = torch.tensor([_np.log(alpha)], requires_grad=True, device=device)
-            _lr_alpha = lr_alpha if lr_alpha is not None else 1e-4
-            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=_lr_alpha)
+            self.log_alpha = torch.tensor([np.log(alpha)], requires_grad=True, device=device)
+            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr_alpha)
+            self.log_alpha_min = np.log(0.01)  # alpha 下限 clamp
             self.alpha = self.log_alpha.exp().item()
-            self.log_alpha_min = _np.log(0.01)   # alpha 下限 0.01, 防止坍塌
         else:
             self.alpha = alpha
 
@@ -262,22 +312,27 @@ class SACActuatorAgent:
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
         """
-        SAC 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss)
+        SAC 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss) + PER
 
-        联合 Actor 损失:
-          L_actor = E[α * log π(a|s,g) - Q(s,g,a)] + bc_weight * E_{expert}[||μ(s,g) - a_expert||²]
-
-        BC loss 使用 actor 的 mean 输出 (确定性部分) 与 Expert 动作的 MSE,
-        仅在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时施加 (Q-filtered BC)。
+        支持优先经验回放: 采样权重修正 critic loss, 返回 TD error 用于更新优先级。
 
         Returns:
-            critic_loss, actor_loss (RL部分), bc_loss
+            critic_loss, actor_loss (RL部分), bc_loss, td_errors (tensor), indices
         """
         if len(replay_buffer) < batch_size:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, 0.0, None, None
 
-        state, action, reward, next_state, done, goal, is_expert = \
-            replay_buffer.sample(batch_size)
+        sample_result = replay_buffer.sample(batch_size)
+
+        # 兼容 PER buffer (返回 9 元素) 和普通 buffer (返回 7 元素)
+        if len(sample_result) == 9:
+            state, action, reward, next_state, done, goal, is_expert, \
+                indices, is_weights = sample_result
+        else:
+            state, action, reward, next_state, done, goal, is_expert = sample_result
+            indices = None
+            is_weights = torch.ones(batch_size, 1, device=state.device)
+
         self.total_it += 1
 
         # ---- Critic Update ----
@@ -288,7 +343,15 @@ class SACActuatorAgent:
             target_Q = reward + (1 - done) * self.gamma * target_Q
 
         current_Q1, current_Q2 = self.critic(state, goal, action)
-        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
+
+        # 逐样本 TD error (用于 PER 优先级更新)
+        td_error1 = (current_Q1 - target_Q).abs()
+        td_error2 = (current_Q2 - target_Q).abs()
+        td_errors = torch.max(td_error1, td_error2).detach()
+
+        # IS 权重加权的 critic loss
+        critic_loss = (is_weights * (current_Q1 - target_Q).pow(2)).mean() + \
+                      (is_weights * (current_Q2 - target_Q).pow(2)).mean()
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
@@ -337,9 +400,9 @@ class SACActuatorAgent:
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
-            # 防止 alpha 坍塌到 0: 限制 log_alpha 下界
+            # clamp log_alpha 防止 alpha 过小
             with torch.no_grad():
-                self.log_alpha.data.clamp_(min=self.log_alpha_min)
+                self.log_alpha.clamp_(min=self.log_alpha_min)
             self.alpha = self.log_alpha.exp().item()
 
         # ---- Soft update target critic ----
@@ -347,4 +410,8 @@ class SACActuatorAgent:
             for p, tp in zip(self.critic.parameters(), self.critic_target.parameters()):
                 tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
 
-        return critic_loss.item(), rl_loss.item(), bc_loss.item()
+        # 更新 PER 优先级
+        if indices is not None:
+            replay_buffer.update_priorities(indices, td_errors)
+
+        return critic_loss.item(), rl_loss.item(), bc_loss.item(), td_errors, indices

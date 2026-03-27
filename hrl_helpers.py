@@ -46,19 +46,12 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done,
 
     # 障碍物接近惩罚 (指数形式, 近距离时急剧增长)
     # min_sensor ∈ [0, 1], 阈值 0.4 ≈ 6m; 越近惩罚越大
-    obs_threshold = 0.4
+    obs_threshold = 0.3
     if min_sensor < obs_threshold:
-        proximity_penalty = -2.0 * np.exp(3.0 * (obs_threshold - min_sensor)) + 2.0
+        proximity_penalty = -0.5 * np.exp(3.0 * (0.3 - min_sensor)) + 0.5
     else:
         proximity_penalty = 0.0
 
-    # 安全奖励: 远离障碍物时给予正向鼓励, 使存活本身有价值
-    if min_sensor > 0.6:
-        safety_bonus = 0.02
-    elif min_sensor > obs_threshold:
-        safety_bonus = 0.01
-    else:
-        safety_bonus = 0.0
 
     # 边界惩罚: 距边界 5% 内开始渐进惩罚, 超出边界时更强
     boundary_penalty = 0.0
@@ -77,6 +70,6 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done,
     if crush:
         return -100.0
     elif sub_done:
-        return approach + 10.0 + boundary_penalty
+        return approach + 50.0 + boundary_penalty
     else:
-        return approach + proximity_penalty + safety_bonus + boundary_penalty - 0.02
+        return approach + proximity_penalty + boundary_penalty - 0.05

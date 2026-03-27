@@ -41,35 +41,23 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done,
         sub_done: 是否到达目标区域
         usv_pos_norm: USV 归一化位置 [x, y], 范围 [0, 1], 用于边界惩罚
     """
-    # 接近奖励 (缩小系数, 避免远距离高速冲刺获得过高奖励)
-    approach = (prev_dist - next_dist) * 5.0
+    # 接近奖励
+    approach = (prev_dist - next_dist) * 10.0
+    # 障碍物接近惩罚
+    proximity_penalty = -max(0.0, 0.3 - min_sensor) * 5.0
 
-    # 障碍物接近惩罚 (指数形式, 近距离时急剧增长)
-    # min_sensor ∈ [0, 1], 阈值 0.4 ≈ 6m; 越近惩罚越大
-    obs_threshold = 0.3
-    if min_sensor < obs_threshold:
-        proximity_penalty = -0.5 * np.exp(3.0 * (0.3 - min_sensor)) + 0.5
-    else:
-        proximity_penalty = 0.0
-
-
-    # 边界惩罚: 距边界 5% 内开始渐进惩罚, 超出边界时更强
+    # 边界惩罚: 当 USV 超出任务区域边界时施加惩罚
     boundary_penalty = 0.0
-    boundary_margin = 0.05
     if usv_pos_norm is not None:
         for coord in usv_pos_norm:
             if coord < 0.0:
-                boundary_penalty -= (abs(coord) + boundary_margin) * 20.0
-            elif coord < boundary_margin:
-                boundary_penalty -= (boundary_margin - coord) * 10.0
+                boundary_penalty -= abs(coord) * 10.0
             elif coord > 1.0:
-                boundary_penalty -= (coord - 1.0 + boundary_margin) * 20.0
-            elif coord > 1.0 - boundary_margin:
-                boundary_penalty -= (coord - (1.0 - boundary_margin)) * 10.0
+                boundary_penalty -= (coord - 1.0) * 10.0
 
     if crush:
-        return -100.0
+        return -10.0
     elif sub_done:
-        return approach + 50.0 + boundary_penalty
+        return approach + 5.0 + boundary_penalty
     else:
-        return approach + proximity_penalty + boundary_penalty - 0.05
+        return approach + proximity_penalty + boundary_penalty - 0.01

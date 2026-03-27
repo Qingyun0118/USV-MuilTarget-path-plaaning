@@ -643,6 +643,217 @@ def animate_result(result: dict, save_path: str = "multi_usv_animation.gif",
     return anim
 
 
+def run_som_multi_usv_reactive(
+    num_usvs: int = 3,
+    num_targets: int = 6,
+    num_obstacles: int = 5,
+    seed: int = 42,
+    max_steps: int = 3000,
+    per_usv_max_steps: int = 2000,
+    som_iterations: int = 200,
+    som_balance: bool = True,
+    max_imbalance: int = 2,
+    target_radius: float = 3.0,
+    verbose: bool = True,
+    fixed_start_positions=None,
+    fixed_targets=None,
+    fixed_obstacles=None,
+    **reactive_kwargs,
+):
+    """
+    使用 SOM 调度 + ReactiveController 执行多 USV 协同任务。
+
+    与 run_som_multi_usv 接口相同，但不需要训练模型，
+    使用比例导航 + 反应式避障控制器。
+
+    Args:
+        reactive_kwargs: 传递给 ReactiveController 的额外参数
+    Returns:
+        result: dict，与 run_som_multi_usv 返回格式一致
+    """
+    from reactive_controller import ReactiveController
+
+    # ---- 1. 初始化环境 ----
+    env = MultiUsvEnv(
+        num_usvs=num_usvs,
+        num_targets=num_targets,
+        num_obstacles=num_obstacles,
+        seed=seed,
+        per_usv_max_steps=per_usv_max_steps,
+        current_type="generated",
+        target_radius=target_radius,
+        fixed_start_positions=fixed_start_positions,
+        fixed_targets=fixed_targets,
+        fixed_obstacles=fixed_obstacles,
+    )
+    obs = env.reset(seed=seed)
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Multi-USV SOM Navigation (Reactive Controller)")
+        print(f"  USVs: {num_usvs}, Targets: {num_targets}, Obstacles: {num_obstacles}")
+        print(f"  Seed: {seed}, Max steps: {max_steps}")
+        print(f"{'='*60}")
+
+    # ---- 2. 创建 ReactiveController ----
+    controller = ReactiveController(**reactive_kwargs)
+    if verbose:
+        print(f"\n  ReactiveController created (kp_heading={controller.kp_heading}, "
+              f"max_throttle={controller.max_throttle})")
+
+    # ---- 3. SOM 目标分配 ----
+    usv_positions = np.array(env.start_positions, dtype=np.float64)
+    target_positions = np.array([[t.x, t.y] for t in env.targets], dtype=np.float64)
+
+    scheduler = SOMScheduler(num_iterations=som_iterations, seed=seed)
+    if som_balance:
+        sequences = scheduler.schedule_with_balance(
+            usv_positions, target_positions, max_imbalance=max_imbalance)
+    else:
+        sequences = scheduler.schedule(usv_positions, target_positions)
+
+    if verbose:
+        print(f"\nSOM Target Assignment:")
+        for i, seq in enumerate(sequences):
+            seq_coords = [(f"T{j}({target_positions[j][0]:.1f},{target_positions[j][1]:.1f})")
+                          for j in seq]
+            print(f"  USV {i}: {' → '.join(seq_coords) if seq_coords else '(no targets)'}")
+
+    # ---- 4. 初始化追踪状态 ----
+    seq_cursors = [0] * num_usvs
+    usv_active = [len(sequences[i]) > 0 for i in range(num_usvs)]
+    paths = [[] for _ in range(num_usvs)]
+    headings = [[] for _ in range(num_usvs)]
+    sensor_data = [[] for _ in range(num_usvs)]
+    usv_reached = [[] for _ in range(num_usvs)]
+
+    # ---- 5. 主循环 ----
+    step_count = 0
+    termination_reason = "running"
+
+    for step in range(max_steps):
+        step_count = step + 1
+
+        actions = np.zeros((num_usvs, 2), dtype=np.float32)
+        goal_positions = []
+        active_mask = np.array(usv_active, dtype=bool)
+
+        for i in range(num_usvs):
+            usv = env.usvs[i]
+
+            if usv_active[i]:
+                target_idx = sequences[i][seq_cursors[i]]
+                target_global = target_positions[target_idx]
+
+                action = controller.compute_action(
+                    usv_x=usv.x,
+                    usv_y=usv.y,
+                    usv_heading=usv.heading,
+                    goal_x=target_global[0],
+                    goal_y=target_global[1],
+                    sensor_readings=usv.sensor_readings,
+                    usv_u=usv.u,
+                )
+                actions[i] = action
+                goal_positions.append(target_global.astype(np.float32))
+            else:
+                actions[i] = np.array([0.0, 0.0], dtype=np.float32)
+                goal_positions.append(
+                    np.array([usv.x, usv.y], dtype=np.float32))
+
+        obs, done, crush, truncated, info = env.step(
+            actions, goal_positions, usv_active_mask=active_mask)
+
+        for i in range(num_usvs):
+            paths[i].append(info['usv_positions'][i].copy())
+            headings[i].append(env.usvs[i].heading)
+            sensor_data[i].append(env.usvs[i].sensor_readings.copy())
+
+        for i in range(num_usvs):
+            if not usv_active[i]:
+                continue
+            target_idx = sequences[i][seq_cursors[i]]
+            target_pos = target_positions[target_idx]
+            usv_pos = info['usv_positions'][i]
+            dist = np.linalg.norm(usv_pos - target_pos)
+
+            if dist < target_radius:
+                usv_reached[i].append(target_idx)
+                seq_cursors[i] += 1
+                if verbose:
+                    print(f"  Step {step_count}: USV {i} reached target T{target_idx} "
+                          f"({seq_cursors[i]}/{len(sequences[i])})")
+
+                if seq_cursors[i] >= len(sequences[i]):
+                    usv_active[i] = False
+                    if verbose:
+                        print(f"  ★ USV {i} completed all assigned targets!")
+
+        if crush:
+            termination_reason = info.get('termination_reason', 'collision')
+            if verbose:
+                print(f"\n  ✖ Collision detected at step {step_count}!")
+                if info.get('usv_collision_pairs'):
+                    print(f"    USV-USV collisions: {info['usv_collision_pairs']}")
+                if any(info.get('obstacle_collisions', [])):
+                    collided = [i for i, c in enumerate(info['obstacle_collisions']) if c]
+                    print(f"    USV-Obstacle collisions: USV {collided}")
+            break
+
+        if not any(usv_active):
+            termination_reason = "all_completed"
+            if verbose:
+                print(f"\n  ★ All USVs completed their target sequences at step {step_count}!")
+            break
+
+        if done or truncated:
+            termination_reason = info.get('termination_reason', 'timeout')
+            if verbose:
+                print(f"\n  Environment terminated: {termination_reason} at step {step_count}")
+            break
+
+    else:
+        termination_reason = "max_steps_exceeded"
+        if verbose:
+            print(f"\n  Max steps ({max_steps}) exceeded")
+
+    # ---- 6. 结果汇总 ----
+    total_assigned = sum(len(s) for s in sequences)
+    total_reached = sum(len(r) for r in usv_reached)
+    success = termination_reason == "all_completed"
+
+    result = {
+        "success": success,
+        "termination_reason": termination_reason,
+        "total_steps": step_count,
+        "sequences": sequences,
+        "usv_reached": usv_reached,
+        "total_assigned": total_assigned,
+        "total_reached": total_reached,
+        "completion_rate": total_reached / max(total_assigned, 1),
+        "paths": paths,
+        "headings": headings,
+        "sensor_data": sensor_data,
+        "env": env,
+        "target_positions": target_positions,
+        "usv_start_positions": usv_positions,
+    }
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Result Summary (Reactive Controller):")
+        print(f"  Success: {success}")
+        print(f"  Termination: {termination_reason}")
+        print(f"  Steps: {step_count}")
+        print(f"  Targets: {total_reached}/{total_assigned} "
+              f"({result['completion_rate']*100:.1f}%)")
+        for i in range(num_usvs):
+            print(f"  USV {i}: reached {len(usv_reached[i])}/{len(sequences[i])} targets")
+        print(f"{'='*60}")
+
+    return result
+
+
 if __name__ == "__main__":
     result = run_som_multi_usv(
         num_usvs=3,

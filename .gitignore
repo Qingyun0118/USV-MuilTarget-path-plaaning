@@ -25,3 +25,5 @@ Paper/Han 等 - 2017 - Nonlinear Modeling for a Water-Jet Propulsion USV An Expe
 Paper/Ma 等 - 2018 - Multi-objective path planning for unmanned surface vehicle with currents effects.pdf
 Paper/NeurIPS-2019-exploration-via-hindsight-goal-generation-Paper.pdf
 Paper/Yan 等 - 2024 - Hierarchical reinforcement learning for handling sparse rewards in multi-goal navigation.pdf
+*.gif
+expert_hrl_sac_output/debugLog/

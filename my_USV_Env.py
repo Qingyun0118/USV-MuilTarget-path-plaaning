@@ -1646,6 +1646,13 @@ class MultiUsvEnv(MyUsvEnv):
 
         for i, usv in enumerate(self.usvs):
             if not active_mask[i]:
+                # 非活跃USV：不执行动力学推进，但仍受海流漂移影响
+                flow_u, flow_v = self.get_flow_velocity(usv.x, usv.y, self.current_time)
+                usv.x += flow_u * self.dt
+                usv.y += flow_v * self.dt
+                usv.x = np.clip(usv.x, X_MIN, X_MAX)
+                usv.y = np.clip(usv.y, Y_MIN, Y_MAX)
+                usv._update_polygon()
                 self.current_positions[i] = np.array([usv.x, usv.y], dtype=np.float32)
                 continue
 

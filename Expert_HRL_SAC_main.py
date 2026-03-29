@@ -719,7 +719,7 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
     # 汇总
     total_eval_time = time.time() - total_eval_start
     print(f"\n{'=' * 60}")
-    print(f"  Evaluation Summary [{eval_mode.upper()} mode] (SAC Actuator)")
+    print(f"  Evaluation Summary [{eval_mode.upper()} mode]")
     print(f"{'=' * 60}")
     print(f"  Environment:  {num_targets} targets, {args.eval_obstacles} obstacles")
     print(f"  Episodes:     {len(eval_results)}")

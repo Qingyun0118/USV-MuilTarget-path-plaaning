@@ -242,6 +242,8 @@ def train_expert_hrl(args):
         targets_reached_count = 0
         expert_steps = 0
         rl_steps = 0
+        critic_updates_this_episode = 0
+        actor_updates_this_episode = 0
 
         ep_done = False  # 所有活跃目标完成
         crush = False  # 碰撞
@@ -352,8 +354,13 @@ def train_expert_hrl(args):
                 bc_w = args.bc_weight * expert_prob
                 if len(actuator_buffer) >= args.warmup_steps:
                     for _ in range(args.actuator_train_iters):
+                        prev_total_it = actuator.total_it
                         actuator.train(actuator_buffer, args.actuator_batch_size,
                                        bc_weight=bc_w)
+                        if actuator.total_it > prev_total_it:
+                            critic_updates_this_episode += 1
+                            if actuator.total_it % actuator.policy_freq == 0:
+                                actor_updates_this_episode += 1
 
                 # ---- 检查目标到达 ----
                 reached_indices = info.get('reached_targets', [])
@@ -417,8 +424,10 @@ def train_expert_hrl(args):
         selector.update_target()
 
         # ---- 学习率调度 (Cosine Annealing) ----
-        actor_scheduler.step()
-        critic_scheduler.step()
+        if actor_updates_this_episode > 0:
+            actor_scheduler.step()
+        if critic_updates_this_episode > 0:
+            critic_scheduler.step()
 
         # ---- 记录成功率 ----
         all_active_reached = (targets_reached_count >= active_targets)

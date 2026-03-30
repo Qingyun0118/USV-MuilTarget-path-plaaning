@@ -28,3 +28,5 @@ Paper/NeurIPS-2019-exploration-via-hindsight-goal-generation-Paper.pdf
 Paper/Yan 等 - 2024 - Hierarchical reinforcement learning for handling sparse rewards in multi-goal navigation.pdf
 debugLog/
 *.gif
+*.json
+expert_hrl_sac_output/

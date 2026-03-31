@@ -112,14 +112,6 @@ def train_expert_hrl(args):
         noise_clip=args.noise_clip, policy_freq=args.policy_freq
     )
 
-    # ---- 学习率调度器 (Cosine Annealing) ----
-    actor_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        actuator.actor_optimizer, T_max=args.max_episodes,
-        eta_min=args.lr_actor * args.lr_min_ratio)
-    critic_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        actuator.critic_optimizer, T_max=args.max_episodes,
-        eta_min=args.lr_critic * args.lr_min_ratio)
-
     # ---- 3. Replay Buffers ----
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
     actuator_buffer = GoalConditionedReplayBuffer(args.actuator_buffer_size)
@@ -193,12 +185,6 @@ def train_expert_hrl(args):
             expert_scheduler.success_history = deque(
                 saved_success_history, maxlen=args.success_window)
 
-            # 恢复学习率调度器
-            if 'actor_scheduler' in ckpt:
-                actor_scheduler.load_state_dict(ckpt['actor_scheduler'])
-            if 'critic_scheduler' in ckpt:
-                critic_scheduler.load_state_dict(ckpt['critic_scheduler'])
-
             print(f"[Resume] 从 Episode {start_episode} 继续训练")
             print(f"[Resume] global_step={global_step}, "
                   f"best_reward={best_reward:.2f}, "
@@ -242,8 +228,6 @@ def train_expert_hrl(args):
         targets_reached_count = 0
         expert_steps = 0
         rl_steps = 0
-        critic_updates_this_episode = 0
-        actor_updates_this_episode = 0
 
         ep_done = False  # 所有活跃目标完成
         crush = False  # 碰撞
@@ -354,13 +338,8 @@ def train_expert_hrl(args):
                 bc_w = args.bc_weight * expert_prob
                 if len(actuator_buffer) >= args.warmup_steps:
                     for _ in range(args.actuator_train_iters):
-                        prev_total_it = actuator.total_it
                         actuator.train(actuator_buffer, args.actuator_batch_size,
                                        bc_weight=bc_w)
-                        if actuator.total_it > prev_total_it:
-                            critic_updates_this_episode += 1
-                            if actuator.total_it % actuator.policy_freq == 0:
-                                actor_updates_this_episode += 1
 
                 # ---- 检查目标到达 ----
                 reached_indices = info.get('reached_targets', [])
@@ -423,12 +402,6 @@ def train_expert_hrl(args):
                                selector.epsilon * args.epsilon_decay)
         selector.update_target()
 
-        # ---- 学习率调度 (Cosine Annealing) ----
-        if actor_updates_this_episode > 0:
-            actor_scheduler.step()
-        if critic_updates_this_episode > 0:
-            critic_scheduler.step()
-
         # ---- 记录成功率 ----
         all_active_reached = (targets_reached_count >= active_targets)
         ep_success = all_active_reached and not crush
@@ -467,8 +440,6 @@ def train_expert_hrl(args):
         writer.add_scalar('Training/BC_Weight', args.bc_weight * expert_prob, episode)
         writer.add_scalar('Buffer/Actuator', len(actuator_buffer), episode)
         writer.add_scalar('Buffer/Selector', len(selector_buffer), episode)
-        writer.add_scalar('Training/LR_Actor', actor_scheduler.get_last_lr()[0], episode)
-        writer.add_scalar('Training/LR_Critic', critic_scheduler.get_last_lr()[0], episode)
 
         # ---- 定期保存检查点 (完整训练快照, 支持断点续训) ----
         if (episode + 1) % args.checkpoint_interval == 0:
@@ -496,9 +467,6 @@ def train_expert_hrl(args):
                 'training_history': training_history,
                 # Expert 调度器成功历史
                 'expert_success_history': list(expert_scheduler.success_history),
-                # 学习率调度器
-                'actor_scheduler': actor_scheduler.state_dict(),
-                'critic_scheduler': critic_scheduler.state_dict(),
             }
             torch.save(checkpoint, os.path.join(ckpt_dir, "checkpoint.pth"))
             # 同时保存独立权重文件 (兼容评估加载)
@@ -956,8 +924,6 @@ if __name__ == "__main__":
     parser.add_argument("--lr_actor", default=3e-4, type=float)
     parser.add_argument("--lr_critic", default=3e-4, type=float)
     parser.add_argument("--lr_selector", default=1e-4, type=float)
-    parser.add_argument("--lr_min_ratio", default=0.1, type=float,
-                        help="学习率余弦退火最低比例 (eta_min = lr * lr_min_ratio)")
 
     # --- TD3 参数 ---
     parser.add_argument("--gamma", default=0.99, type=float,
@@ -988,7 +954,7 @@ if __name__ == "__main__":
                         help="RL 策略探索噪声初始标准差")
     parser.add_argument("--noise_decay_episodes", default=800, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
-    parser.add_argument("--noise_min_ratio", default=0.05, type=float,
+    parser.add_argument("--noise_min_ratio", default=0.15, type=float,
                         help="探索噪声最低比例 (最终噪声 = exploration_noise * noise_min_ratio)")
 
     # --- Expert 概率衰减参数 (Dawood et al. 指数衰减) ---

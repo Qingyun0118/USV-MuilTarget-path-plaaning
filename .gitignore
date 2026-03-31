@@ -30,3 +30,4 @@ debugLog/
 *.gif
 *.json
 expert_hrl_sac_output/
+expert_hrl_td3_output/

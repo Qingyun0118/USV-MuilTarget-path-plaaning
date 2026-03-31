@@ -320,6 +320,10 @@ class TD7ActuatorAgent:
         # LAP
         self.lap_min_priority = lap_min_priority
 
+        # Checkpoint readiness: 初始 checkpoint 与 actor 相同 (随机权重),
+        # 在被有意义地更新前不应使用
+        self.checkpoint_ready = False
+
         self.total_it = 0
 
     def select_action(self, state, goal, noise=0.0, use_checkpoint=False):
@@ -347,6 +351,7 @@ class TD7ActuatorAgent:
     def update_checkpoint(self):
         """将当前 actor 复制到 checkpoint (当发现更好的策略时调用)"""
         self.actor_checkpoint.load_state_dict(self.actor.state_dict())
+        self.checkpoint_ready = True
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
         """

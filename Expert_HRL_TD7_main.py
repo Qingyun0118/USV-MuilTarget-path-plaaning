@@ -177,6 +177,8 @@ def train_expert_hrl(args):
             if 'actuator_actor_checkpoint' in ckpt:
                 actuator.actor_checkpoint.load_state_dict(
                     ckpt['actuator_actor_checkpoint'])
+                actuator.checkpoint_ready = ckpt.get(
+                    'checkpoint_ready', True)
 
             # 恢复优化器状态
             selector.optimizer.load_state_dict(ckpt['selector_optimizer'])
@@ -211,7 +213,8 @@ def train_expert_hrl(args):
     print(f"  SALE embed_dim={args.embed_dim}, "
           f"encoder_reset={args.encoder_reset_interval}")
     print(f"  LAP min_priority={args.lap_min_priority}")
-    print(f"  Checkpoint Policy: 50/50 current/checkpoint")
+    print(f"  Checkpoint Policy: 50/50 current/checkpoint "
+          f"(eval_interval={args.checkpoint_eval_interval} eps)")
     print(f"  Expert Decay: Dawood Exponential "
           f"(p0={args.expert_p0}, p_min={args.expert_p_min})")
     print(f"  Max Episodes: {args.max_episodes}")
@@ -309,7 +312,9 @@ def train_expert_hrl(args):
                     expert_steps += 1
                 else:
                     # TD7 Checkpoint Policy: 50% 使用当前策略, 50% 使用 checkpoint
-                    use_ckpt = (random.random() < 0.5)
+                    # 关键: checkpoint 未被有意义地更新前不使用 (随机权重会导致碰撞)
+                    use_ckpt = (actuator.checkpoint_ready
+                                and random.random() < 0.5)
                     action = actuator.select_action(
                         actuator_state, relative_goal,
                         noise=exploration_noise,
@@ -493,6 +498,8 @@ def train_expert_hrl(args):
                 'training_history': training_history,
                 # Expert 调度器成功历史
                 'expert_success_history': list(expert_scheduler.success_history),
+                # TD7 checkpoint 状态
+                'checkpoint_ready': actuator.checkpoint_ready,
             }
             torch.save(checkpoint, os.path.join(ckpt_dir, "checkpoint.pth"))
             # 同时保存独立权重文件 (兼容评估加载)
@@ -505,6 +512,16 @@ def train_expert_hrl(args):
             torch.save(actuator.actor_checkpoint.state_dict(),
                        os.path.join(ckpt_dir, "actuator_actor_checkpoint.pth"))
             print(f"  [Checkpoint] Saved at episode {episode + 1} (完整快照)")
+
+        # ---- TD7: 周期性 checkpoint 更新 ----
+        # 每 checkpoint_eval_interval 个 episode 检查近期成功率,
+        # 如果当前策略表现优于 checkpoint 则更新
+        if (episode + 1) % args.checkpoint_eval_interval == 0:
+            if success_rate > 0 or not actuator.checkpoint_ready:
+                actuator.update_checkpoint()
+                if episode % args.log_interval == 0:
+                    print(f"  [TD7] Checkpoint updated at EP {episode} "
+                          f"(SR={success_rate:.2f})")
 
         # ---- 保存最佳模型 ----
         total_reward = episode_actuator_reward + episode_selector_reward
@@ -926,6 +943,8 @@ if __name__ == "__main__":
                         help="SALE 编码器周期性硬重置间隔 (training steps)")
     parser.add_argument("--lap_min_priority", default=1.0, type=float,
                         help="LAP 最小优先级 (priority = max(loss, min_priority))")
+    parser.add_argument("--checkpoint_eval_interval", default=50, type=int,
+                        help="Checkpoint 策略周期性评估/更新间隔 (episodes)")
 
     # --- Selector 参数 ---
     parser.add_argument("--selector_batch_size", default=64, type=int)
@@ -945,8 +964,8 @@ if __name__ == "__main__":
                         help="探索噪声最低比例")
 
     # --- Expert 概率衰减参数 ---
-    parser.add_argument("--expert_p0", default=0.5, type=float,
-                        help="Expert 初始使用概率")
+    parser.add_argument("--expert_p0", default=0.7, type=float,
+                        help="Expert 初始使用概率 (TD7 建议略高于 TD3, 因 checkpoint 会分流 RL 步数)")
     parser.add_argument("--expert_p_min", default=0.05, type=float,
                         help="Expert 最低使用概率")
     parser.add_argument("--success_window", default=100, type=int,

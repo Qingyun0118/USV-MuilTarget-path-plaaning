@@ -1,28 +1,43 @@
 """
 TD7 (TD3 + SALE + LAP + Checkpoint Policy) Actuator Agent — Goal-Conditioned
 
-TD3 基础上增加三项改进 (Fujimoto et al., 2023):
-1. SALE (State-Action Learned Embeddings): Q(s,a) = f(s)^T · g(s,a) / sqrt(d)
-   - 共享状态编码器 f (在 Q1/Q2 之间共享)
-   - 独立状态-动作编码器 g1/g2
-   - 内积 Q 分解限制 Q 值过估计 (高维空间中两个独立的嵌入向量难以同时过高)
-   - EMA 目标编码器 + 周期性硬重置
+严格对齐 Fujimoto et al., "TD7: Revisiting Fundamentals of Off-Policy RL",
+ICML 2023 的开源实现 (github.com/sfujim/TD7)。
 
-2. LAP (Loss-Adjusted Priorities): 基于 critic loss 的优先级采样
-   - 优先级 = max(per_sample_critic_loss, 1.0)
-   - 不使用 IS 权重修正 (优先级已学习化)
+TD3 基础上增加三项改进:
 
-3. Checkpoint Policy: 数据收集时 50/50 使用当前/历史最优策略
-   - 防止策略坍塌 (TD3 已知问题: SR 峰值后崩溃到 0)
-   - 保证 buffer 中始终有来自最优策略的高质量数据
+1. SALE (State-Action Learned Embeddings):
+   - 独立 Encoder 模块, 自监督训练: 预测下一状态嵌入 MSE(g(f(s,g),a), f(s',g))
+   - Encoder 输出 zs (状态嵌入, AvgL1Norm) 和 zsa (状态-动作嵌入)
+   - fixed_encoder: 冻结快照, 供 Actor/Critic 使用 (稳定特征)
+   - 周期性硬重置: fixed_encoder ← encoder (每 target_update_rate 步)
 
-网络结构与 SAC/TD3 版对齐:
-- SensorCNN: Flatten+FC 保留空间分辨率
-- 3 层隐藏层 + LayerNorm + 输入归一化 (Actor)
-- 2 层隐藏层 + LayerNorm (SALE Encoder)
-- 早期目标融合
+2. LAP (Loss-Adjusted Priorities):
+   - LAP Huber 损失函数 (小 TD error 用 MSE, 大 TD error 用线性)
+   - 优先级 = max(td_loss, min_priority)^alpha
+   - 不使用 IS 权重修正
+
+3. Checkpoint Policy:
+   - 数据收集时 50/50 使用当前/历史最优策略
+   - checkpoint 同时保存 actor + encoder
+   - 防止策略坍塌, 保证 buffer 中高质量数据
+
+与开源 TD7 的区别 (领域适配):
+- SensorCNN: Conv1d 处理障碍物传感器数据 (保留空间分辨率)
+- Goal-Conditioned: Encoder/Actor/Critic 均接受相对目标位置
+- BC Loss: 支持 Expert 行为克隆 (Q-filtered)
+
+与原 TD7 完全一致的核心机制:
+- AvgL1Norm 归一化 (非 LayerNorm)
+- 周期性硬目标更新 (非 EMA 软更新)
+- LAP Huber 损失 (非 MSE)
+- 值裁剪 (target Q clipping)
+- Encoder → fixed_encoder → fixed_encoder_target 三级冻结
+- Critic 使用 [zsa, zs] 拼接嵌入 (非内积 Q 分解)
+- ELU 激活 (Encoder/Critic), ReLU 激活 (Actor)
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -70,200 +85,189 @@ def _split_state(state):
 
 
 # ============================================================================
+# ========================= Utility Functions ================================
+# ============================================================================
+
+def AvgL1Norm(x, eps=1e-8):
+    """
+    Average L1 Normalization (TD7 论文核心归一化方式)
+
+    x / mean(|x|): 保持向量方向, 归一化到平均绝对值为 1 的尺度。
+    比 LayerNorm 更简洁, 不依赖可学习参数。
+    """
+    return x / x.abs().mean(-1, keepdim=True).clamp(min=eps)
+
+
+def LAP_huber(x, min_priority=1):
+    """
+    LAP Huber Loss (TD7 论文 Critic 损失函数)
+
+    Huber-like loss, 以 min_priority 为阈值:
+    - |x| < min_priority: 0.5 * x^2 (MSE-like, 小误差时平滑)
+    - |x| >= min_priority: min_priority * |x| (线性, 大误差时鲁棒)
+
+    先 sum 过 Q1/Q2 维度 (dim=1), 再 mean 过 batch。
+    """
+    return torch.where(x < min_priority, 0.5 * x.pow(2),
+                       min_priority * x).sum(1).mean()
+
+
+# ============================================================================
 # ========================= Neural Networks ==================================
 # ============================================================================
 
+class Encoder(nn.Module):
+    """
+    SALE Encoder (Goal-Conditioned)
+
+    自监督学习模块: 预测下一状态嵌入。
+    - zs(state, goal) → 状态嵌入 z_s ∈ R^{zs_dim}, AvgL1Norm 归一化
+    - zsa(z_s, action) → 状态-动作嵌入 z_{sa} ∈ R^{zs_dim}
+
+    训练目标: MSE(zsa(zs_t, a_t), zs_{t+1})
+    迫使 encoder 学习能预测未来状态的有意义表征。
+
+    使用 SensorCNN 处理传感器数据 (state encoder 部分)。
+    使用 ELU 激活函数 (与参考实现一致)。
+    """
+
+    def __init__(self, state_dim, goal_dim, action_dim, zs_dim=256,
+                 hdim=256, cnn_output_dim=64):
+        super().__init__()
+        non_sensor_dim = state_dim - SENSOR_DIM
+
+        # State encoder (with SensorCNN)
+        self.sensor_cnn = SensorCNN(SENSOR_DIM, cnn_output_dim)
+        fused_dim = non_sensor_dim + cnn_output_dim + goal_dim
+
+        self.zs1 = nn.Linear(fused_dim, hdim)
+        self.zs2 = nn.Linear(hdim, hdim)
+        self.zs3 = nn.Linear(hdim, zs_dim)
+
+        # State-action encoder (takes zs + action, no SensorCNN)
+        self.zsa1 = nn.Linear(zs_dim + action_dim, hdim)
+        self.zsa2 = nn.Linear(hdim, hdim)
+        self.zsa3 = nn.Linear(hdim, zs_dim)
+
+    def zs(self, state, goal):
+        """状态嵌入: f(s, g) → z_s, AvgL1Norm 归一化"""
+        non_sensor, sensor = _split_state(state)
+        cnn_out = self.sensor_cnn(sensor)
+        x = torch.cat([non_sensor, cnn_out, goal], dim=1)
+        x = F.elu(self.zs1(x))
+        x = F.elu(self.zs2(x))
+        x = AvgL1Norm(self.zs3(x))
+        return x
+
+    def zsa(self, zs, action):
+        """状态-动作嵌入: g(z_s, a) → z_{sa}"""
+        x = torch.cat([zs, action], dim=1)
+        x = F.elu(self.zsa1(x))
+        x = F.elu(self.zsa2(x))
+        x = self.zsa3(x)
+        return x
+
+
 class Actor(nn.Module):
     """
-    TD7 Actor (Goal-Conditioned) — 与 TD3 版完全相同
+    TD7 Actor (Goal-Conditioned)
 
-    确定性策略: (State, Goal) → Action
-    SensorCNN + 3 层隐藏层 + LayerNorm + 输入归一化
+    forward(state, goal, zs) → action ∈ [-1, 1]
+
+    架构 (对齐参考实现):
+    1. SensorCNN 处理传感器 → 拼接 non_sensor + goal → l0 → AvgL1Norm
+    2. 与 Encoder 状态嵌入 zs 拼接
+    3. 2 层隐藏层 (ReLU) → tanh 输出
+
+    AvgL1Norm 替代 LayerNorm, ReLU 激活 (与参考 Actor 一致)。
     """
 
-    def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 cnn_output_dim=64, hidden_dim=256):
-        super().__init__()
-        self.max_action = max_action
-        non_sensor_dim = state_dim - SENSOR_DIM
-
-        # 传感器 CNN
-        self.sensor_cnn = SensorCNN(SENSOR_DIM, cnn_output_dim)
-
-        # 输入维度: non_sensor(11) + cnn_out(64) + goal(2) = 77
-        fused_dim = non_sensor_dim + cnn_output_dim + goal_dim
-
-        # 输入归一化
-        self.input_ln = nn.LayerNorm(fused_dim)
-
-        # 3 层隐藏层 + LayerNorm
-        self.fc1 = nn.Linear(fused_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln3 = nn.LayerNorm(hidden_dim)
-
-        # 输出头
-        self.fc_out = nn.Linear(hidden_dim, action_dim)
-
-        # 权重初始化
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight, gain=1)
-            torch.nn.init.constant_(m.bias, 0)
-
-    def forward(self, state, goal):
-        non_sensor, sensor = _split_state(state)
-        cnn_out = self.sensor_cnn(sensor)
-
-        # 早期目标融合: goal 从第一层就参与
-        x = torch.cat([non_sensor, cnn_out, goal], dim=1)
-        x = self.input_ln(x)
-
-        x = F.relu(self.ln1(self.fc1(x)))
-        x = F.relu(self.ln2(self.fc2(x)))
-        x = F.relu(self.ln3(self.fc3(x)))
-
-        return self.max_action * torch.tanh(self.fc_out(x))
-
-
-# ---- SALE Components (State-Action Learned Embeddings) ----
-
-class StateEncoder(nn.Module):
-    """
-    SALE 状态编码器 f(s, g) → z_s ∈ R^{embed_dim}
-
-    在 Q1 和 Q2 之间共享, 提供统一的状态表征。
-    使用 SensorCNN 处理传感器数据, 2 层隐藏层 + LayerNorm。
-    输出为线性嵌入 (无激活函数), 用于内积 Q 计算。
-    """
-
-    def __init__(self, state_dim, goal_dim, embed_dim=256,
-                 cnn_output_dim=64, hidden_dim=256):
+    def __init__(self, state_dim, goal_dim, action_dim, zs_dim=256,
+                 hdim=256, cnn_output_dim=64):
         super().__init__()
         non_sensor_dim = state_dim - SENSOR_DIM
         self.sensor_cnn = SensorCNN(SENSOR_DIM, cnn_output_dim)
         fused_dim = non_sensor_dim + cnn_output_dim + goal_dim
 
-        self.input_ln = nn.LayerNorm(fused_dim)
-        self.fc1 = nn.Linear(fused_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, embed_dim)
+        self.l0 = nn.Linear(fused_dim, hdim)
+        self.l1 = nn.Linear(zs_dim + hdim, hdim)
+        self.l2 = nn.Linear(hdim, hdim)
+        self.l3 = nn.Linear(hdim, action_dim)
 
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight, gain=1)
-            torch.nn.init.constant_(m.bias, 0)
-
-    def forward(self, state, goal):
+    def forward(self, state, goal, zs):
         non_sensor, sensor = _split_state(state)
         cnn_out = self.sensor_cnn(sensor)
-        x = torch.cat([non_sensor, cnn_out, goal], dim=1)
-        x = self.input_ln(x)
-        x = F.relu(self.ln1(self.fc1(x)))
-        x = F.relu(self.ln2(self.fc2(x)))
-        return self.fc_out(x)  # 线性输出, 不加激活
+        fused = torch.cat([non_sensor, cnn_out, goal], dim=1)
+
+        a = AvgL1Norm(self.l0(fused))
+        a = torch.cat([a, zs], dim=1)
+        a = F.relu(self.l1(a))
+        a = F.relu(self.l2(a))
+        return torch.tanh(self.l3(a))
 
 
-class StateActionEncoder(nn.Module):
+class Critic(nn.Module):
     """
-    SALE 状态-动作编码器 g(s, g, a) → z_{sa} ∈ R^{embed_dim}
+    TD7 Twin Critic (Goal-Conditioned)
 
-    Q1 和 Q2 各自拥有独立的 StateActionEncoder (含独立 SensorCNN),
-    确保 Twin Q 真正独立。
-    输出为线性嵌入, 用于内积 Q 计算。
+    forward(state, goal, action, zsa, zs) → [Q1, Q2] (batch, 2)
+
+    架构 (对齐参考实现):
+    1. SensorCNN 处理传感器 → 拼接 non_sensor + goal + action → q0 → AvgL1Norm
+    2. 与 Encoder 嵌入 [zsa, zs] 拼接 (2 * zs_dim)
+    3. 2 层隐藏层 (ELU) → Q 值输出
+
+    Q1 和 Q2 各有独立的 SensorCNN 和全连接层。
+    使用 ELU 激活 (与参考 Critic 一致)。
     """
 
-    def __init__(self, state_dim, goal_dim, action_dim, embed_dim=256,
-                 cnn_output_dim=64, hidden_dim=256):
+    def __init__(self, state_dim, goal_dim, action_dim, zs_dim=256,
+                 hdim=256, cnn_output_dim=64):
         super().__init__()
         non_sensor_dim = state_dim - SENSOR_DIM
-        self.sensor_cnn = SensorCNN(SENSOR_DIM, cnn_output_dim)
-        fused_dim = non_sensor_dim + cnn_output_dim + goal_dim + action_dim
 
-        self.input_ln = nn.LayerNorm(fused_dim)
-        self.fc1 = nn.Linear(fused_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, embed_dim)
+        # Q1 和 Q2 各有独立 SensorCNN
+        self.sensor_cnn1 = SensorCNN(SENSOR_DIM, cnn_output_dim)
+        self.sensor_cnn2 = SensorCNN(SENSOR_DIM, cnn_output_dim)
 
-        self.apply(self._init_weights)
+        sa_fused_dim = non_sensor_dim + cnn_output_dim + goal_dim + action_dim
 
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight, gain=1)
-            torch.nn.init.constant_(m.bias, 0)
+        # Q1
+        self.q01 = nn.Linear(sa_fused_dim, hdim)
+        self.q1 = nn.Linear(2 * zs_dim + hdim, hdim)
+        self.q2 = nn.Linear(hdim, hdim)
+        self.q3 = nn.Linear(hdim, 1)
 
-    def forward(self, state, goal, action):
+        # Q2
+        self.q02 = nn.Linear(sa_fused_dim, hdim)
+        self.q4 = nn.Linear(2 * zs_dim + hdim, hdim)
+        self.q5 = nn.Linear(hdim, hdim)
+        self.q6 = nn.Linear(hdim, 1)
+
+    def forward(self, state, goal, action, zsa, zs):
+        """返回 [Q1, Q2], shape (batch, 2)"""
         non_sensor, sensor = _split_state(state)
-        cnn_out = self.sensor_cnn(sensor)
-        x = torch.cat([non_sensor, cnn_out, goal, action], dim=1)
-        x = self.input_ln(x)
-        x = F.relu(self.ln1(self.fc1(x)))
-        x = F.relu(self.ln2(self.fc2(x)))
-        return self.fc_out(x)  # 线性输出, 不加激活
+        embeddings = torch.cat([zsa, zs], dim=1)  # (batch, 2 * zs_dim)
 
+        # Q1
+        cnn_out1 = self.sensor_cnn1(sensor)
+        sa1 = torch.cat([non_sensor, cnn_out1, goal, action], dim=1)
+        q1 = AvgL1Norm(self.q01(sa1))
+        q1 = torch.cat([q1, embeddings], dim=1)
+        q1 = F.elu(self.q1(q1))
+        q1 = F.elu(self.q2(q1))
+        q1 = self.q3(q1)
 
-class SALECritic(nn.Module):
-    """
-    SALE Twin Critic (Goal-Conditioned)
+        # Q2
+        cnn_out2 = self.sensor_cnn2(sensor)
+        sa2 = torch.cat([non_sensor, cnn_out2, goal, action], dim=1)
+        q2 = AvgL1Norm(self.q02(sa2))
+        q2 = torch.cat([q2, embeddings], dim=1)
+        q2 = F.elu(self.q4(q2))
+        q2 = F.elu(self.q5(q2))
+        q2 = self.q6(q2)
 
-    Q_i(s, g, a) = f(s, g)^T · g_i(s, g, a) / sqrt(embed_dim)
-
-    组件:
-    - f (StateEncoder): 共享状态编码器 (一个 SensorCNN, 在 Q1/Q2 之间共享)
-    - g1, g2 (StateActionEncoder): 独立状态-动作编码器 (各自拥有独立 SensorCNN)
-
-    内积结构的优势:
-    - Q 值 = 两个嵌入向量的内积 / sqrt(d), 天然限制过大
-    - 高维空间中两个独立学习的嵌入向量的内积增长受限 (类似 Transformer 注意力缩放)
-    - 共享状态编码器 f 提供一致的状态表征, 减少 Q1/Q2 之间的碎片化
-
-    (State, Goal, Action) → Q1, Q2
-    """
-
-    def __init__(self, state_dim, goal_dim, action_dim,
-                 embed_dim=256, cnn_output_dim=64, hidden_dim=256):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.scale = embed_dim ** 0.5
-
-        # 共享状态编码器 f (一个 SensorCNN)
-        self.state_encoder = StateEncoder(
-            state_dim, goal_dim, embed_dim, cnn_output_dim, hidden_dim)
-
-        # 独立状态-动作编码器 g1, g2 (各自拥有独立 SensorCNN)
-        self.sa_encoder1 = StateActionEncoder(
-            state_dim, goal_dim, action_dim, embed_dim, cnn_output_dim, hidden_dim)
-        self.sa_encoder2 = StateActionEncoder(
-            state_dim, goal_dim, action_dim, embed_dim, cnn_output_dim, hidden_dim)
-
-    def forward(self, state, goal, action):
-        """返回 Q1, Q2 (内积 Q 值)"""
-        zs = self.state_encoder(state, goal)           # (batch, embed_dim)
-        zsa1 = self.sa_encoder1(state, goal, action)   # (batch, embed_dim)
-        zsa2 = self.sa_encoder2(state, goal, action)   # (batch, embed_dim)
-
-        q1 = (zs * zsa1).sum(dim=1, keepdim=True) / self.scale
-        q2 = (zs * zsa2).sum(dim=1, keepdim=True) / self.scale
-        return q1, q2
-
-    def Q1(self, state, goal, action):
-        """仅计算 Q1 (用于 Actor 策略梯度优化)"""
-        zs = self.state_encoder(state, goal)
-        zsa1 = self.sa_encoder1(state, goal, action)
-        return (zs * zsa1).sum(dim=1, keepdim=True) / self.scale
+        return torch.cat([q1, q2], dim=1)  # (batch, 2)
 
 
 # ============================================================================
@@ -274,99 +278,118 @@ class TD7ActuatorAgent:
     """
     TD7 Actuator Agent — Goal-Conditioned
 
-    TD3 基础上增加:
-    1. SALE Critic (内积 Q 分解, 抑制 Q 值过估计)
-    2. LAP (loss-based 优先级采样, 不使用 IS 权重修正)
-    3. Checkpoint Policy (50/50 actor 混合, 防止策略坍塌)
+    严格对齐 Fujimoto et al. (2023) 开源实现:
 
-    直接控制 USV 的油门和舵角, 目标为到达 Selector 指定的目标点。
-    (State, RelativeGoal) → (Throttle, Rudder)
+    组件:
+    - Encoder: 自监督训练, 预测下一状态嵌入
+      · encoder (不断训练)
+      · fixed_encoder (冻结快照, Actor/Critic 使用, 周期性同步)
+      · fixed_encoder_target (冻结快照, target Q 使用, 周期性同步)
+      · checkpoint_encoder (最优策略快照)
+    - Actor: 确定性策略, 使用 Encoder 嵌入
+      · actor (当前策略)
+      · actor_target (目标策略, 周期性硬拷贝)
+      · actor_checkpoint (最优策略快照)
+    - Critic: Twin Q, 使用 Encoder 嵌入, LAP Huber 损失
+      · critic (当前)
+      · critic_target (目标, 周期性硬拷贝)
+
+    训练流程:
+    1. Encoder 自监督更新: MSE(g(f(s,g),a), f(s',g))
+    2. Critic 更新: LAP Huber 损失 + fixed_encoder 嵌入
+    3. LAP 优先级更新
+    4. Actor 延迟更新: -Q.mean() + BC loss
+    5. 周期性硬目标更新 (所有 target 网络 + fixed_encoder 同步)
     """
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
-                 lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
+                 lr_actor=3e-4, lr_critic=3e-4, lr_encoder=3e-4,
+                 gamma=0.99, target_update_rate=750,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2,
-                 embed_dim=256, encoder_reset_interval=100000,
-                 lap_min_priority=1.0):
-        # ---- Actor: current + target + checkpoint ----
-        self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
-        self.actor_target = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
-        self.actor_target.load_state_dict(self.actor.state_dict())
-        self.actor_checkpoint = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
-        self.actor_checkpoint.load_state_dict(self.actor.state_dict())
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
+                 zs_dim=256, lap_alpha=0.4, lap_min_priority=1.0):
 
-        # ---- SALE Critic: current + target ----
-        self.critic = SALECritic(
-            state_dim, goal_dim, action_dim, embed_dim).to(device)
-        self.critic_target = SALECritic(
-            state_dim, goal_dim, action_dim, embed_dim).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
-        self.critic_optimizer = torch.optim.Adam(
-            self.critic.parameters(), lr=lr_critic)
-
-        # ---- Hyperparameters ----
         self.max_action = max_action
         self.gamma = gamma
-        self.tau = tau
+        self.target_update_rate = target_update_rate
         self.policy_noise = policy_noise
         self.noise_clip = noise_clip
         self.policy_freq = policy_freq
-
-        # SALE
-        self.embed_dim = embed_dim
-        self.encoder_reset_interval = encoder_reset_interval
-
-        # LAP
+        self.zs_dim = zs_dim
+        self.lap_alpha = lap_alpha
         self.lap_min_priority = lap_min_priority
 
-        # Checkpoint readiness: 初始 checkpoint 与 actor 相同 (随机权重),
-        # 在被有意义地更新前不应使用
-        self.checkpoint_ready = False
+        # ---- Encoder: current + fixed + fixed_target + checkpoint ----
+        self.encoder = Encoder(
+            state_dim, goal_dim, action_dim, zs_dim).to(device)
+        self.encoder_optimizer = torch.optim.Adam(
+            self.encoder.parameters(), lr=lr_encoder)
+        self.fixed_encoder = copy.deepcopy(self.encoder)
+        self.fixed_encoder_target = copy.deepcopy(self.encoder)
+        self.checkpoint_encoder = copy.deepcopy(self.encoder)
 
+        # ---- Actor: current + target + checkpoint ----
+        self.actor = Actor(
+            state_dim, goal_dim, action_dim, zs_dim).to(device)
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(), lr=lr_actor)
+        self.actor_target = copy.deepcopy(self.actor)
+        self.actor_checkpoint = copy.deepcopy(self.actor)
+
+        # ---- Critic: current + target ----
+        self.critic = Critic(
+            state_dim, goal_dim, action_dim, zs_dim).to(device)
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(), lr=lr_critic)
+        self.critic_target = copy.deepcopy(self.critic)
+
+        # ---- Checkpoint state ----
+        self.checkpoint_ready = False
         self.total_it = 0
+
+        # ---- Value clipping (跟踪 Q 值范围, 防止 target Q 爆炸) ----
+        self.max_Q = -1e8
+        self.min_Q = 1e8
+        self.max_Q_target = 0
+        self.min_Q_target = 0
 
     def select_action(self, state, goal, noise=0.0, use_checkpoint=False):
         """
         选择动作, 支持 Checkpoint Policy
 
-        Args:
-            state: 环境状态 (numpy array)
-            goal: 相对目标位置 (numpy array)
-            noise: 探索噪声标准差
-            use_checkpoint: 是否使用 checkpoint actor (50/50 策略)
+        - 默认: 使用 fixed_encoder + actor (当前策略)
+        - checkpoint: 使用 checkpoint_encoder + actor_checkpoint (最优策略)
         """
         state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
         goal_t = torch.FloatTensor(goal).unsqueeze(0).to(device)
         with torch.no_grad():
-            if use_checkpoint:
-                action = self.actor_checkpoint(state_t, goal_t).cpu().numpy().flatten()
+            if use_checkpoint and self.checkpoint_ready:
+                zs = self.checkpoint_encoder.zs(state_t, goal_t)
+                action = self.actor_checkpoint(state_t, goal_t, zs)
             else:
-                action = self.actor(state_t, goal_t).cpu().numpy().flatten()
-        if noise > 0:
-            action = (action + np.random.normal(0, noise, size=action.shape)).clip(
-                -self.max_action, self.max_action)
-        return action
+                zs = self.fixed_encoder.zs(state_t, goal_t)
+                action = self.actor(state_t, goal_t, zs)
+
+            if noise > 0:
+                action = action + torch.randn_like(action) * noise
+
+        return action.clamp(-1, 1).cpu().numpy().flatten() * self.max_action
 
     def update_checkpoint(self):
-        """将当前 actor 复制到 checkpoint (当发现更好的策略时调用)"""
+        """将当前 actor + fixed_encoder 复制到 checkpoint"""
         self.actor_checkpoint.load_state_dict(self.actor.state_dict())
+        self.checkpoint_encoder.load_state_dict(self.fixed_encoder.state_dict())
         self.checkpoint_ready = True
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
         """
-        TD7 训练步 (SALE + LAP + BC)
+        TD7 训练步 (对齐参考实现)
 
-        与 TD3 的关键区别:
-        1. Critic 使用 SALE 内积结构: Q = f(s,g)^T · g(s,g,a) / sqrt(d)
-        2. 优先级基于 per-sample critic loss (LAP), 不使用 IS 权重修正
-        3. Critic target 使用 EMA 更新 + 周期性硬重置
-        4. Actor target 仍使用 TD3 的 delayed soft update
-
-        Args:
-            replay_buffer: 经验回放缓冲区
-            batch_size: 批次大小
-            bc_weight: 行为克隆损失权重
+        训练流程:
+        1. Encoder 自监督更新: MSE(encoder.zsa(zs, a), encoder.zs(s', g))
+        2. Critic 更新: LAP Huber 损失, 使用 fixed_encoder 嵌入
+        3. LAP 优先级更新: td_loss.max(Q1,Q2).clamp(min).pow(alpha)
+        4. Actor 延迟更新: -Q.mean() + BC loss (Q-filtered)
+        5. 周期性硬目标更新 (每 target_update_rate 步)
         """
         if len(replay_buffer) < batch_size:
             return 0.0, 0.0, 0.0
@@ -383,83 +406,116 @@ class TD7ActuatorAgent:
             indices = None
 
         self.total_it += 1
+        not_done = 1.0 - done
 
-        # ---- Critic Update (SALE) ----
+        # ==================================================================
+        # 1. Encoder 自监督更新
+        # ==================================================================
+        # 目标: encoder 学习预测下一状态嵌入 (自监督信号)
+        # next_zs (stop gradient) 作为回归目标
         with torch.no_grad():
+            next_zs = self.encoder.zs(next_state, goal)
+
+        zs = self.encoder.zs(state, goal)
+        pred_zs = self.encoder.zsa(zs, action)
+        encoder_loss = F.mse_loss(pred_zs, next_zs)
+
+        self.encoder_optimizer.zero_grad()
+        encoder_loss.backward()
+        self.encoder_optimizer.step()
+
+        # ==================================================================
+        # 2. Critic 更新 (LAP Huber + fixed_encoder 嵌入)
+        # ==================================================================
+        with torch.no_grad():
+            # 使用 fixed_encoder_target 计算 target embeddings
+            fixed_target_zs = self.fixed_encoder_target.zs(next_state, goal)
+
+            # Target policy smoothing (TD3)
             noise = (torch.randn_like(action) * self.policy_noise).clamp(
                 -self.noise_clip, self.noise_clip)
-            next_action = (self.actor_target(next_state, goal) + noise).clamp(
-                -self.max_action, self.max_action)
-            # 使用 EMA target critic 计算 target Q
-            target_Q1, target_Q2 = self.critic_target(
-                next_state, goal, next_action)
-            target_Q = torch.min(target_Q1, target_Q2)
-            target_Q = reward + (1 - done) * self.gamma * target_Q
+            next_action = (self.actor_target(
+                next_state, goal, fixed_target_zs) + noise).clamp(-1, 1)
 
-        current_Q1, current_Q2 = self.critic(state, goal, action)
+            fixed_target_zsa = self.fixed_encoder_target.zsa(
+                fixed_target_zs, next_action)
 
-        # Per-sample critic loss (用于 LAP 优先级更新)
-        per_sample_loss = (current_Q1 - target_Q).pow(2) + \
-                          (current_Q2 - target_Q).pow(2)
+            # Target Q (min of Q1, Q2)
+            Q_target = self.critic_target(
+                next_state, goal, next_action,
+                fixed_target_zsa, fixed_target_zs
+            ).min(1, keepdim=True)[0]
 
-        # LAP: 不使用 IS 权重, 直接求均值
-        critic_loss = per_sample_loss.mean()
+            # Value clipping: 限制 target Q 范围, 防止爆炸
+            Q_target = reward + not_done * self.gamma * Q_target.clamp(
+                self.min_Q_target, self.max_Q_target)
+
+            # 跟踪 Q 值范围
+            self.max_Q = max(self.max_Q, float(Q_target.max()))
+            self.min_Q = min(self.min_Q, float(Q_target.min()))
+
+            # 使用 fixed_encoder 计算当前 batch 的嵌入
+            fixed_zs = self.fixed_encoder.zs(state, goal)
+            fixed_zsa = self.fixed_encoder.zsa(fixed_zs, action)
+
+        # Critic forward: Q(s, g, a, zsa, zs) → [Q1, Q2]
+        Q = self.critic(state, goal, action, fixed_zsa, fixed_zs)
+        td_loss = (Q - Q_target).abs()  # (batch, 2)
+
+        # LAP Huber loss
+        critic_loss = LAP_huber(td_loss, self.lap_min_priority)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
-        # ---- LAP Priority Update ----
-        # 优先级 = max(per_sample_loss, min_priority)
-        # 传给 buffer.update_priorities, buffer 内部会应用 (|x|+ε)^α 变换
+        # ==================================================================
+        # 3. LAP 优先级更新 (对齐参考实现, 跳过 buffer 内部 α 变换)
+        # ==================================================================
         if indices is not None:
-            lap_priorities = torch.clamp(
-                per_sample_loss.detach().squeeze(),
-                min=self.lap_min_priority)
-            replay_buffer.update_priorities(indices, lap_priorities)
+            # max over Q1/Q2, clamp to min_priority, 再做 pow(alpha)
+            # 直接传入最终优先级, 使用 update_priorities_raw 跳过二次变换
+            priority = td_loss.max(1)[0].clamp(
+                min=self.lap_min_priority).pow(self.lap_alpha).detach()
+            replay_buffer.update_priorities_raw(indices, priority)
 
-        # ---- EMA Update: Critic Target (every step) ----
-        for p, tp in zip(self.critic.parameters(),
-                         self.critic_target.parameters()):
-            tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
-
-        # ---- Periodic Encoder Reset (SALE 核心机制) ----
-        # 周期性将 target critic 硬重置为当前 critic,
-        # 防止 EMA target 过于陈旧导致 Q 估计偏差累积
-        if self.total_it % self.encoder_reset_interval == 0:
-            self.critic_target.load_state_dict(self.critic.state_dict())
-
-        # ---- Delayed Actor Update (with BC Loss) ----
+        # ==================================================================
+        # 4. Actor 延迟更新 (with BC loss)
+        # ==================================================================
         actor_loss_val = 0.0
         bc_loss_val = 0.0
         if self.total_it % self.policy_freq == 0:
-            pi_action = self.actor(state, goal)
+            # fixed_zs: 从 no_grad 块获取的 detached tensor (稳定特征)
+            pi_action = self.actor(state, goal, fixed_zs)
+            fixed_zsa_pi = self.fixed_encoder.zsa(fixed_zs, pi_action)
+            Q_pi = self.critic(state, goal, pi_action,
+                               fixed_zsa_pi, fixed_zs)
 
-            # 标准 RL 目标: 最大化 Q 值
-            rl_loss = -self.critic.Q1(state, goal, pi_action).mean()
+            # RL 目标: 最大化平均 Q 值 (Q1 + Q2 都参与, 与参考一致)
+            rl_loss = -Q_pi.mean()
 
             # 行为克隆损失: 仅在 Expert transition 上, Q-filtered
             bc_loss = torch.tensor(0.0, device=device)
             if bc_weight > 0.0 and is_expert.sum() > 0:
-                expert_mask = (is_expert > 0.5).squeeze()  # (batch,)
+                expert_mask = (is_expert > 0.5).squeeze()
                 if expert_mask.any():
-                    expert_states = state[expert_mask]
-                    expert_goals = goal[expert_mask]
-                    expert_actions = action[expert_mask]
-                    pi_expert = pi_action[expert_mask]
-
-                    # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
                     with torch.no_grad():
-                        q_expert = self.critic.Q1(
-                            expert_states, expert_goals, expert_actions)
-                        q_pi = self.critic.Q1(
-                            expert_states, expert_goals, pi_expert)
-                        bc_filter = (q_expert > q_pi).squeeze()
+                        # Q of expert's original actions
+                        Q_expert = self.critic(
+                            state[expert_mask], goal[expert_mask],
+                            action[expert_mask],
+                            fixed_zsa[expert_mask],
+                            fixed_zs[expert_mask]
+                        ).mean(dim=1)
+                        # Q of our policy actions on expert states
+                        Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
+                        bc_filter = (Q_expert > Q_policy)
 
                     if bc_filter.any():
                         bc_loss = F.mse_loss(
-                            pi_expert[bc_filter], expert_actions[bc_filter])
+                            pi_action[expert_mask][bc_filter],
+                            action[expert_mask][bc_filter])
 
             total_actor_loss = rl_loss + bc_weight * bc_loss
 
@@ -468,12 +524,25 @@ class TD7ActuatorAgent:
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_optimizer.step()
 
-            # Soft update actor target (同 TD3, 仅在 policy_freq 时更新)
-            for p, tp in zip(self.actor.parameters(),
-                             self.actor_target.parameters()):
-                tp.data.copy_(self.tau * p.data + (1 - self.tau) * tp.data)
-
             actor_loss_val = rl_loss.item()
             bc_loss_val = bc_loss.item()
+
+        # ==================================================================
+        # 5. 周期性硬目标更新 (非 EMA, 与参考完全一致)
+        # ==================================================================
+        if self.total_it % self.target_update_rate == 0:
+            # 硬拷贝所有 target 网络
+            self.actor_target.load_state_dict(self.actor.state_dict())
+            self.critic_target.load_state_dict(self.critic.state_dict())
+            self.fixed_encoder_target.load_state_dict(
+                self.fixed_encoder.state_dict())
+
+            # 核心: 将训练中的 encoder 同步到 fixed_encoder
+            # fixed_encoder 作为稳定特征提供者, 只在这里更新
+            self.fixed_encoder.load_state_dict(self.encoder.state_dict())
+
+            # 更新值裁剪范围
+            self.max_Q_target = self.max_Q
+            self.min_Q_target = self.min_Q
 
         return critic_loss.item(), actor_loss_val, bc_loss_val

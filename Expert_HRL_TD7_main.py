@@ -10,18 +10,20 @@ Expert-Guided Two-Layer HRL for USV Multi-Target Navigation — TD7 版
   Selector (DQN) → Actuator (TD7, Goal-Conditioned) → USV Environment
   + Expert 教师在训练初期提供专家示范
 
-TD7 = TD3 + 三项改进:
-1. SALE (State-Action Learned Embeddings): Q(s,a) = f(s)^T · g(s,a) / sqrt(d)
-   - 内积 Q 分解限制过估计
-   - EMA 目标网络 + 周期性硬重置
-2. LAP (Loss-Adjusted Priorities): 基于 critic loss 的优先级采样 (不使用 IS 权重)
+TD7 = TD3 + 三项改进 (严格对齐 Fujimoto et al. 2023 开源实现):
+1. SALE (State-Action Learned Embeddings):
+   - 独立 Encoder 自监督训练, 预测下一状态嵌入
+   - fixed_encoder 冻结快照, 供 Actor/Critic 使用
+   - 周期性硬重置 (非 EMA): fixed_encoder ← encoder
+2. LAP (Loss-Adjusted Priorities): LAP Huber 损失 + td_loss 优先级 (不使用 IS 权重)
 3. Checkpoint Policy: 数据收集时 50/50 使用当前/历史最优策略, 防止策略坍塌
 
 与 TD3 版的关键区别:
-- Actuator 使用 TD7ActuatorAgent (SALE Critic, LAP, Checkpoint)
-- 数据收集: RL 动作时以 50% 概率使用 checkpoint actor
-- 保存/恢复: 额外保存 actor_checkpoint 权重
-- 策略稳定性: 发现更好策略时更新 checkpoint, 保证 buffer 数据质量
+- Actuator 使用 TD7ActuatorAgent (独立 Encoder + SALE Critic + LAP + Checkpoint)
+- Encoder 自监督训练: MSE(encoder.zsa(zs, a), encoder.zs(s', g))
+- 周期性硬目标更新 (非 EMA 软更新), 含 encoder → fixed_encoder 同步
+- 数据收集: RL 动作时以 50% 概率使用 checkpoint actor + checkpoint encoder
+- 保存/恢复: 额外保存 encoder + fixed_encoder + checkpoint 权重
 """
 
 import argparse
@@ -113,10 +115,12 @@ def train_expert_hrl(args):
         actuator_state_dim, actuator_goal_dim, actuator_action_dim,
         max_action=1.0,
         lr_actor=args.lr_actor, lr_critic=args.lr_critic,
-        gamma=args.gamma, tau=args.tau, policy_noise=args.policy_noise,
+        lr_encoder=args.lr_encoder,
+        gamma=args.gamma, target_update_rate=args.target_update_rate,
+        policy_noise=args.policy_noise,
         noise_clip=args.noise_clip, policy_freq=args.policy_freq,
-        embed_dim=args.embed_dim,
-        encoder_reset_interval=args.encoder_reset_interval,
+        zs_dim=args.zs_dim,
+        lap_alpha=args.lap_alpha,
         lap_min_priority=args.lap_min_priority
     )
 
@@ -173,6 +177,15 @@ def train_expert_hrl(args):
             actuator.critic.load_state_dict(ckpt['actuator_critic'])
             actuator.critic_target.load_state_dict(ckpt['actuator_critic_target'])
 
+            # TD7: 恢复 Encoder 状态 (SALE 核心)
+            if 'actuator_encoder' in ckpt:
+                actuator.encoder.load_state_dict(ckpt['actuator_encoder'])
+                actuator.fixed_encoder.load_state_dict(ckpt['actuator_fixed_encoder'])
+                actuator.fixed_encoder_target.load_state_dict(
+                    ckpt['actuator_fixed_encoder_target'])
+                actuator.checkpoint_encoder.load_state_dict(
+                    ckpt['actuator_checkpoint_encoder'])
+
             # TD7: 恢复 checkpoint actor
             if 'actuator_actor_checkpoint' in ckpt:
                 actuator.actor_checkpoint.load_state_dict(
@@ -180,10 +193,19 @@ def train_expert_hrl(args):
                 actuator.checkpoint_ready = ckpt.get(
                     'checkpoint_ready', True)
 
+            # TD7: 恢复值裁剪范围
+            actuator.max_Q = ckpt.get('max_Q', -1e8)
+            actuator.min_Q = ckpt.get('min_Q', 1e8)
+            actuator.max_Q_target = ckpt.get('max_Q_target', 0)
+            actuator.min_Q_target = ckpt.get('min_Q_target', 0)
+
             # 恢复优化器状态
             selector.optimizer.load_state_dict(ckpt['selector_optimizer'])
             actuator.actor_optimizer.load_state_dict(ckpt['actuator_actor_optimizer'])
             actuator.critic_optimizer.load_state_dict(ckpt['actuator_critic_optimizer'])
+            if 'actuator_encoder_optimizer' in ckpt:
+                actuator.encoder_optimizer.load_state_dict(
+                    ckpt['actuator_encoder_optimizer'])
 
             # 恢复训练状态
             start_episode = ckpt['episode'] + 1
@@ -210,9 +232,9 @@ def train_expert_hrl(args):
 
     print(f"\n{'=' * 60}")
     print(f"  Training Start — TD7 — {NUM_TARGETS}T/{NUM_OBSTACLES}O")
-    print(f"  SALE embed_dim={args.embed_dim}, "
-          f"encoder_reset={args.encoder_reset_interval}")
-    print(f"  LAP min_priority={args.lap_min_priority}")
+    print(f"  SALE zs_dim={args.zs_dim}, "
+          f"target_update_rate={args.target_update_rate}")
+    print(f"  LAP alpha={args.lap_alpha}, min_priority={args.lap_min_priority}")
     print(f"  Checkpoint Policy: 50/50 current/checkpoint "
           f"(eval_interval={args.checkpoint_eval_interval} eps)")
     print(f"  Expert Decay: Dawood Exponential "
@@ -468,8 +490,10 @@ def train_expert_hrl(args):
         writer.add_scalar('TD7/Checkpoint_Steps', checkpoint_steps, episode)
         writer.add_scalar('TD7/Checkpoint_Ratio',
                           checkpoint_steps / max(rl_steps, 1), episode)
-        writer.add_scalar('TD7/Encoder_Reset_Count',
-                          actuator.total_it // args.encoder_reset_interval, episode)
+        writer.add_scalar('TD7/Target_Update_Count',
+                          actuator.total_it // args.target_update_rate, episode)
+        writer.add_scalar('TD7/Max_Q', actuator.max_Q, episode)
+        writer.add_scalar('TD7/Min_Q', actuator.min_Q, episode)
 
         # ---- 定期保存检查点 (完整训练快照, 支持断点续训) ----
         if (episode + 1) % args.checkpoint_interval == 0:
@@ -484,10 +508,16 @@ def train_expert_hrl(args):
                 'actuator_actor_checkpoint': actuator.actor_checkpoint.state_dict(),
                 'actuator_critic': actuator.critic.state_dict(),
                 'actuator_critic_target': actuator.critic_target.state_dict(),
+                # TD7 Encoder 状态 (SALE)
+                'actuator_encoder': actuator.encoder.state_dict(),
+                'actuator_fixed_encoder': actuator.fixed_encoder.state_dict(),
+                'actuator_fixed_encoder_target': actuator.fixed_encoder_target.state_dict(),
+                'actuator_checkpoint_encoder': actuator.checkpoint_encoder.state_dict(),
                 # 优化器状态
                 'selector_optimizer': selector.optimizer.state_dict(),
                 'actuator_actor_optimizer': actuator.actor_optimizer.state_dict(),
                 'actuator_critic_optimizer': actuator.critic_optimizer.state_dict(),
+                'actuator_encoder_optimizer': actuator.encoder_optimizer.state_dict(),
                 # 训练状态
                 'episode': episode,
                 'global_step': global_step,
@@ -500,6 +530,11 @@ def train_expert_hrl(args):
                 'expert_success_history': list(expert_scheduler.success_history),
                 # TD7 checkpoint 状态
                 'checkpoint_ready': actuator.checkpoint_ready,
+                # TD7 值裁剪范围
+                'max_Q': actuator.max_Q,
+                'min_Q': actuator.min_Q,
+                'max_Q_target': actuator.max_Q_target,
+                'min_Q_target': actuator.min_Q_target,
             }
             torch.save(checkpoint, os.path.join(ckpt_dir, "checkpoint.pth"))
             # 同时保存独立权重文件 (兼容评估加载)
@@ -511,13 +546,15 @@ def train_expert_hrl(args):
                        os.path.join(ckpt_dir, "actuator_critic.pth"))
             torch.save(actuator.actor_checkpoint.state_dict(),
                        os.path.join(ckpt_dir, "actuator_actor_checkpoint.pth"))
+            torch.save(actuator.fixed_encoder.state_dict(),
+                       os.path.join(ckpt_dir, "actuator_encoder.pth"))
             print(f"  [Checkpoint] Saved at episode {episode + 1} (完整快照)")
 
         # ---- TD7: 周期性 checkpoint 更新 ----
         # 每 checkpoint_eval_interval 个 episode 检查近期成功率,
         # 如果当前策略表现优于 checkpoint 则更新
         if (episode + 1) % args.checkpoint_eval_interval == 0:
-            if success_rate > 0 or not actuator.checkpoint_ready:
+            if success_rate > 0.5 or not actuator.checkpoint_ready:
                 actuator.update_checkpoint()
                 if episode % args.log_interval == 0:
                     print(f"  [TD7] Checkpoint updated at EP {episode} "
@@ -535,6 +572,8 @@ def train_expert_hrl(args):
                        os.path.join(args.output_dir, "best_actuator_actor.pth"))
             torch.save(actuator.critic.state_dict(),
                        os.path.join(args.output_dir, "best_actuator_critic.pth"))
+            torch.save(actuator.fixed_encoder.state_dict(),
+                       os.path.join(args.output_dir, "best_actuator_encoder.pth"))
             # TD7: 发现更好策略时更新 checkpoint
             actuator.update_checkpoint()
 
@@ -547,6 +586,8 @@ def train_expert_hrl(args):
                os.path.join(args.output_dir, "actuator_actor.pth"))
     torch.save(actuator.critic.state_dict(),
                os.path.join(args.output_dir, "actuator_critic.pth"))
+    torch.save(actuator.fixed_encoder.state_dict(),
+               os.path.join(args.output_dir, "actuator_encoder.pth"))
     torch.save(actuator.actor_checkpoint.state_dict(),
                os.path.join(args.output_dir, "actuator_actor_checkpoint.pth"))
 
@@ -603,7 +644,7 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
     selector = SelectorAgent()
     actuator = TD7ActuatorAgent(
         actuator_state_dim, 2, 2, max_action=1.0,
-        embed_dim=args.embed_dim)
+        zs_dim=args.zs_dim)
     expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
     model_dir = args.output_dir
@@ -618,7 +659,13 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             actuator.actor.load_state_dict(torch.load(
                 os.path.join(model_dir, f"{model_prefix}actuator_actor.pth"),
                 map_location=device, weights_only=False))
-            print("Models loaded successfully (Selector + TD7 Actuator).")
+            # TD7: 加载 fixed_encoder (Actor 依赖 encoder 嵌入)
+            encoder_path = os.path.join(
+                model_dir, f"{model_prefix}actuator_encoder.pth")
+            if os.path.exists(encoder_path):
+                actuator.fixed_encoder.load_state_dict(torch.load(
+                    encoder_path, map_location=device, weights_only=False))
+            print("Models loaded successfully (Selector + TD7 Actuator + Encoder).")
         else:
             print("Selector model loaded. Actuator using Expert control.")
     except FileNotFoundError:
@@ -856,17 +903,19 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             f.write(f"  Actor LR:       {args.lr_actor}\n")
             f.write(f"  Critic LR:      {args.lr_critic}\n")
             f.write(f"  Selector LR:    {args.lr_selector}\n")
-            f.write(f"  TD7 tau:        {args.tau}\n")
+            f.write(f"  TD7 tau:        N/A (周期性硬更新, rate={args.target_update_rate})\n")
             f.write(f"  Policy noise:   {args.policy_noise}\n")
             f.write(f"  Expert p0:      {args.expert_p0}\n")
             f.write(f"  Expert p_min:   {args.expert_p_min}\n")
             f.write(f"  BC weight:      {args.bc_weight}\n")
             f.write(f"  Seed:           {args.seed}\n")
             # TD7 特有参数
-            f.write(f"\n--- TD7 参数 ---\n")
-            f.write(f"  SALE embed_dim:           {args.embed_dim}\n")
-            f.write(f"  Encoder reset interval:   {args.encoder_reset_interval}\n")
-            f.write(f"  LAP min_priority:         {args.lap_min_priority}\n")
+            f.write(f"\n--- TD7 参数 (对齐参考实现) ---\n")
+            f.write(f"  SALE zs_dim:                {args.zs_dim}\n")
+            f.write(f"  Target update rate:         {args.target_update_rate}\n")
+            f.write(f"  Encoder LR:                 {args.lr_encoder}\n")
+            f.write(f"  LAP alpha:                  {args.lap_alpha}\n")
+            f.write(f"  LAP min_priority:           {args.lap_min_priority}\n")
             # 汇总
             f.write(f"\n--- 评估结果汇总 ---\n")
             f.write(f"  Success Rate: {success_count}/{len(eval_results)} "
@@ -924,8 +973,6 @@ if __name__ == "__main__":
     # --- TD3 基础参数 ---
     parser.add_argument("--gamma", default=0.99, type=float,
                         help="折扣因子")
-    parser.add_argument("--tau", default=0.005, type=float,
-                        help="Target network soft update / EMA 系数")
     parser.add_argument("--policy_noise", default=0.2, type=float,
                         help="Target policy smoothing noise")
     parser.add_argument("--noise_clip", default=0.5, type=float)
@@ -936,13 +983,17 @@ if __name__ == "__main__":
     parser.add_argument("--actuator_train_iters", default=2, type=int,
                         help="每步 Actuator 训练迭代次数")
 
-    # --- TD7 特有参数 ---
-    parser.add_argument("--embed_dim", default=256, type=int,
-                        help="SALE 嵌入维度 (Q = f^T·g / sqrt(d))")
-    parser.add_argument("--encoder_reset_interval", default=100000, type=int,
-                        help="SALE 编码器周期性硬重置间隔 (training steps)")
+    # --- TD7 特有参数 (对齐 Fujimoto et al. 2023 开源实现) ---
+    parser.add_argument("--zs_dim", default=256, type=int,
+                        help="SALE Encoder 嵌入维度 (zs, zsa 均为此维度)")
+    parser.add_argument("--target_update_rate", default=750, type=int,
+                        help="周期性硬目标更新间隔 (training steps, 非 EMA)")
+    parser.add_argument("--lr_encoder", default=3e-4, type=float,
+                        help="SALE Encoder 学习率")
+    parser.add_argument("--lap_alpha", default=0.4, type=float,
+                        help="LAP 优先级指数 (priority = td.pow(alpha))")
     parser.add_argument("--lap_min_priority", default=1.0, type=float,
-                        help="LAP 最小优先级 (priority = max(loss, min_priority))")
+                        help="LAP 最小优先级 (priority = max(td, min_priority))")
     parser.add_argument("--checkpoint_eval_interval", default=50, type=int,
                         help="Checkpoint 策略周期性评估/更新间隔 (episodes)")
 
@@ -964,7 +1015,7 @@ if __name__ == "__main__":
                         help="探索噪声最低比例")
 
     # --- Expert 概率衰减参数 ---
-    parser.add_argument("--expert_p0", default=0.7, type=float,
+    parser.add_argument("--expert_p0", default=0.5, type=float,
                         help="Expert 初始使用概率 (TD7 建议略高于 TD3, 因 checkpoint 会分流 RL 步数)")
     parser.add_argument("--expert_p_min", default=0.05, type=float,
                         help="Expert 最低使用概率")

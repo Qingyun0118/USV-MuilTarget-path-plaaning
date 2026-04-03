@@ -50,7 +50,7 @@ from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
 from hrl_config import device, SCALE, set_global_seed
 from buffers import ReplayBuffer, GoalConditionedReplayBuffer
 from reactive_controller import ReactiveController
-from expert_scheduler import DawoodExpertScheduler
+from expert_scheduler import ExpertScheduler
 from selector_agent import SelectorAgent
 from hrl_helpers import (
     get_selector_state, get_actuator_state,
@@ -132,7 +132,7 @@ def train_expert_hrl(args):
     expert = ReactiveController()
 
     # ---- 5. Dawood Expert Probability Scheduler ----
-    expert_scheduler = DawoodExpertScheduler(
+    expert_scheduler = ExpertScheduler(
         p0=args.expert_p0,
         p_min=args.expert_p_min,
         total_episodes=args.max_episodes,

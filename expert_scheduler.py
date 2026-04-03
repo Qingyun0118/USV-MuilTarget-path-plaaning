@@ -21,7 +21,7 @@ import numpy as np
 from collections import deque
 
 
-class DawoodExpertScheduler:
+class ExpertScheduler:
     """
     Dawood et al. (2023) 指数衰减 Expert 使用概率调度器
     """

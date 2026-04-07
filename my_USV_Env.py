@@ -14,6 +14,11 @@ from shapely.geometry import Polygon, LineString, Point, box as shapely_box
 from shapely.affinity import rotate, translate
 from enum import Enum 
 from USV import USV
+from colregs_module import (
+    EncounterType, NUM_ENCOUNTER_TYPES, OTHER_USV_OBS_DIM,
+    ShipDomain, compute_full_colregs_assessment,
+    compute_colregs_penalty, get_other_usv_obs_features, normalize_angle
+)
 
 # 障碍物形状枚举
 class ObstacleShape(Enum):
@@ -1405,6 +1410,8 @@ class MultiUsvEnv(MyUsvEnv):
                  usv_collision_buffer=0.5,
                  per_usv_max_steps=2000,
                  fixed_start_positions=None,
+                 colregs_k_C=5.0,
+                 starboard_threshold=-0.05,
                  **kwargs):
         self.num_usvs = int(max(1, num_usvs))
         self.min_start_separation = float(max(0.0, min_start_separation))
@@ -1419,7 +1426,24 @@ class MultiUsvEnv(MyUsvEnv):
 
         super().__init__(**kwargs)
 
+        # --- COLREGs Module ---
+        usv_bounding = max(self.usv_length, self.usv_width) / 2 * 1.5
+        self.ship_domain = ShipDomain(r_min=max(4.0, usv_bounding * 2))
+        self.colregs_matrix = {}          # (i,j) → colregs assessment dict
+        self.colregs_k_C = float(colregs_k_C)
+        self.starboard_threshold = float(starboard_threshold)
+        self._other_usv_obs_dim = OTHER_USV_OBS_DIM  # 16 per other USV
+
+        # Build observation space (extended with other-USV features)
         self.single_observation_space = self.observation_space
+        other_usvs_dim = max(0, self.num_usvs - 1) * self._other_usv_obs_dim
+        if other_usvs_dim > 0:
+            spaces = dict(self.single_observation_space.spaces)
+            spaces["o_other_usvs"] = Box(
+                low=-np.inf, high=np.inf,
+                shape=(other_usvs_dim,), dtype=np.float32)
+            self.single_observation_space = Dict(spaces)
+
         self.observation_space = Dict({
             f"usv_{i}": self.single_observation_space for i in range(self.num_usvs)
         })
@@ -1545,12 +1569,18 @@ class MultiUsvEnv(MyUsvEnv):
         readings = np.array(usv.sensor_readings, dtype=np.float32)
         o_detector = readings / usv.sensor_range
 
-        return {
+        obs = {
             "o_usv": o_usv,
             "targets": o_targets,
             "o_current": o_current,
             "o_detector": o_detector
         }
+
+        # 多 USV: 添加他船 COLREGs 观测
+        if self.num_usvs > 1:
+            obs["o_other_usvs"] = self._get_other_usvs_obs(usv_idx)
+
+        return obs
 
     def _get_observation(self):
         return {f"usv_{i}": self._get_single_observation(i) for i in range(self.num_usvs)}
@@ -1564,6 +1594,34 @@ class MultiUsvEnv(MyUsvEnv):
                     continue
                 dynamic_obstacles.append(other.polygon.buffer(self.usv_collision_buffer))
             usv.detect_obstacles(static_obstacles + dynamic_obstacles)
+
+    def _update_colregs_matrix(self):
+        """计算所有 USV 两两之间的 COLREGs 评估 (CRI / 会遇类型等)。"""
+        self.colregs_matrix = {}
+        for i in range(self.num_usvs):
+            for j in range(self.num_usvs):
+                if i == j:
+                    continue
+                self.colregs_matrix[(i, j)] = compute_full_colregs_assessment(
+                    self.usvs[i], self.usvs[j], self.ship_domain)
+
+    def _get_other_usvs_obs(self, usv_idx):
+        """为 usv_idx 构建所有他船的 COLREGs 观测特征向量。"""
+        features = []
+        own = self.usvs[usv_idx]
+        for j in range(self.num_usvs):
+            if j == usv_idx:
+                continue
+            ci = self.colregs_matrix.get((usv_idx, j))
+            if ci is None:
+                # 尚未计算 (不应发生), 用零向量填充
+                features.append(np.zeros(self._other_usv_obs_dim, dtype=np.float32))
+            else:
+                features.append(get_other_usv_obs_features(
+                    own, self.usvs[j], ci, x_max=X_MAX, y_max=Y_MAX))
+        if len(features) == 0:
+            return np.array([], dtype=np.float32)
+        return np.concatenate(features)
 
     def _update_global_target_status(self):
         for i, target in enumerate(self.targets):
@@ -1614,6 +1672,7 @@ class MultiUsvEnv(MyUsvEnv):
         self.target_status = np.zeros(self.num_targets, dtype=np.float32)
 
         self._update_sensors()
+        self._update_colregs_matrix()
         return self._get_observation()
 
     def step(self, actions, goal_positions_global, usv_active_mask=None):
@@ -1683,6 +1742,7 @@ class MultiUsvEnv(MyUsvEnv):
 
         self._update_global_target_status()
         self._update_sensors()
+        self._update_colregs_matrix()
         obstacle_collisions, usv_collision_pairs = self._check_collisions()
 
         crush = any(obstacle_collisions) or len(usv_collision_pairs) > 0
@@ -1719,6 +1779,223 @@ class MultiUsvEnv(MyUsvEnv):
         }
 
         return self._get_observation(), done, crush, truncated, info
+
+    # ================================================================
+    # ==================== CTDE (MARL) Interface =====================
+    # ================================================================
+
+    def get_global_state(self):
+        """
+        获取全局状态向量, 供 Centralized Critic 使用 (MAPPO / QMIX / MADDPG 等).
+
+        Layout:
+          - 所有 USV 状态: 7 × num_usvs
+          - 所有目标信息:  3 × num_targets
+          - 海流信息:      4
+          - 两两 CRI:      num_usvs × (num_usvs - 1)
+
+        Returns:
+            np.ndarray, shape = (7*N + 3*T + 4 + N*(N-1),)
+        """
+        parts = []
+
+        # 所有 USV 归一化状态
+        for usv in self.usvs:
+            parts.append(np.array([
+                usv.x / X_MAX, usv.y / Y_MAX,
+                usv.u / usv.max_u, usv.v / usv.max_v, usv.r / usv.max_r,
+                np.sin(usv.heading), np.cos(usv.heading)
+            ], dtype=np.float32))
+
+        # 所有目标信息
+        for i, target in enumerate(self.targets):
+            parts.append(np.array([
+                target.x / X_MAX, target.y / Y_MAX, self.target_status[i]
+            ], dtype=np.float32))
+
+        # 代表性海流信息 (取第一艘 USV 位置)
+        flow_u, flow_v = self.get_flow_velocity(
+            self.usvs[0].x, self.usvs[0].y, self.current_time)
+        flow_speed = np.sqrt(flow_u ** 2 + flow_v ** 2)
+        flow_angle = np.arctan2(flow_v, flow_u)
+        if flow_speed > 1e-8:
+            parts.append(np.array([
+                flow_u / flow_speed, flow_v / flow_speed,
+                np.sin(flow_angle), np.cos(flow_angle)
+            ], dtype=np.float32))
+        else:
+            parts.append(np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32))
+
+        # 两两 CRI 矩阵 (i→j, 含方向性)
+        for i in range(self.num_usvs):
+            for j in range(self.num_usvs):
+                if i != j:
+                    ci = self.colregs_matrix.get((i, j), {})
+                    parts.append(np.array([ci.get('cri', 0.0)], dtype=np.float32))
+
+        return np.concatenate(parts)
+
+    def get_global_state_dim(self):
+        """返回全局状态维度 (方便外部初始化 Critic)。"""
+        N, T = self.num_usvs, self.num_targets
+        return 7 * N + 3 * T + 4 + N * (N - 1)
+
+    def step_marl(self, actions, goal_positions_global, usv_active_mask=None):
+        """
+        CTDE 兼容的多 USV 步进, 返回 per-agent reward 和 per-agent done.
+
+        相比 step(), 新增:
+          1) per-agent reward (导航 + 避障 + COLREGs 合规)
+          2) per-agent done / truncated
+          3) info 中包含 COLREGs 详情
+
+        Args:
+            actions:               shape=(num_usvs, 2), 每艘 USV 的 (throttle, rudder)
+            goal_positions_global: list/array, 每艘 USV 当前子目标的全局坐标
+            usv_active_mask:       可选 bool 数组, False 表示该 USV 已完成
+
+        Returns:
+            obs_dict:       {"usv_0": {...}, ...}
+            rewards_dict:   {"usv_0": float, ...}
+            dones_dict:     {"usv_0": bool, ..., "__all__": bool}
+            truncated_dict: {"usv_0": bool, ..., "__all__": bool}
+            info:           dict (扩展了 colregs 和 reward 细节)
+        """
+        actions = np.asarray(actions, dtype=np.float32)
+        goal_positions_global = [
+            np.asarray(g, dtype=np.float32) for g in goal_positions_global]
+
+        # ---------- 1. 步前计算: 各 USV 到目标距离 ----------
+        prev_dists = np.zeros(self.num_usvs, dtype=np.float32)
+        for i in range(self.num_usvs):
+            prev_dists[i] = np.linalg.norm(
+                self.current_positions[i] - goal_positions_global[i])
+
+        # ---------- 2. 执行物理步进 (复用 step) ----------
+        obs, done, crush, truncated, info = self.step(
+            actions, goal_positions_global, usv_active_mask)
+
+        # ---------- 3. 步后: per-agent reward ----------
+        rewards_dict = {}
+        reward_details = {}
+
+        for i in range(self.num_usvs):
+            r_i, details_i = self._compute_per_agent_reward(
+                i, actions[i], goal_positions_global[i],
+                prev_dists[i], info, obs)
+            rewards_dict[f"usv_{i}"] = r_i
+            reward_details[i] = details_i
+
+        # ---------- 4. per-agent done / truncated ----------
+        dones_dict = {}
+        truncated_dict = {}
+
+        for i in range(self.num_usvs):
+            # 碰撞 → 全体结束
+            agent_done = crush
+            # 也可选: 该 USV 自身的障碍碰撞
+            # agent_done = info['obstacle_collisions'][i] or crush
+            agent_truncated = truncated
+
+            dones_dict[f"usv_{i}"] = agent_done
+            truncated_dict[f"usv_{i}"] = agent_truncated
+
+        dones_dict["__all__"] = done
+        truncated_dict["__all__"] = truncated
+
+        # ---------- 5. 扩展 info ----------
+        info["rewards_dict"] = rewards_dict
+        info["reward_details"] = reward_details
+        info["colregs_matrix"] = {
+            k: {kk: vv for kk, vv in v.items() if kk != 'encounter_type'}
+            | {'encounter_type': int(v['encounter_type'])}
+            for k, v in self.colregs_matrix.items()
+        }
+        info["global_state"] = self.get_global_state()
+
+        return obs, rewards_dict, dones_dict, truncated_dict, info
+
+    def _compute_per_agent_reward(self, usv_idx, action, goal_global,
+                                  prev_dist, info, obs):
+        """
+        计算单个 USV 的 CTDE reward.
+
+        Components:
+          r_approach:    趋近子目标奖励
+          r_reach:       到达子目标奖励
+          r_obs_col:     静态障碍物碰撞惩罚
+          r_usv_col:     USV 间碰撞惩罚
+          r_colregs:     COLREGs 合规惩罚 (R_C = k_C × u_CRI)
+          r_proximity:   传感器接近惩罚
+          r_boundary:    越界惩罚
+          r_step:        时间步惩罚
+
+        Returns:
+            total_reward: float
+            details: dict 各分项
+        """
+        # --- 趋近奖励 ---
+        new_pos = info['usv_positions'][usv_idx]
+        new_dist = np.linalg.norm(new_pos - goal_global)
+        r_approach = (prev_dist - new_dist) * 10.0
+
+        # --- 到达奖励 ---
+        r_reach = 5.0 if info['reached_goals'][usv_idx] else 0.0
+
+        # --- 静态障碍碰撞 ---
+        r_obs_col = -10.0 if info['obstacle_collisions'][usv_idx] else 0.0
+
+        # --- USV 间碰撞 ---
+        usv_collided = any(
+            usv_idx in pair for pair in info['usv_collision_pairs'])
+        r_usv_col = -10.0 if usv_collided else 0.0
+
+        # --- COLREGs 合规惩罚 ---
+        r_colregs = 0.0
+        rudder_action = float(action[1])
+        for j in range(self.num_usvs):
+            if j == usv_idx:
+                continue
+            ci = self.colregs_matrix.get((usv_idx, j))
+            if ci is None:
+                continue
+            r_colregs += compute_colregs_penalty(
+                ci['encounter_type'], ci['cri'], rudder_action,
+                k_C=self.colregs_k_C,
+                starboard_threshold=self.starboard_threshold)
+
+        # --- 传感器近距惩罚 ---
+        obs_i = obs[f'usv_{usv_idx}']
+        min_sensor = float(np.min(obs_i['o_detector']))
+        r_proximity = -max(0.0, 0.3 - min_sensor) * 5.0
+
+        # --- 越界惩罚 ---
+        pos_norm = info['usv_pos_raw_norm'][usv_idx]
+        r_boundary = 0.0
+        for coord in pos_norm:
+            if coord < 0.0:
+                r_boundary -= abs(coord) * 10.0
+            elif coord > 1.0:
+                r_boundary -= (coord - 1.0) * 10.0
+
+        # --- 时间步惩罚 ---
+        r_step = -0.01
+
+        total = (r_approach + r_reach + r_obs_col + r_usv_col +
+                 r_colregs + r_proximity + r_boundary + r_step)
+
+        details = {
+            'approach': r_approach,
+            'reach': r_reach,
+            'obs_collision': r_obs_col,
+            'usv_collision': r_usv_col,
+            'colregs': r_colregs,
+            'proximity': r_proximity,
+            'boundary': r_boundary,
+            'step': r_step,
+            'total': total,
+        }
+        return total, details
 
 
 # 兼容性：保留旧的全局变量定义

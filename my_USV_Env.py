@@ -1084,13 +1084,11 @@ class MyUsvEnv():
         
         try:
             if self.csv_file is None:
-                file_exists = os.path.isfile(csv_file)
-                self.csv_file = open(csv_file, 'a', newline='')
+                self.csv_file = open(csv_file, 'w', newline='')
                 self.csv_writer = csv.writer(self.csv_file)
-                if not file_exists or os.stat(csv_file).st_size == 0:
-                    self.csv_writer.writerow(['x', 'y', 'heading'])
-                    self.csv_writer.writerow([self.start_pos[0], self.start_pos[1], self.usv.heading])
-                    self.csv_file.flush()
+                self.csv_writer.writerow(['x', 'y', 'heading'])
+                self.csv_writer.writerow([self.start_pos[0], self.start_pos[1], self.usv.heading])
+                self.csv_file.flush()
             
             self.csv_writer.writerow([point[0], point[1], heading])
             self.csv_file.flush()
@@ -1996,6 +1994,426 @@ class MultiUsvEnv(MyUsvEnv):
             'total': total,
         }
         return total, details
+
+    # ================================================================
+    # ==================== 轨迹记录与绘制 ============================
+    # ================================================================
+
+    def record_points(self, usv_idx=None, csv_prefix="multi_usv_path",
+                      output_dir="."):
+        """记录各USV当前位置和航向到独立的CSV文件。
+
+        每个USV对应一个CSV: ``{output_dir}/{csv_prefix}_usv_{i}.csv``
+
+        Args:
+            usv_idx: 记录指定USV (int) 或 None 表示记录全部
+            csv_prefix: 文件名前缀
+            output_dir: 输出目录
+        """
+        if not hasattr(self, '_multi_csv_files'):
+            self._multi_csv_files = {}    # usv_idx → file handle
+            self._multi_csv_writers = {}  # usv_idx → csv.writer
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        indices = range(self.num_usvs) if usv_idx is None else [usv_idx]
+
+        for i in indices:
+            usv = self.usvs[i]
+            try:
+                if i not in self._multi_csv_files:
+                    fpath = os.path.join(output_dir,
+                                         f"{csv_prefix}_usv_{i}.csv")
+                    fh = open(fpath, 'w', newline='')
+                    writer = csv.writer(fh)
+                    writer.writerow(['x', 'y', 'heading'])
+                    writer.writerow([self.start_positions[i][0],
+                                     self.start_positions[i][1],
+                                     usv.heading])
+                    fh.flush()
+                    self._multi_csv_files[i] = fh
+                    self._multi_csv_writers[i] = writer
+
+                self._multi_csv_writers[i].writerow(
+                    [usv.x, usv.y, usv.heading])
+                self._multi_csv_files[i].flush()
+            except Exception as e:
+                print(f"Error recording point for USV {i}: {e}")
+                if i in self._multi_csv_files:
+                    self._multi_csv_files[i].close()
+                    del self._multi_csv_files[i]
+                    del self._multi_csv_writers[i]
+
+    def close_writers(self):
+        """关闭所有USV的CSV文件写入器。"""
+        if not hasattr(self, '_multi_csv_files'):
+            return
+        for i, fh in list(self._multi_csv_files.items()):
+            fh.close()
+        self._multi_csv_files.clear()
+        self._multi_csv_writers.clear()
+
+    def draw_path(self, csv_prefix="multi_usv_path", output_dir=".",
+                  ifshow=True, ifsave=False, savePath=None,
+                  show_usv_shape=False, usv_interval=50):
+        """绘制多USV路径（所有USV共享同一张图）。
+
+        Args:
+            csv_prefix: 与 record_points 中一致的文件名前缀
+            output_dir: CSV 所在目录
+            ifshow: 是否显示图像
+            ifsave: 是否保存图像
+            savePath: 保存目录（默认使用 output_dir）
+            show_usv_shape: 是否沿轨迹绘制USV形状
+            usv_interval: USV形状的间隔步数
+        """
+        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
+                             'mathtext.fontset': 'cm'})
+        fig, ax = plt.subplots(figsize=(7, 7))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+
+        # 海流场
+        step = 3
+        Xs, Ys = self.X[::step, ::step], self.Y[::step, ::step]
+        Us = self.U[:100, :100].T[::step, ::step]
+        Vs = self.V[:100, :100].T[::step, ::step]
+        ax.quiver(Xs, Ys, Us, Vs, color='#7FB3D8', alpha=0.4,
+                  width=0.002, scale=25, zorder=1)
+
+        # 障碍物 & 目标
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
+        for i, target in enumerate(self.targets):
+            target.show_target(ax, i)
+
+        usv_colors = ['#D62728', '#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD',
+                       '#8C564B', '#E377C2', '#17BECF', '#BCBD22', '#7F7F7F']
+        obs_geoms = [obs.geometry for obs in self.obstacles]
+        paths_drawn = 0
+
+        for idx in range(self.num_usvs):
+            csv_file = os.path.join(output_dir,
+                                    f"{csv_prefix}_usv_{idx}.csv")
+            if not os.path.exists(csv_file):
+                print(f"Path file {csv_file} does not exist")
+                continue
+
+            x_pts, y_pts, headings = [], [], []
+            try:
+                with open(csv_file, 'r') as f:
+                    reader = csv.reader(f)
+                    try:
+                        header = next(reader)
+                        has_heading = (len(header) >= 3
+                                       and 'heading' in header[2].lower())
+                    except StopIteration:
+                        continue
+                    for row in reader:
+                        if len(row) >= 2 and row[0] and row[1]:
+                            try:
+                                x, y = float(row[0]), float(row[1])
+                                if X_MIN <= x <= X_MAX and Y_MIN <= y <= Y_MAX:
+                                    x_pts.append(x)
+                                    y_pts.append(y)
+                                    headings.append(
+                                        float(row[2])
+                                        if len(row) >= 3 and row[2] else 0.0)
+                            except ValueError:
+                                continue
+            except Exception as e:
+                print(f"Error reading {csv_file}: {e}")
+                continue
+
+            if len(x_pts) < 2:
+                continue
+            if not has_heading or all(h == 0.0 for h in headings):
+                for i in range(len(x_pts)):
+                    if i < len(x_pts) - 1:
+                        headings[i] = np.arctan2(
+                            y_pts[i + 1] - y_pts[i],
+                            x_pts[i + 1] - x_pts[i])
+                    else:
+                        headings[i] = headings[i - 1] if i > 0 else 0.0
+
+            color = usv_colors[idx % len(usv_colors)]
+            label = f'USV {idx}'
+
+            # 路径线
+            ax.plot(x_pts, y_pts, color=color, linewidth=1.2,
+                    alpha=0.85, zorder=5, label=label)
+
+            # USV形状标记
+            if show_usv_shape:
+                for i in range(0, len(x_pts), usv_interval):
+                    usv_m = USV(x_pts[i], y_pts[i], heading=headings[i],
+                                length=self.usv_length * 0.6,
+                                width=self.usv_width * 0.6)
+                    verts = usv_m.get_vertices()
+                    ax.add_patch(MplPolygon(verts, closed=True,
+                                            facecolor=color, edgecolor='k',
+                                            alpha=0.5, linewidth=0.4,
+                                            zorder=6))
+
+            # 起点
+            start_usv = USV(x_pts[0], y_pts[0], heading=headings[0],
+                            length=self.usv_length, width=self.usv_width)
+            start_usv.detect_obstacles(obs_geoms)
+            start_usv.show_usv(ax, color=color, alpha=0.8)
+            ax.annotate(f'S{idx}', (x_pts[0], y_pts[0]),
+                        fontsize=8, fontweight='bold', color=color,
+                        textcoords="offset points", xytext=(5, 5),
+                        zorder=10)
+
+            # 终点
+            end_usv = USV(x_pts[-1], y_pts[-1], heading=headings[-1],
+                          length=self.usv_length, width=self.usv_width)
+            end_usv.detect_obstacles(obs_geoms)
+            end_usv.show_usv(ax, color=color, alpha=0.5)
+            ax.annotate(f'E{idx}', (x_pts[-1], y_pts[-1]),
+                        fontsize=8, fontweight='bold', color=color,
+                        textcoords="offset points", xytext=(5, -10),
+                        zorder=10)
+
+            paths_drawn += 1
+
+        if paths_drawn == 0:
+            print("No valid USV paths to draw")
+            plt.close(fig)
+            return
+
+        # 图例
+        legend_elements = [
+            Line2D([0], [0], color=usv_colors[i % len(usv_colors)],
+                   linewidth=1.5, label=f'USV {i}')
+            for i in range(min(paths_drawn, self.num_usvs))
+        ] + [
+            Line2D([0], [0], marker='*', color='#2CA02C', markersize=8,
+                   label='Target', linewidth=0),
+            Patch(facecolor='#A0A0A0', edgecolor='#404040', label='Obstacle'),
+            Patch(facecolor='none', edgecolor='#D62728',
+                  linestyle='--', label='Danger zone'),
+            Line2D([0], [0], color='#7FB3D8', alpha=0.5,
+                   linewidth=1.5, label='Current'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper center',
+                  bbox_to_anchor=(0.5, -0.04), ncol=4,
+                  fontsize=9, frameon=True, edgecolor='gray',
+                  framealpha=1.0, handletextpad=0.4, columnspacing=1.0)
+
+        ax.set_title(f'Multi-USV Path ({self.num_usvs} USVs, '
+                     f'{self.num_targets}T, {self.num_obstacles}O, '
+                     f'seed={self.seed})', fontsize=11, pad=8)
+        ax.set_xlabel('$x$ / m')
+        ax.set_ylabel('$y$ / m')
+        ax.grid(True, linewidth=0.3, alpha=0.4)
+        ax.set_xlim(X_MIN, X_MAX)
+        ax.set_ylim(Y_MIN, Y_MAX)
+        ax.set_aspect('equal')
+        ax.tick_params(direction='in', length=3)
+        plt.tight_layout(rect=[0, 0.05, 1, 1])
+
+        if ifsave:
+            save_dir = savePath or output_dir
+            os.makedirs(save_dir, exist_ok=True)
+            save_file = os.path.join(
+                save_dir,
+                f"{csv_prefix}_{self.num_usvs}usv_path.png")
+            plt.savefig(save_file, dpi=300, bbox_inches='tight')
+            print(f"Image saved to {save_file}")
+        if ifshow:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    def animate(self, csv_prefix="multi_usv_path", output_dir=".",
+                duration=20, interval=100, save_path=None,
+                trail_length=0, speed=5):
+        """多USV轨迹动画回放（时变海流 + 多艇同步运动）。
+
+        每个USV的CSV文件命名: ``{output_dir}/{csv_prefix}_usv_{i}.csv``
+
+        Args:
+            csv_prefix:   CSV 文件名前缀 (与 record_points 一致)
+            output_dir:   CSV 所在目录
+            duration:     仅海流模式下的动画时长
+            interval:     帧间隔 (ms)
+            save_path:    GIF 保存路径, None 则直接显示
+            trail_length: 尾迹保留长度 (0 = 全部)
+            speed:        每帧前进的点数 (加速回放)
+        """
+        from matplotlib.animation import FuncAnimation
+
+        if self.current_type != "generated":
+            print("警告：仅在 'generated' 模式下支持时变海流动画")
+            return
+
+        usv_colors = ['#D62728', '#1F77B4', '#2CA02C', '#FF7F0E', '#9467BD',
+                       '#8C564B', '#E377C2', '#17BECF', '#BCBD22', '#7F7F7F']
+
+        # ---------- 读取各 USV 的 CSV ----------
+        all_pts = {}  # idx -> (x_pts, y_pts, headings)
+        for idx in range(self.num_usvs):
+            csv_file = os.path.join(output_dir,
+                                    f"{csv_prefix}_usv_{idx}.csv")
+            if not os.path.exists(csv_file):
+                print(f"CSV 文件不存在: {csv_file}")
+                continue
+            x_pts, y_pts, headings = [], [], []
+            with open(csv_file, 'r') as f:
+                reader = csv.reader(f)
+                try:
+                    header = next(reader)
+                    has_heading = (len(header) >= 3
+                                   and 'heading' in header[2].lower())
+                except StopIteration:
+                    continue
+                for row in reader:
+                    if len(row) >= 2 and row[0] and row[1]:
+                        try:
+                            x, y = float(row[0]), float(row[1])
+                            x_pts.append(x)
+                            y_pts.append(y)
+                            headings.append(
+                                float(row[2])
+                                if len(row) >= 3 and row[2] else 0.0)
+                        except ValueError:
+                            continue
+            if len(x_pts) < 2:
+                continue
+            if not has_heading or all(h == 0.0 for h in headings):
+                for i in range(len(x_pts)):
+                    if i < len(x_pts) - 1:
+                        headings[i] = np.arctan2(
+                            y_pts[i + 1] - y_pts[i],
+                            x_pts[i + 1] - x_pts[i])
+                    else:
+                        headings[i] = headings[i - 1] if i > 0 else 0.0
+            all_pts[idx] = (x_pts, y_pts, headings)
+
+        has_path = len(all_pts) > 0
+        if not has_path:
+            print("未找到任何有效的 USV 轨迹 CSV, 仅播放海流")
+
+        # ---------- 画布 ----------
+        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
+                             'mathtext.fontset': 'cm'})
+        fig, ax = plt.subplots(figsize=(7, 7))
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+
+        for obs in self.obstacles:
+            obs.show_obstacle(ax)
+        for i, target in enumerate(self.targets):
+            target.show_target(ax, i)
+
+        # 起始位置标注
+        for idx in all_pts:
+            x0, y0 = all_pts[idx][0][0], all_pts[idx][1][0]
+            color = usv_colors[idx % len(usv_colors)]
+            ax.plot(x0, y0, '*', color=color, markersize=10, zorder=8)
+            ax.annotate(f'S{idx}', (x0, y0), fontsize=7,
+                        fontweight='bold', color=color,
+                        textcoords="offset points", xytext=(4, 4),
+                        zorder=10)
+
+        # 海流 Quiver
+        qstep = 3
+        Xs, Ys = self.X[::qstep, ::qstep], self.Y[::qstep, ::qstep]
+        U0, V0 = self._generate_current_data(t=0)
+        Us0 = U0[:100, :100].T[::qstep, ::qstep]
+        Vs0 = V0[:100, :100].T[::qstep, ::qstep]
+        quiver = ax.quiver(Xs, Ys, Us0, Vs0,
+                           width=0.002, scale=25, color='#7FB3D8',
+                           alpha=0.5, zorder=1)
+
+        # 轨迹线 & USV 动态元素
+        trail_lines = {}
+        obs_geoms = [ob.geometry for ob in self.obstacles]
+        if has_path:
+            for idx in all_pts:
+                color = usv_colors[idx % len(usv_colors)]
+                line, = ax.plot([], [], color=color, linewidth=1.2,
+                                alpha=0.85, zorder=5)
+                trail_lines[idx] = line
+
+        title = ax.set_title('', fontsize=11, pad=8)
+        ax.set_xlabel('$x$ / m')
+        ax.set_ylabel('$y$ / m')
+        ax.set_xlim(X_MIN, X_MAX)
+        ax.set_ylim(Y_MIN, Y_MAX)
+        ax.set_aspect('equal')
+        ax.grid(True, linewidth=0.3, alpha=0.4)
+        ax.tick_params(direction='in', length=3)
+
+        # ---------- 帧数 ----------
+        if has_path:
+            max_len = max(len(pts[0]) for pts in all_pts.values())
+            total_frames = (max_len - 1) // speed + 1
+        else:
+            total_frames = int(duration / self.dt)
+
+        _prev_artists = []
+
+        def _update(frame):
+            nonlocal _prev_artists
+
+            t = frame * speed * self.dt if has_path else frame * self.dt
+            U, V = self._generate_current_data(t=t)
+            Us = U[:100, :100].T[::qstep, ::qstep]
+            Vs = V[:100, :100].T[::qstep, ::qstep]
+            quiver.set_UVC(Us, Vs)
+
+            if has_path:
+                for a in _prev_artists:
+                    a.remove()
+                _prev_artists.clear()
+
+                for idx, (xp, yp, hp) in all_pts.items():
+                    pidx = min(frame * speed, len(xp) - 1)
+                    s = (max(0, pidx - trail_length)
+                         if trail_length > 0 else 0)
+                    trail_lines[idx].set_data(xp[s:pidx + 1],
+                                              yp[s:pidx + 1])
+
+                    n_patches = len(ax.patches)
+                    n_lines = len(ax.lines)
+
+                    color = usv_colors[idx % len(usv_colors)]
+                    usv_now = USV(xp[pidx], yp[pidx],
+                                  heading=hp[pidx],
+                                  length=self.usv_length,
+                                  width=self.usv_width)
+                    usv_now.detect_obstacles(obs_geoms)
+                    usv_now.show_usv(ax, color=color, alpha=0.85)
+
+                    _prev_artists.extend(ax.patches[n_patches:])
+                    _prev_artists.extend(ax.lines[n_lines:])
+
+                ref_idx = next(iter(all_pts))
+                ref_pidx = min(frame * speed,
+                               len(all_pts[ref_idx][0]) - 1)
+                title.set_text(
+                    f'Step {ref_pidx}  $t={t:.1f}$  '
+                    f'({len(all_pts)} USVs)')
+            else:
+                title.set_text(
+                    f'Time-varying currents ($t={t:.2f}$)')
+
+            return quiver,
+
+        anim = FuncAnimation(fig, _update, frames=total_frames,
+                             interval=interval, blit=False, repeat=False)
+
+        if save_path is not None:
+            try:
+                anim.save(save_path, writer='pillow')
+                print(f"动画已保存至 {save_path}  ({total_frames} 帧)")
+            except Exception as e:
+                print(f"保存动画失败: {e}")
+            plt.close()
+        else:
+            plt.show()
 
 
 # 兼容性：保留旧的全局变量定义

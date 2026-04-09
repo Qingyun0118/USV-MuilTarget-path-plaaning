@@ -269,8 +269,8 @@ def train_expert_hrl(args):
         # ---- Expert 概率 (Dawood 指数衰减) & 探索噪声 ----
         effective_ep = max(0, episode - args.fixed_env_episodes)
         expert_prob = expert_scheduler.get_expert_probability(effective_ep)
-        exploration_noise = args.exploration_noise * max(
-            args.noise_min_ratio, 1.0 - episode / args.noise_decay_episodes)
+        # TD7 参考实现使用恒定探索噪声 (确定性策略需要持续探索)
+        exploration_noise = args.exploration_noise
 
         # ---- Episode 级跟踪变量 ----
         usv_pos = get_usv_pos(obs_dict)
@@ -461,8 +461,12 @@ def train_expert_hrl(args):
         # 数据收集阶段不训练, episode 结束后批量训练所有累积 timesteps
         bc_w = args.bc_weight * expert_prob
         if len(actuator_buffer) >= args.warmup_steps:
+            # 使用成功数 (0/1) 而非原始奖励作为 checkpoint 评估指标
+            # 原因: HRL 多目标环境中 episode return 方差极大,
+            #       随机障碍物/ 碰撞惩罚导致 min_return 过于敏感
+            ep_metric = float(ep_success) * 10.0  # 成功=10, 失败=0
             actuator.maybe_train_and_checkpoint(
-                total_steps, episode_actuator_reward,
+                total_steps, ep_metric,
                 actuator_buffer, args.actuator_batch_size,
                 bc_weight=bc_w
             )
@@ -974,8 +978,8 @@ if __name__ == "__main__":
                         help="总训练 episode 数")
     parser.add_argument("--max_steps_per_target", default=1000, type=int,
                         help="导航到单个目标的最大步数")
-    parser.add_argument("--warmup_steps", default=1000, type=int,
-                        help="Actuator 开始训练前的最小 buffer 数据量")
+    parser.add_argument("--warmup_steps", default=5000, type=int,
+                        help="Actuator 开始训练前的最小 buffer 数据量 (参考实现: 25000)")
     parser.add_argument("--fixed_env_episodes", default=0, type=int,
                         help="前 N 个 episode 使用固定种子环境")
 
@@ -1035,7 +1039,7 @@ if __name__ == "__main__":
                         help="成功率统计滑动窗口大小")
 
     # --- 行为克隆参数 ---
-    parser.add_argument("--bc_weight", default=3.0, type=float,
+    parser.add_argument("--bc_weight", default=1.0, type=float,
                         help="行为克隆损失基础权重 (实际权重 = bc_weight * expert_prob)")
 
     # --- 输出参数 ---

@@ -458,9 +458,11 @@ class TD7ActuatorAgent:
         self.min_return = 1e8
         self.best_min_return = -1e8
 
-        # Checkpoint 时机参数 (对齐参考实现)
-        self.steps_before_checkpointing = 75000
-        self.max_eps_when_checkpointing = 20
+        # Checkpoint 时机参数
+        # 注: steps_before_checkpointing 适配 HRL 场景
+        #   参考实现: 750k / 5M = 15%, 此处 50k / ~1.3M ≈ 4% (HRL 环境更简单)
+        self.steps_before_checkpointing = 50000
+        self.max_eps_when_checkpointing = 10
         self.reset_weight = 0.9
 
         # ---- Value clipping (跟踪 Q 值范围, 防止 target Q 爆炸) ----

@@ -4,13 +4,15 @@ TD3 (Twin Delayed DDPG) Actuator Agent — Goal-Conditioned
 直接控制 USV 的油门和舵角, 目标为到达 Selector 指定的目标点。
 (State, RelativeGoal) → (Throttle, Rudder)
 
-网络结构与 SAC 版对齐:
-1. SensorCNN: Flatten+FC 保留空间分辨率 (无 AdaptiveAvgPool)
-2. 3 层隐藏层 + LayerNorm + 输入归一化
+对齐 Fujimoto et al. (2018) 原始 TD3 实现:
+1. SensorCNN: Flatten+FC 保留空间分辨率 (领域定制)
+2. 2 层隐藏层 (256), ReLU 激活, 无 LayerNorm
 3. Critic Q1/Q2 拥有独立 SensorCNN
-4. 早期目标融合
+4. 早期目标融合 (Goal-Conditioned)
+5. 无梯度裁剪, 使用 copy.deepcopy 初始化 target 网络
 """
 
+import copy
 import numpy as np
 import torch
 import torch.nn as nn
@@ -63,13 +65,10 @@ def _split_state(state):
 
 class Actor(nn.Module):
     """
-    TD3 Actor (Goal-Conditioned) — 改进版
+    TD3 Actor (Goal-Conditioned) — 对齐原始 TD3
 
-    改进 (与 SAC 版对齐):
-    1. SensorCNN 处理传感器数据, 保留空间分辨率
-    2. 早期目标融合: goal 在第一层就参与计算
-    3. 3 层隐藏层 + LayerNorm, 增强表达能力和训练稳定性
-    4. 输入特征 LayerNorm 归一化
+    结构: SensorCNN + 2 层隐藏层 (256), 无 LayerNorm
+    对齐 Fujimoto et al. (2018): 简洁的 2 层 MLP + ReLU
 
     (State, Goal) → Action
     """
@@ -86,52 +85,28 @@ class Actor(nn.Module):
         # 输入维度: non_sensor(11) + cnn_out(64) + goal(2) = 77
         fused_dim = non_sensor_dim + cnn_output_dim + goal_dim
 
-        # 输入归一化
-        self.input_ln = nn.LayerNorm(fused_dim)
-
-        # 3 层隐藏层 + LayerNorm
+        # 2 层隐藏层 (对齐原始 TD3, 无 LayerNorm)
         self.fc1 = nn.Linear(fused_dim, hidden_dim)
-        self.ln1 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2 = nn.LayerNorm(hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln3 = nn.LayerNorm(hidden_dim)
-
-        # 输出头
         self.fc_out = nn.Linear(hidden_dim, action_dim)
-
-        # 权重初始化
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight, gain=1)
-            torch.nn.init.constant_(m.bias, 0)
 
     def forward(self, state, goal):
         non_sensor, sensor = _split_state(state)
         cnn_out = self.sensor_cnn(sensor)
 
-        # 早期目标融合: goal 从第一层就参与
         x = torch.cat([non_sensor, cnn_out, goal], dim=1)
-        x = self.input_ln(x)
-
-        x = F.relu(self.ln1(self.fc1(x)))
-        x = F.relu(self.ln2(self.fc2(x)))
-        x = F.relu(self.ln3(self.fc3(x)))
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
 
         return self.max_action * torch.tanh(self.fc_out(x))
 
 
 class Critic(nn.Module):
     """
-    TD3 Twin Critic (Goal-Conditioned) — 改进版
+    TD3 Twin Critic (Goal-Conditioned) — 对齐原始 TD3
 
-    改进 (与 SAC 版对齐):
-    1. Q1/Q2 各自拥有独立的 SensorCNN, 确保 Twin Q 真正独立
-    2. 3 层隐藏层 + LayerNorm
-    3. 输入归一化
+    结构: 独立 SensorCNN + 2 层隐藏层 (256), 无 LayerNorm
+    关键: Critic 不使用 LayerNorm, 保留 Q 值的原始尺度信息
 
     (State, Goal, Action) → Q1, Q2
     """
@@ -148,42 +123,28 @@ class Critic(nn.Module):
         # 输入维度: non_sensor(11) + cnn_out(64) + goal(2) + action(2) = 79
         fused_dim = non_sensor_dim + cnn_output_dim + goal_dim + action_dim
 
-        # Q1 网络
-        self.ln1_input = nn.LayerNorm(fused_dim)
+        # Q1 网络 (2 层, 无 LayerNorm)
         self.l1 = nn.Linear(fused_dim, hidden_dim)
-        self.ln1_1 = nn.LayerNorm(hidden_dim)
         self.l2 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln1_2 = nn.LayerNorm(hidden_dim)
-        self.l3 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln1_3 = nn.LayerNorm(hidden_dim)
         self.l3_out = nn.Linear(hidden_dim, 1)
 
-        # Q2 网络
-        self.ln2_input = nn.LayerNorm(fused_dim)
+        # Q2 网络 (2 层, 无 LayerNorm)
         self.l4 = nn.Linear(fused_dim, hidden_dim)
-        self.ln2_1 = nn.LayerNorm(hidden_dim)
         self.l5 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2_2 = nn.LayerNorm(hidden_dim)
-        self.l6 = nn.Linear(hidden_dim, hidden_dim)
-        self.ln2_3 = nn.LayerNorm(hidden_dim)
         self.l6_out = nn.Linear(hidden_dim, 1)
 
     def _q1_forward(self, non_sensor, sensor, goal, action):
         cnn_out = self.sensor_cnn1(sensor)
         x = torch.cat([non_sensor, cnn_out, goal, action], dim=1)
-        x = self.ln1_input(x)
-        x = F.relu(self.ln1_1(self.l1(x)))
-        x = F.relu(self.ln1_2(self.l2(x)))
-        x = F.relu(self.ln1_3(self.l3(x)))
+        x = F.relu(self.l1(x))
+        x = F.relu(self.l2(x))
         return self.l3_out(x)
 
     def _q2_forward(self, non_sensor, sensor, goal, action):
         cnn_out = self.sensor_cnn2(sensor)
         x = torch.cat([non_sensor, cnn_out, goal, action], dim=1)
-        x = self.ln2_input(x)
-        x = F.relu(self.ln2_1(self.l4(x)))
-        x = F.relu(self.ln2_2(self.l5(x)))
-        x = F.relu(self.ln2_3(self.l6(x)))
+        x = F.relu(self.l4(x))
+        x = F.relu(self.l5(x))
         return self.l6_out(x)
 
     def forward(self, state, goal, action):
@@ -213,13 +174,11 @@ class TD3ActuatorAgent:
                  lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
-        self.actor_target = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
-        self.actor_target.load_state_dict(self.actor.state_dict())
+        self.actor_target = copy.deepcopy(self.actor)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
 
         self.critic = Critic(state_dim, goal_dim, action_dim).to(device)
-        self.critic_target = Critic(state_dim, goal_dim, action_dim).to(device)
-        self.critic_target.load_state_dict(self.critic.state_dict())
+        self.critic_target = copy.deepcopy(self.critic)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=lr_critic)
 
         self.max_action = max_action
@@ -299,7 +258,6 @@ class TD3ActuatorAgent:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # ---- Delayed Actor Update (with BC Loss) ----
@@ -336,7 +294,6 @@ class TD3ActuatorAgent:
 
             self.actor_optimizer.zero_grad()
             total_actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_optimizer.step()
 
             # Soft update target networks

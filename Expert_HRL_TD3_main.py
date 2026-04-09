@@ -114,7 +114,12 @@ def train_expert_hrl(args):
 
     # ---- 3. Replay Buffers ----
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
-    actuator_buffer = GoalConditionedReplayBuffer(args.actuator_buffer_size)
+    actuator_buffer = GoalConditionedReplayBuffer(
+        args.actuator_buffer_size,
+        alpha=args.per_alpha,
+        beta0=args.per_beta0,
+        expert_bonus=args.per_expert_bonus
+    )
 
     # ---- 4. Expert Controller ----
     expert = ReactiveController()
@@ -323,10 +328,10 @@ def train_expert_hrl(args):
                     is_expert=use_expert
                 )
 
-                # ---- 碰撞回溯惩罚 ----
+                # ---- 碰撞回溯惩罚 (可选, 默认关闭) ----
                 # 碰撞不仅是最后一步的错, 之前接近障碍物的步骤也有责任
-                # 向 buffer 末尾的最近 N 步追加额外负奖励的 transition
-                if crush:
+                # 注意: 与 PER 组合使用时可能导致 Critic 过度偏向极端负样本
+                if crush and getattr(args, 'crash_backtrack', False):
                     backtrack_steps = min(nav_steps, 10)
                     actuator_buffer.update_last_n_rewards(
                         backtrack_steps + 1,
@@ -937,8 +942,8 @@ if __name__ == "__main__":
                         help="TD3 延迟策略更新频率")
     parser.add_argument("--actuator_batch_size", default=256, type=int)
     parser.add_argument("--actuator_buffer_size", default=1000000, type=int)
-    parser.add_argument("--actuator_train_iters", default=2, type=int,
-                        help="每步 Actuator 训练迭代次数")
+    parser.add_argument("--actuator_train_iters", default=1, type=int,
+                        help="每步 Actuator 训练迭代次数 (对齐原始 TD3: 1次/步)")
 
     # --- Selector 参数 ---
     parser.add_argument("--selector_batch_size", default=64, type=int)
@@ -950,12 +955,12 @@ if __name__ == "__main__":
                         help="Selector 总距离惩罚系数 (越大越鼓励短路径)")
 
     # --- 探索参数 ---
-    parser.add_argument("--exploration_noise", default=0.3, type=float,
-                        help="RL 策略探索噪声初始标准差")
+    parser.add_argument("--exploration_noise", default=0.1, type=float,
+                        help="RL 策略探索噪声标准差 (对齐原始 TD3 默认 0.1)")
     parser.add_argument("--noise_decay_episodes", default=800, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
-    parser.add_argument("--noise_min_ratio", default=0.15, type=float,
-                        help="探索噪声最低比例 (最终噪声 = exploration_noise * noise_min_ratio)")
+    parser.add_argument("--noise_min_ratio", default=1.0, type=float,
+                        help="探索噪声最低比例 (1.0=不衰减, 对齐原始 TD3)")
 
     # --- Expert 概率衰减参数 (Dawood et al. 指数衰减) ---
     parser.add_argument("--expert_p0", default=0.5, type=float,
@@ -968,6 +973,18 @@ if __name__ == "__main__":
     # --- 行为克隆参数 (BC Loss) ---
     parser.add_argument("--bc_weight", default=3.0, type=float,
                         help="行为克隆损失基础权重 (实际权重 = bc_weight * expert_prob)")
+
+    # --- PER 参数 ---
+    parser.add_argument("--per_alpha", default=0.3, type=float,
+                        help="PER 优先级指数 (0=均匀采样, 1=完全优先)")
+    parser.add_argument("--per_beta0", default=0.4, type=float,
+                        help="PER IS 权重初始 β")
+    parser.add_argument("--per_expert_bonus", default=0.0, type=float,
+                        help="Expert 数据优先级加成 (0=无加成, 避免采样偏向专家数据)")
+
+    # --- 碰撞回溯 ---
+    parser.add_argument("--crash_backtrack", action="store_true", default=False,
+                        help="启用碰撞回溯惩罚 (与 PER 组合可能导致训练不稳定, 默认关闭)")
 
     # --- 输出参数 ---
     parser.add_argument("--output_dir", default="expert_hrl_td3_output", type=str)

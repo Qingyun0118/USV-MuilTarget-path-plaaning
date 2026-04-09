@@ -48,6 +48,111 @@ from hrl_config import device
 # 状态维度布局: [o_usv(7) | o_detector(15) | o_current(4)] = 26
 SENSOR_START = 7   # o_detector 在 state 中的起始索引
 SENSOR_END = 22    # o_detector 在 state 中的结束索引 (不含)
+
+
+# ============================================================================
+# ========================= LAP Replay Buffer ================================
+# ============================================================================
+
+class GoalConditionedLAPBuffer:
+    """
+    LAP-style Replay Buffer for TD7 (Goal-Conditioned)
+
+    严格对齐 Fujimoto et al. 2023 参考实现 (buffer.LAP):
+    - 使用 cumsum + searchsorted 按优先级采样 (无 SumTree)
+    - 不使用 IS 权重修正 (LAP 不需要)
+    - 不使用 expert_bonus (避免扭曲优先级分布)
+    - 新样本以 max_priority 插入, 保证至少被采样一次
+    - reset_max_priority 在 target update 时调用, 防止优先级爆炸
+    """
+
+    def __init__(self, state_dim, goal_dim, action_dim,
+                 max_size=1_000_000, batch_size=256):
+        max_size = int(max_size)
+        self.max_size = max_size
+        self.ptr = 0
+        self.size = 0
+        self.batch_size = batch_size
+
+        self.state = np.zeros((max_size, state_dim))
+        self.action = np.zeros((max_size, action_dim))
+        self.next_state = np.zeros((max_size, state_dim))
+        self.reward = np.zeros((max_size, 1))
+        self.not_done = np.zeros((max_size, 1))
+        self.goal = np.zeros((max_size, goal_dim))
+        self.is_expert = np.zeros((max_size, 1))
+
+        self.priority = torch.zeros(max_size, device=device)
+        self.max_priority = 1.0
+
+        self.ind = None  # 上次采样的索引 (用于 update_priority)
+
+    def add(self, state, action, reward, next_state, done, goal, is_expert=False):
+        """添加一条 transition (对齐参考实现 buffer.LAP.add)"""
+        self.state[self.ptr] = state
+        self.action[self.ptr] = action
+        self.next_state[self.ptr] = next_state
+        self.reward[self.ptr] = reward
+        self.not_done[self.ptr] = 1. - done
+        self.goal[self.ptr] = goal
+        self.is_expert[self.ptr] = float(is_expert)
+
+        self.priority[self.ptr] = self.max_priority
+
+        self.ptr = (self.ptr + 1) % self.max_size
+        self.size = min(self.size + 1, self.max_size)
+
+    def sample(self, batch_size=None):
+        """
+        按优先级采样 (对齐参考实现 buffer.LAP.sample)
+
+        使用 cumsum + searchsorted, 避免 SumTree 的复杂性。
+        返回 7 个 tensor (无 IS 权重, 无 indices)。
+        """
+        bs = batch_size or self.batch_size
+        csum = torch.cumsum(self.priority[:self.size], 0)
+        val = torch.rand(size=(bs,), device=device) * csum[-1]
+        self.ind = torch.searchsorted(csum, val).cpu().data.numpy()
+
+        return (
+            torch.tensor(self.state[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.action[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.reward[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.next_state[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.not_done[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.goal[self.ind], dtype=torch.float, device=device),
+            torch.tensor(self.is_expert[self.ind], dtype=torch.float, device=device),
+        )
+
+    def update_priority(self, priority):
+        """更新采样的优先级 (对齐参考实现)"""
+        self.priority[self.ind] = priority.reshape(-1).detach()
+        self.max_priority = max(float(priority.max()), self.max_priority)
+
+    def reset_max_priority(self):
+        """重置 max_priority (每次 target update 时调用, 防止优先级爆炸)"""
+        self.max_priority = float(self.priority[:self.size].max())
+
+    def update_last_n_rewards(self, n, reward_modifier_fn):
+        """
+        修改最近 n 条 transition 的 reward (碰撞回溯惩罚)
+
+        Args:
+            n: 回溯步数
+            reward_modifier_fn: callable(k, old_reward) -> new_reward
+        """
+        for k in range(2, n + 1):
+            data_idx = (self.ptr - k) % self.max_size
+            if data_idx < 0 or data_idx >= self.size:
+                break
+            old_reward = self.reward[data_idx, 0]
+            new_reward = reward_modifier_fn(k, old_reward)
+            self.reward[data_idx, 0] = new_reward
+            # 提高被修改样本的优先级
+            self.priority[data_idx] = self.max_priority
+
+    def __len__(self):
+        return self.size
 SENSOR_DIM = SENSOR_END - SENSOR_START  # 15
 
 
@@ -304,7 +409,7 @@ class TD7ActuatorAgent:
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
                  lr_actor=3e-4, lr_critic=3e-4, lr_encoder=3e-4,
-                 gamma=0.99, target_update_rate=750,
+                 gamma=0.99, target_update_rate=250,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2,
                  zs_dim=256, lap_alpha=0.4, lap_min_priority=1.0):
 
@@ -342,9 +447,21 @@ class TD7ActuatorAgent:
             self.critic.parameters(), lr=lr_critic)
         self.critic_target = copy.deepcopy(self.critic)
 
-        # ---- Checkpoint state ----
+        # ---- Checkpoint state (对齐参考实现) ----
         self.checkpoint_ready = False
         self.total_it = 0
+
+        # Checkpoint 追踪 (对齐参考实现 maybe_train_and_checkpoint)
+        self.eps_since_update = 0
+        self.timesteps_since_update = 0
+        self.max_eps_before_update = 1
+        self.min_return = 1e8
+        self.best_min_return = -1e8
+
+        # Checkpoint 时机参数 (对齐参考实现)
+        self.steps_before_checkpointing = 75000
+        self.max_eps_when_checkpointing = 20
+        self.reset_weight = 0.9
 
         # ---- Value clipping (跟踪 Q 值范围, 防止 target Q 爆炸) ----
         self.max_Q = -1e8
@@ -394,19 +511,10 @@ class TD7ActuatorAgent:
         if len(replay_buffer) < batch_size:
             return 0.0, 0.0, 0.0
 
-        sample_result = replay_buffer.sample(batch_size)
-
-        # 兼容 PER buffer (9 元素) 和普通 buffer (7 元素)
-        if len(sample_result) == 9:
-            state, action, reward, next_state, done, goal, is_expert, \
-                indices, _is_weights = sample_result
-            # LAP: 不使用 IS 权重, _is_weights 被丢弃
-        else:
-            state, action, reward, next_state, done, goal, is_expert = sample_result
-            indices = None
+        state, action, reward, next_state, not_done, goal, is_expert = \
+            replay_buffer.sample(batch_size)
 
         self.total_it += 1
-        not_done = 1.0 - done
 
         # ==================================================================
         # 1. Encoder 自监督更新
@@ -467,18 +575,14 @@ class TD7ActuatorAgent:
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0)
         self.critic_optimizer.step()
 
         # ==================================================================
-        # 3. LAP 优先级更新 (对齐参考实现, 跳过 buffer 内部 α 变换)
+        # 3. LAP 优先级更新 (对齐参考实现)
         # ==================================================================
-        if indices is not None:
-            # max over Q1/Q2, clamp to min_priority, 再做 pow(alpha)
-            # 直接传入最终优先级, 使用 update_priorities_raw 跳过二次变换
-            priority = td_loss.max(1)[0].clamp(
-                min=self.lap_min_priority).pow(self.lap_alpha).detach()
-            replay_buffer.update_priorities_raw(indices, priority)
+        priority = td_loss.max(1)[0].clamp(
+            min=self.lap_min_priority).pow(self.lap_alpha)
+        replay_buffer.update_priority(priority)
 
         # ==================================================================
         # 4. Actor 延迟更新 (with BC loss)
@@ -521,7 +625,6 @@ class TD7ActuatorAgent:
 
             self.actor_optimizer.zero_grad()
             total_actor_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
             self.actor_optimizer.step()
 
             actor_loss_val = rl_loss.item()
@@ -541,8 +644,54 @@ class TD7ActuatorAgent:
             # fixed_encoder 作为稳定特征提供者, 只在这里更新
             self.fixed_encoder.load_state_dict(self.encoder.state_dict())
 
+            # 重置 LAP 最大优先级 (对齐参考实现, 防止优先级爆炸)
+            replay_buffer.reset_max_priority()
+
             # 更新值裁剪范围
             self.max_Q_target = self.max_Q
             self.min_Q_target = self.min_Q
 
         return critic_loss.item(), actor_loss_val, bc_loss_val
+
+    # ==================================================================
+    # Batch Training + Checkpoint (对齐参考实现 maybe_train_and_checkpoint)
+    # ==================================================================
+
+    def maybe_train_and_checkpoint(self, ep_timesteps, ep_return,
+                                   replay_buffer, batch_size=256,
+                                   bc_weight=0.0):
+        """
+        Episode 结束后调用: 累积步数, 判断是否更新 checkpoint, 批量训练
+
+        对齐参考实现 (Fujimoto et al. 2023):
+        - 数据收集阶段不训练, episode 结束后批量训练
+        - 基于 min_return 判断当前策略是否退化
+        - 退化则立即重置并重训, 未退化则在窗口满后更新 checkpoint
+        """
+        self.eps_since_update += 1
+        self.timesteps_since_update += ep_timesteps
+
+        self.min_return = min(self.min_return, ep_return)
+
+        # 当前策略比 checkpoint 差 → 立即结束评估、批量训练
+        if self.min_return < self.best_min_return:
+            self._train_and_reset(replay_buffer, batch_size, bc_weight)
+
+        # 评估窗口满 → 当前策略合格, 更新 checkpoint
+        elif self.eps_since_update == self.max_eps_before_update:
+            self.best_min_return = self.min_return
+            self.update_checkpoint()
+            self._train_and_reset(replay_buffer, batch_size, bc_weight)
+
+    def _train_and_reset(self, replay_buffer, batch_size, bc_weight):
+        """批量训练所有累积的 timesteps, 然后重置计数器"""
+        for _ in range(self.timesteps_since_update):
+            if self.total_it == self.steps_before_checkpointing:
+                self.best_min_return *= self.reset_weight
+                self.max_eps_before_update = self.max_eps_when_checkpointing
+
+            self.train(replay_buffer, batch_size, bc_weight)
+
+        self.eps_since_update = 0
+        self.timesteps_since_update = 0
+        self.min_return = 1e8

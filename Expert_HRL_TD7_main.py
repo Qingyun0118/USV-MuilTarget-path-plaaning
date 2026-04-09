@@ -48,7 +48,7 @@ from my_USV_Env import MyUsvEnv, X_MAX, Y_MAX
 
 # --- 公共模块导入 ---
 from hrl_config import device, SCALE, set_global_seed
-from buffers import ReplayBuffer, GoalConditionedReplayBuffer
+from buffers import ReplayBuffer
 from reactive_controller import ReactiveController
 from expert_scheduler import ExpertScheduler
 from selector_agent import SelectorAgent
@@ -56,7 +56,7 @@ from hrl_helpers import (
     get_selector_state, get_actuator_state,
     get_usv_pos, get_target_pos, compute_actuator_reward
 )
-from td7_agent import TD7ActuatorAgent
+from td7_agent import TD7ActuatorAgent, GoalConditionedLAPBuffer
 
 
 
@@ -126,7 +126,11 @@ def train_expert_hrl(args):
 
     # ---- 3. Replay Buffers ----
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
-    actuator_buffer = GoalConditionedReplayBuffer(args.actuator_buffer_size)
+    actuator_buffer = GoalConditionedLAPBuffer(
+        actuator_state_dim, actuator_goal_dim, actuator_action_dim,
+        max_size=args.actuator_buffer_size,
+        batch_size=args.actuator_batch_size
+    )
 
     # ---- 4. Expert Controller ----
     expert = ReactiveController()
@@ -199,6 +203,13 @@ def train_expert_hrl(args):
             actuator.max_Q_target = ckpt.get('max_Q_target', 0)
             actuator.min_Q_target = ckpt.get('min_Q_target', 0)
 
+            # TD7: 恢复 batch training checkpoint 追踪
+            actuator.eps_since_update = ckpt.get('eps_since_update', 0)
+            actuator.timesteps_since_update = ckpt.get('timesteps_since_update', 0)
+            actuator.max_eps_before_update = ckpt.get('max_eps_before_update', 1)
+            actuator.min_return = ckpt.get('min_return', 1e8)
+            actuator.best_min_return = ckpt.get('best_min_return', -1e8)
+
             # 恢复优化器状态
             selector.optimizer.load_state_dict(ckpt['selector_optimizer'])
             actuator.actor_optimizer.load_state_dict(ckpt['actuator_actor_optimizer'])
@@ -235,8 +246,8 @@ def train_expert_hrl(args):
     print(f"  SALE zs_dim={args.zs_dim}, "
           f"target_update_rate={args.target_update_rate}")
     print(f"  LAP alpha={args.lap_alpha}, min_priority={args.lap_min_priority}")
-    print(f"  Checkpoint Policy: 50/50 current/checkpoint "
-          f"(eval_interval={args.checkpoint_eval_interval} eps)")
+    print(f"  Checkpoint Policy: batch training + adaptive checkpoint "
+          f"(对齐参考实现 maybe_train_and_checkpoint)")
     print(f"  Expert Decay: Dawood Exponential "
           f"(p0={args.expert_p0}, p_min={args.expert_p_min})")
     print(f"  Max Episodes: {args.max_episodes}")
@@ -368,7 +379,7 @@ def train_expert_hrl(args):
 
                 # ---- 存入 Replay Buffer (带 Expert 标志) ----
                 is_terminal = crush or sub_done
-                actuator_buffer.push(
+                actuator_buffer.add(
                     actuator_state, action, r_actuator,
                     next_actuator_state, float(is_terminal), relative_goal,
                     is_expert=use_expert
@@ -382,12 +393,7 @@ def train_expert_hrl(args):
                         lambda k, old_r: old_r + (-5.0 * (1.0 - (k - 1) / backtrack_steps))
                     )
 
-                # ---- 训练 Actuator (TD7: SALE + LAP + BC) ----
-                bc_w = args.bc_weight * expert_prob
-                if len(actuator_buffer) >= args.warmup_steps:
-                    for _ in range(args.actuator_train_iters):
-                        actuator.train(actuator_buffer, args.actuator_batch_size,
-                                       bc_weight=bc_w)
+                # (TD7: 数据收集阶段不训练, episode 结束后批量训练)
 
                 # ---- 检查目标到达 ----
                 reached_indices = info.get('reached_targets', [])
@@ -450,6 +456,16 @@ def train_expert_hrl(args):
         all_active_reached = (targets_reached_count >= active_targets)
         ep_success = all_active_reached and not crush
         expert_scheduler.record_episode(ep_success)
+
+        # ---- TD7 批量训练 + Checkpoint (对齐参考实现) ----
+        # 数据收集阶段不训练, episode 结束后批量训练所有累积 timesteps
+        bc_w = args.bc_weight * expert_prob
+        if len(actuator_buffer) >= args.warmup_steps:
+            actuator.maybe_train_and_checkpoint(
+                total_steps, episode_actuator_reward,
+                actuator_buffer, args.actuator_batch_size,
+                bc_weight=bc_w
+            )
 
         # 记录训练历史 (样本效率)
         training_history['episode_steps'].append(total_steps)
@@ -530,6 +546,12 @@ def train_expert_hrl(args):
                 'expert_success_history': list(expert_scheduler.success_history),
                 # TD7 checkpoint 状态
                 'checkpoint_ready': actuator.checkpoint_ready,
+                # TD7 batch training checkpoint 追踪
+                'eps_since_update': actuator.eps_since_update,
+                'timesteps_since_update': actuator.timesteps_since_update,
+                'max_eps_before_update': actuator.max_eps_before_update,
+                'min_return': actuator.min_return,
+                'best_min_return': actuator.best_min_return,
                 # TD7 值裁剪范围
                 'max_Q': actuator.max_Q,
                 'min_Q': actuator.min_Q,
@@ -550,15 +572,7 @@ def train_expert_hrl(args):
                        os.path.join(ckpt_dir, "actuator_encoder.pth"))
             print(f"  [Checkpoint] Saved at episode {episode + 1} (完整快照)")
 
-        # ---- TD7: 周期性 checkpoint 更新 ----
-        # 每 checkpoint_eval_interval 个 episode 检查近期成功率,
-        # 如果当前策略表现优于 checkpoint 则更新
-        if (episode + 1) % args.checkpoint_eval_interval == 0:
-            if success_rate > 0.5 or not actuator.checkpoint_ready:
-                actuator.update_checkpoint()
-                if episode % args.log_interval == 0:
-                    print(f"  [TD7] Checkpoint updated at EP {episode} "
-                          f"(SR={success_rate:.2f})")
+        # (TD7 checkpoint 更新已由 maybe_train_and_checkpoint 自动管理)
 
         # ---- 保存最佳模型 ----
         total_reward = episode_actuator_reward + episode_selector_reward
@@ -980,13 +994,11 @@ if __name__ == "__main__":
                         help="延迟策略更新频率")
     parser.add_argument("--actuator_batch_size", default=256, type=int)
     parser.add_argument("--actuator_buffer_size", default=1000000, type=int)
-    parser.add_argument("--actuator_train_iters", default=2, type=int,
-                        help="每步 Actuator 训练迭代次数")
 
     # --- TD7 特有参数 (对齐 Fujimoto et al. 2023 开源实现) ---
     parser.add_argument("--zs_dim", default=256, type=int,
                         help="SALE Encoder 嵌入维度 (zs, zsa 均为此维度)")
-    parser.add_argument("--target_update_rate", default=750, type=int,
+    parser.add_argument("--target_update_rate", default=250, type=int,
                         help="周期性硬目标更新间隔 (training steps, 非 EMA)")
     parser.add_argument("--lr_encoder", default=3e-4, type=float,
                         help="SALE Encoder 学习率")
@@ -1006,12 +1018,12 @@ if __name__ == "__main__":
     parser.add_argument("--distance_penalty_coeff", default=2.0, type=float,
                         help="Selector 总距离惩罚系数")
 
-    # --- 探索参数 ---
-    parser.add_argument("--exploration_noise", default=0.3, type=float,
-                        help="RL 策略探索噪声初始标准差")
+    # --- 探索参数 (对齐参考实现: 0.1) ---
+    parser.add_argument("--exploration_noise", default=0.1, type=float,
+                        help="RL 策略探索噪声标准差 (参考实现: 0.1)")
     parser.add_argument("--noise_decay_episodes", default=800, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
-    parser.add_argument("--noise_min_ratio", default=0.15, type=float,
+    parser.add_argument("--noise_min_ratio", default=0.3, type=float,
                         help="探索噪声最低比例")
 
     # --- Expert 概率衰减参数 ---

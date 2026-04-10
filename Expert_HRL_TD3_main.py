@@ -955,17 +955,17 @@ if __name__ == "__main__":
                         help="Selector 总距离惩罚系数 (越大越鼓励短路径)")
 
     # --- 探索参数 ---
-    parser.add_argument("--exploration_noise", default=0.1, type=float,
-                        help="RL 策略探索噪声标准差 (对齐原始 TD3 默认 0.1)")
+    parser.add_argument("--exploration_noise", default=0.3, type=float,
+                        help="RL 策略探索噪声标准差")
     parser.add_argument("--noise_decay_episodes", default=800, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
     parser.add_argument("--noise_min_ratio", default=1.0, type=float,
                         help="探索噪声最低比例 (1.0=不衰减, 对齐原始 TD3)")
 
     # --- Expert 概率衰减参数 (Dawood et al. 指数衰减) ---
-    parser.add_argument("--expert_p0", default=0.5, type=float,
+    parser.add_argument("--expert_p0", default=0.0, type=float,
                         help="Expert 初始使用概率 (训练初期高概率使用专家)")
-    parser.add_argument("--expert_p_min", default=0.05, type=float,
+    parser.add_argument("--expert_p_min", default=0.00, type=float,
                         help="Expert 最低使用概率 (保留少量专家指导防止遗忘)")
     parser.add_argument("--success_window", default=100, type=int,
                         help="成功率统计滑动窗口大小")

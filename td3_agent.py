@@ -159,6 +159,76 @@ class Critic(nn.Module):
 
 
 # ============================================================================
+# ========================= Expert Demo Buffer ===============================
+# ============================================================================
+
+class ExpertDemoBuffer:
+    """
+    Expert 演示经验永久缓冲区 (DDPGfD-style)
+
+    固定容量的环形缓冲区, 仅存储 Expert 控制器生成的 transition,
+    永远不会被 RL 自身产生的数据覆盖。
+
+    解决问题: 主 Replay Buffer 容量有限, 训练后期 Expert 数据被新 RL 数据
+    (大量碰撞样本) 覆盖, 导致 Critic 对避障动作的 Q 估计崩溃 (外推误差),
+    Actor 丧失避障能力, 形成灾难性遗忘的死亡螺旋。
+
+    用法:
+      1. 训练时, 每当 is_expert=True, 同时 push 到主 Buffer 和 DemoBuffer
+      2. train() 中从 DemoBuffer 采样 demo_batch_size 条, 与主 Buffer 采样合并
+      3. DemoBuffer 的数据不参与 PER 优先级, 均匀采样即可
+
+    存储 (state, action, reward, next_state, done, goal) 六元组
+    """
+
+    def __init__(self, capacity=50000):
+        self.capacity = capacity
+        self.buffer = []
+        self.pos = 0
+
+    def push(self, state, action, reward, next_state, done, goal):
+        data = (
+            np.array(state, dtype=np.float32),
+            np.array(action, dtype=np.float32),
+            float(reward),
+            np.array(next_state, dtype=np.float32),
+            float(done),
+            np.array(goal, dtype=np.float32),
+        )
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(data)
+        else:
+            self.buffer[self.pos] = data
+        self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size):
+        """
+        均匀采样
+
+        Returns:
+            states, actions, rewards, next_states, dones, goals, is_experts
+            (is_experts 全为 1.0, 因为 DemoBuffer 只存放 Expert 数据)
+        """
+        batch_size = min(batch_size, len(self.buffer))
+        indices = np.random.randint(0, len(self.buffer), size=batch_size)
+        batch = [self.buffer[i] for i in indices]
+
+        states, actions, rewards, next_states, dones, goals = zip(*batch)
+        return (
+            torch.FloatTensor(np.array(states)).to(device),
+            torch.FloatTensor(np.array(actions)).to(device),
+            torch.FloatTensor(np.array(rewards)).reshape(-1, 1).to(device),
+            torch.FloatTensor(np.array(next_states)).to(device),
+            torch.FloatTensor(np.array(dones)).reshape(-1, 1).to(device),
+            torch.FloatTensor(np.array(goals)).to(device),
+            torch.ones(batch_size, 1, device=device),  # is_expert = 1.0
+        )
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ============================================================================
 # ========================= TD3 Actuator Agent ===============================
 # ============================================================================
 
@@ -199,14 +269,17 @@ class TD3ActuatorAgent:
                 -self.max_action, self.max_action)
         return action
 
-    def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
+    def train(self, replay_buffer, batch_size=256, bc_weight=0.0,
+              demo_buffer=None, demo_ratio=0.25):
         """
-        TD3 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss)
+        TD3 训练 (Goal-Conditioned) + 行为克隆损失 (BC Loss) + Expert Demo Buffer
 
         参考 DDPGfD / TD3fD 的做法:
         - 对 Expert 专家生成的 transition, 除了标准 Q-maximization 外,
           额外添加 BC loss 让 actor 直接模仿 Expert 动作
         - BC loss 权重随训练推进衰减 (与 Expert 概率同步)
+        - 若提供 demo_buffer (ExpertDemoBuffer), 每个 batch 中混入永久 Expert 数据,
+          防止主 Buffer 覆盖 Expert 后导致灾难性遗忘
 
         联合 Actor 损失:
           L_actor = -E[Q(s,g,π(s,g))] + bc_weight * E_{expert}[||π(s,g) - a_expert||²]
@@ -215,14 +288,25 @@ class TD3ActuatorAgent:
         时施加 (即只在 Expert 动作确实比当前策略好时才模仿, 避免模仿劣质 Expert 动作)
 
         Args:
-            replay_buffer: 经验回放缓冲区
-            batch_size: 批次大小
+            replay_buffer: 经验回放缓冲区 (主 Buffer)
+            batch_size: 总批次大小 (含 demo 部分)
             bc_weight: 行为克隆损失权重 (通常随训练衰减)
+            demo_buffer: ExpertDemoBuffer 实例, 永久保存 Expert 数据 (可选)
+            demo_ratio: demo_buffer 在每个 batch 中的占比, 默认 0.25
         """
         if len(replay_buffer) < batch_size:
             return 0.0, 0.0, 0.0
 
-        sample_result = replay_buffer.sample(batch_size)
+        # ---- 混合采样: 主 Buffer + Demo Buffer ----
+        use_demo = (demo_buffer is not None and len(demo_buffer) > 0)
+        if use_demo:
+            demo_batch_size = max(1, int(batch_size * demo_ratio))
+            main_batch_size = batch_size - demo_batch_size
+        else:
+            main_batch_size = batch_size
+            demo_batch_size = 0
+
+        sample_result = replay_buffer.sample(main_batch_size)
 
         # 兼容 PER buffer (返回 9 元素) 和普通 buffer (返回 7 元素)
         if len(sample_result) == 9:
@@ -231,7 +315,24 @@ class TD3ActuatorAgent:
         else:
             state, action, reward, next_state, done, goal, is_expert = sample_result
             indices = None
-            is_weights = torch.ones(batch_size, 1, device=state.device)
+            is_weights = torch.ones(main_batch_size, 1, device=state.device)
+
+        # 合并 Demo Buffer 采样
+        if use_demo:
+            demo_sample = demo_buffer.sample(demo_batch_size)
+            d_state, d_action, d_reward, d_next_state, d_done, d_goal, d_is_expert = demo_sample
+            state = torch.cat([state, d_state], dim=0)
+            action = torch.cat([action, d_action], dim=0)
+            reward = torch.cat([reward, d_reward], dim=0)
+            next_state = torch.cat([next_state, d_next_state], dim=0)
+            done = torch.cat([done, d_done], dim=0)
+            goal = torch.cat([goal, d_goal], dim=0)
+            is_expert = torch.cat([is_expert, d_is_expert], dim=0)
+            # Demo 部分 IS 权重 = 1.0 (均匀采样, 无需修正)
+            is_weights = torch.cat([
+                is_weights,
+                torch.ones(demo_batch_size, 1, device=device)
+            ], dim=0)
 
         self.total_it += 1
 
@@ -305,8 +406,8 @@ class TD3ActuatorAgent:
             actor_loss_val = rl_loss.item()
             bc_loss_val = bc_loss.item()
 
-        # 更新 PER 优先级
+        # 更新 PER 优先级 (仅主 Buffer 部分, Demo Buffer 无 PER)
         if indices is not None:
-            replay_buffer.update_priorities(indices, td_errors)
+            replay_buffer.update_priorities(indices, td_errors[:main_batch_size])
 
         return critic_loss.item(), actor_loss_val, bc_loss_val

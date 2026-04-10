@@ -39,7 +39,11 @@ class ExpertScheduler:
         self.p_min = p_min
         self.total_episodes = total_episodes
         # λ = ln(p0 / p_min), 确保在 total_episodes 时衰减到 p_min
-        self.decay_lambda = np.log(p0 / max(p_min, 1e-8))
+        # p0=0 时无需衰减, 直接返回 0
+        if p0 > 0 and p_min > 0:
+            self.decay_lambda = np.log(p0 / p_min)
+        else:
+            self.decay_lambda = 0.0
         self.success_history = deque(maxlen=success_window)
 
     def get_expert_probability(self, episode: int) -> float:
@@ -48,6 +52,8 @@ class ExpertScheduler:
 
         p_Expert(e) = max(p_min, p_0 * exp(-λ * e / E_total))
         """
+        if self.p0 <= 0:
+            return 0.0
         p = self.p0 * np.exp(-self.decay_lambda * episode / self.total_episodes)
         return max(self.p_min, p)
 

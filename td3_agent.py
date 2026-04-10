@@ -242,7 +242,8 @@ class TD3ActuatorAgent:
 
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
                  lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
-                 policy_noise=0.2, noise_clip=0.5, policy_freq=2):
+                 policy_noise=0.2, noise_clip=0.5, policy_freq=2,
+                 bc_tau=0.5):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
@@ -257,6 +258,7 @@ class TD3ActuatorAgent:
         self.policy_noise = policy_noise
         self.noise_clip = noise_clip
         self.policy_freq = policy_freq
+        self.bc_tau = bc_tau  # Soft Q-filter 温度参数
         self.total_it = 0
 
     def select_action(self, state, goal, noise=0.0):
@@ -370,8 +372,11 @@ class TD3ActuatorAgent:
             # 标准 RL 目标: 最大化 Q 值
             rl_loss = -self.critic.Q1(state, goal, pi_action).mean()
 
-            # 行为克隆损失: 仅在 Expert transition 上, 且仅当 Expert 动作比
-            # 当前策略动作的 Q 值更高时才施加 (filtered BC)
+            # 行为克隆损失: 仅在 Expert transition 上施加
+            # 使用 Soft Q-filter: 用 sigmoid 软权重替代硬二值过滤
+            #   w_i = σ((Q(s,g,a_expert) - Q(s,g,π(s,g))) / τ)
+            # 训练初期 Q 不准 → q_adv ≈ 0 → w ≈ 0.5, 保留一半梯度
+            # 训练后期 Q 准确 → 优质动作 w→1, 劣质动作 w→0, 自然过滤
             bc_loss = torch.tensor(0.0, device=device)
             if bc_weight > 0.0 and is_expert.sum() > 0:
                 expert_mask = (is_expert > 0.5).squeeze()  # (batch,)
@@ -381,15 +386,15 @@ class TD3ActuatorAgent:
                     expert_actions = action[expert_mask]  # Expert 专家动作
                     pi_expert = pi_action[expert_mask]    # actor 当前输出
 
-                    # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
+                    # Soft Q-filter: sigmoid 连续权重
                     with torch.no_grad():
                         q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
                         q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
-                        bc_filter = (q_expert > q_pi).squeeze()  # (n_expert,)
+                        q_advantage = q_expert - q_pi  # (n_expert, 1)
+                        soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # (n_expert, 1)
 
-                    if bc_filter.any():
-                        bc_loss = F.mse_loss(
-                            pi_expert[bc_filter], expert_actions[bc_filter])
+                    per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
+                    bc_loss = (soft_weight * per_sample_bc).mean()
 
             total_actor_loss = rl_loss + bc_weight * bc_loss
 

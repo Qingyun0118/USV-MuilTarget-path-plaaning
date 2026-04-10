@@ -451,12 +451,13 @@ class TD7ActuatorAgent:
         self.checkpoint_ready = False
         self.total_it = 0
 
-        # Checkpoint 追踪 (对齐参考实现 maybe_train_and_checkpoint)
+        # Checkpoint 追踪 (适配 HRL 高方差环境, 使用 mean_return)
         self.eps_since_update = 0
         self.timesteps_since_update = 0
         self.max_eps_before_update = 1
-        self.min_return = 1e8
-        self.best_min_return = -1e8
+        self.mean_return = 0.0
+        self._return_sum = 0.0
+        self.best_mean_return = -1e8
 
         # Checkpoint 时机参数
         # 注: steps_before_checkpointing 适配 HRL 场景
@@ -665,23 +666,25 @@ class TD7ActuatorAgent:
         """
         Episode 结束后调用: 累积步数, 判断是否更新 checkpoint, 批量训练
 
-        对齐参考实现 (Fujimoto et al. 2023):
-        - 数据收集阶段不训练, episode 结束后批量训练
-        - 基于 min_return 判断当前策略是否退化
-        - 退化则立即重置并重训, 未退化则在窗口满后更新 checkpoint
+        对齐参考实现的核心逻辑, 但使用 mean_return 替代 min_return:
+        - 原因: HRL 多目标导航环境中 episode return 方差极大 (碰撞-10 vs 成功+20),
+          一次偶然碰撞就让 min_return 暴跌, 触发频繁的无效重训。
+        - mean_return 更稳健地反映窗口期内策略的真实水平。
         """
         self.eps_since_update += 1
         self.timesteps_since_update += ep_timesteps
 
-        self.min_return = min(self.min_return, ep_return)
+        # 使用累积均值代替 min (对高方差 HRL 环境更鲁棒)
+        self._return_sum += ep_return
+        self.mean_return = self._return_sum / self.eps_since_update
 
         # 当前策略比 checkpoint 差 → 立即结束评估、批量训练
-        if self.min_return < self.best_min_return:
+        if self.mean_return < self.best_mean_return:
             self._train_and_reset(replay_buffer, batch_size, bc_weight)
 
         # 评估窗口满 → 当前策略合格, 更新 checkpoint
         elif self.eps_since_update == self.max_eps_before_update:
-            self.best_min_return = self.min_return
+            self.best_mean_return = self.mean_return
             self.update_checkpoint()
             self._train_and_reset(replay_buffer, batch_size, bc_weight)
 
@@ -689,11 +692,12 @@ class TD7ActuatorAgent:
         """批量训练所有累积的 timesteps, 然后重置计数器"""
         for _ in range(self.timesteps_since_update):
             if self.total_it == self.steps_before_checkpointing:
-                self.best_min_return *= self.reset_weight
+                self.best_mean_return *= self.reset_weight
                 self.max_eps_before_update = self.max_eps_when_checkpointing
 
             self.train(replay_buffer, batch_size, bc_weight)
 
         self.eps_since_update = 0
         self.timesteps_since_update = 0
-        self.min_return = 1e8
+        self.mean_return = 0.0
+        self._return_sum = 0.0

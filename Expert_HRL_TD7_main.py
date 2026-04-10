@@ -207,8 +207,8 @@ def train_expert_hrl(args):
             actuator.eps_since_update = ckpt.get('eps_since_update', 0)
             actuator.timesteps_since_update = ckpt.get('timesteps_since_update', 0)
             actuator.max_eps_before_update = ckpt.get('max_eps_before_update', 1)
-            actuator.min_return = ckpt.get('min_return', 1e8)
-            actuator.best_min_return = ckpt.get('best_min_return', -1e8)
+            actuator.mean_return = ckpt.get('mean_return', 0.0)
+            actuator.best_mean_return = ckpt.get('best_mean_return', -1e8)
 
             # 恢复优化器状态
             selector.optimizer.load_state_dict(ckpt['selector_optimizer'])
@@ -461,12 +461,8 @@ def train_expert_hrl(args):
         # 数据收集阶段不训练, episode 结束后批量训练所有累积 timesteps
         bc_w = args.bc_weight * expert_prob
         if len(actuator_buffer) >= args.warmup_steps:
-            # 使用成功数 (0/1) 而非原始奖励作为 checkpoint 评估指标
-            # 原因: HRL 多目标环境中 episode return 方差极大,
-            #       随机障碍物/ 碰撞惩罚导致 min_return 过于敏感
-            ep_metric = float(ep_success) * 10.0  # 成功=10, 失败=0
             actuator.maybe_train_and_checkpoint(
-                total_steps, ep_metric,
+                total_steps, episode_actuator_reward,
                 actuator_buffer, args.actuator_batch_size,
                 bc_weight=bc_w
             )
@@ -554,8 +550,8 @@ def train_expert_hrl(args):
                 'eps_since_update': actuator.eps_since_update,
                 'timesteps_since_update': actuator.timesteps_since_update,
                 'max_eps_before_update': actuator.max_eps_before_update,
-                'min_return': actuator.min_return,
-                'best_min_return': actuator.best_min_return,
+                'mean_return': actuator.mean_return,
+                'best_mean_return': actuator.best_mean_return,
                 # TD7 值裁剪范围
                 'max_Q': actuator.max_Q,
                 'min_Q': actuator.min_Q,

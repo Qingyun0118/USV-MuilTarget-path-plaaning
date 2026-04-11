@@ -11,14 +11,6 @@ models/
 globalsea_20250901.nc
 runs/
 usvTest/
-mpc_hrl_output/
-mpc_hrl_td3_output_221/
-mpc_hrl_sac_output_306/
-mpc_hrl_sac_output/
-mpc_hrl_td3_output_222/
-mpc_hrl_sac_output_308/
-mpc_hrl_sac_output_310/
-expert_hrl_sac_output_329/
 Paper/
 .gitignore
 Paper/Dawood 等 - 2023 - Handling Sparse Rewards in Reinforcement Learning Using Model Predictive Control.pdf
@@ -39,5 +31,10 @@ ctde_mappo_output_selector_dqn_coord/
 ctde_mappo_output_selector_ppo/
 expert_hrl_td3_output_318/
 expert_hrl_td3_output_401/
+expert_hrl_td3_output_411/
+expert_hrl_td3_output_411_softQfilter/
+expert_hrl_td3_output_noexpert/
 expert_hrl_td7_output_404/
 expert_hrl_td7_output_409/
+expert_hrl_td7_output_410/
+expert_hrl_td7_output_noexpert/

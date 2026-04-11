@@ -529,23 +529,49 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
     actuator = SACActuatorAgent(actuator_state_dim, 2, 2, max_action=1.0)
     expert = ReactiveController()
 
-    model_dir = args.output_dir
-    model_prefix = "best_" if os.path.exists(
-        os.path.join(model_dir, "best_selector.pth")) else ""
+    default_selector_model = os.path.join(args.output_dir, "best_selector.pth")
+    default_actuator_model = os.path.join(args.output_dir, "best_actuator_actor.pth")
+    selector_model_path = args.eval_selector_model_path or default_selector_model
+    actuator_model_path = args.eval_actuator_model_path or default_actuator_model
 
+    selector_loaded = False
     try:
         selector.q_net.load_state_dict(torch.load(
-            os.path.join(model_dir, f"{model_prefix}selector.pth"),
-            map_location=device, weights_only=False))
-        if eval_mode == 'rl':
-            actuator.actor.load_state_dict(torch.load(
-                os.path.join(model_dir, f"{model_prefix}actuator_actor.pth"),
-                map_location=device, weights_only=False))
-            print("Models loaded successfully (Selector + SAC Actuator).")
-        else:
-            print("Selector model loaded. Actuator using Expert control.")
+            selector_model_path, map_location=device, weights_only=False))
+        selector_loaded = True
+        print(f"Selector model loaded: {selector_model_path}")
     except FileNotFoundError:
-        print("WARNING: No models found, running with random weights.")
+        print(f"WARNING: Selector model not found: {selector_model_path}")
+    except Exception as e:
+        print(f"WARNING: Failed to load selector model ({selector_model_path}): {e}")
+
+    if eval_mode == 'rl':
+        try:
+            actuator.actor.load_state_dict(torch.load(
+                actuator_model_path, map_location=device, weights_only=False))
+            if selector_loaded:
+                print(f"Actuator model loaded: {actuator_model_path}")
+                print("Models loaded successfully (Selector + SAC Actuator).")
+            else:
+                print(f"Actuator model loaded: {actuator_model_path}")
+                print("WARNING: Selector model unavailable, selector uses random weights.")
+        except FileNotFoundError:
+            print(f"WARNING: Actuator model not found: {actuator_model_path}")
+            if selector_loaded:
+                print("WARNING: Actuator uses random weights.")
+            else:
+                print("WARNING: Selector and actuator both use random weights.")
+        except Exception as e:
+            print(f"WARNING: Failed to load actuator model ({actuator_model_path}): {e}")
+            if selector_loaded:
+                print("WARNING: Actuator uses random weights.")
+            else:
+                print("WARNING: Selector and actuator both use random weights.")
+    else:
+        if selector_loaded:
+            print("Selector model loaded. Actuator using Expert control.")
+        else:
+            print("WARNING: Selector model unavailable, selector uses random weights. Actuator using Expert control.")
 
     eval_dir = os.path.join(args.output_dir, "evaluation_results",
                              f"eval_{eval_mode}")
@@ -800,6 +826,11 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             f.write(f"  障碍物半径:     {args.obstacle_radius_min}~{args.obstacle_radius_max} m\n")
             f.write(f"  随机形状:       {args.use_random_shapes}\n")
             f.write(f"  模型目录:       {args.output_dir}\n")
+            f.write(f"  Selector模型:   {selector_model_path}\n")
+            if eval_mode == 'rl':
+                f.write(f"  Actuator模型:   {actuator_model_path}\n")
+            else:
+                f.write(f"  Actuator模型:   Expert Controller (不加载RL模型)\n")
             f.write(f"\n--- 训练参数 ---\n")
             f.write(f"  训练 episodes:  {args.max_episodes}\n")
             f.write(f"  每目标最大步数: {args.max_steps_per_target}\n")
@@ -939,6 +970,10 @@ if __name__ == "__main__":
     parser.add_argument("--eval_obstacles", default=6, type=int,
                         help="评估时障碍物数量")
     parser.add_argument("--eval_seed", default=42, type=int)
+    parser.add_argument("--eval_selector_model_path", default=None, type=str,
+                        help="评估时 Selector 模型路径 (默认: output_dir/best_selector.pth)")
+    parser.add_argument("--eval_actuator_model_path", default=None, type=str,
+                        help="评估时 Actuator 模型路径 (默认: output_dir/best_actuator_actor.pth)")
     parser.add_argument("--eval_save_csv", action="store_true",
                         help="评估时保存路径 CSV 文件")
     parser.add_argument("--eval_tb_motion", action="store_true",

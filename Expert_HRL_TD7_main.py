@@ -661,29 +661,67 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
         zs_dim=args.zs_dim)
     expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
-    model_dir = args.output_dir
-    model_prefix = "best_" if os.path.exists(
-        os.path.join(model_dir, "best_selector.pth")) else ""
+    default_selector_model = os.path.join(args.output_dir, "best_selector.pth")
+    default_actuator_model = os.path.join(args.output_dir, "best_actuator_actor.pth")
+    selector_model_path = args.eval_selector_model_path or default_selector_model
+    actuator_model_path = args.eval_actuator_model_path or default_actuator_model
 
+    # TD7: encoder 默认使用 output_dir 下 best_encoder;
+    # 若传入 actuator actor 路径且同目录存在配套 encoder 文件, 则优先使用该配套 encoder。
+    default_encoder_model = os.path.join(args.output_dir, "best_actuator_encoder.pth")
+    encoder_model_path = default_encoder_model
+    if args.eval_actuator_model_path:
+        actor_name = os.path.basename(actuator_model_path)
+        inferred_encoder_name = actor_name.replace("actuator_actor", "actuator_encoder")
+        inferred_encoder_path = os.path.join(
+            os.path.dirname(actuator_model_path), inferred_encoder_name)
+        if inferred_encoder_name != actor_name and os.path.exists(inferred_encoder_path):
+            encoder_model_path = inferred_encoder_path
+
+    selector_loaded = False
     try:
         selector.q_net.load_state_dict(torch.load(
-            os.path.join(model_dir, f"{model_prefix}selector.pth"),
-            map_location=device, weights_only=False))
-        if eval_mode == 'rl':
+            selector_model_path, map_location=device, weights_only=False))
+        selector_loaded = True
+        print(f"Selector model loaded: {selector_model_path}")
+    except FileNotFoundError:
+        print(f"WARNING: Selector model not found: {selector_model_path}")
+    except Exception as e:
+        print(f"WARNING: Failed to load selector model ({selector_model_path}): {e}")
+
+    if eval_mode == 'rl':
+        actor_loaded = False
+        try:
             actuator.actor.load_state_dict(torch.load(
-                os.path.join(model_dir, f"{model_prefix}actuator_actor.pth"),
-                map_location=device, weights_only=False))
-            # TD7: 加载 fixed_encoder (Actor 依赖 encoder 嵌入)
-            encoder_path = os.path.join(
-                model_dir, f"{model_prefix}actuator_encoder.pth")
-            if os.path.exists(encoder_path):
+                actuator_model_path, map_location=device, weights_only=False))
+            actor_loaded = True
+            print(f"TD7 actuator actor loaded: {actuator_model_path}")
+        except FileNotFoundError:
+            print(f"WARNING: TD7 actuator actor not found: {actuator_model_path}")
+        except Exception as e:
+            print(f"WARNING: Failed to load TD7 actuator actor ({actuator_model_path}): {e}")
+
+        encoder_loaded = False
+        if os.path.exists(encoder_model_path):
+            try:
                 actuator.fixed_encoder.load_state_dict(torch.load(
-                    encoder_path, map_location=device, weights_only=False))
+                    encoder_model_path, map_location=device, weights_only=False))
+                encoder_loaded = True
+                print(f"TD7 actuator encoder loaded: {encoder_model_path}")
+            except Exception as e:
+                print(f"WARNING: Failed to load TD7 actuator encoder ({encoder_model_path}): {e}")
+        else:
+            print(f"WARNING: TD7 actuator encoder not found: {encoder_model_path}")
+
+        if selector_loaded and actor_loaded and encoder_loaded:
             print("Models loaded successfully (Selector + TD7 Actuator + Encoder).")
         else:
+            print("WARNING: Some TD7 evaluation models are missing, corresponding modules use random weights.")
+    else:
+        if selector_loaded:
             print("Selector model loaded. Actuator using Expert control.")
-    except FileNotFoundError:
-        print("WARNING: No models found, running with random weights.")
+        else:
+            print("WARNING: Selector model unavailable, selector uses random weights. Actuator using Expert control.")
 
     eval_dir = os.path.join(args.output_dir, "evaluation_results",
                              f"eval_{eval_mode}")
@@ -910,6 +948,12 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             f.write(f"  障碍物半径:     {args.obstacle_radius_min}~{args.obstacle_radius_max} m\n")
             f.write(f"  随机形状:       {args.use_random_shapes}\n")
             f.write(f"  模型目录:       {args.output_dir}\n")
+            f.write(f"  Selector模型:   {selector_model_path}\n")
+            if eval_mode == 'rl':
+                f.write(f"  Actuator模型:   {actuator_model_path}\n")
+                f.write(f"  Encoder模型:    {encoder_model_path}\n")
+            else:
+                f.write(f"  Actuator模型:   Expert Controller (不加载RL模型)\n")
             # 训练参数
             f.write(f"\n--- 训练参数 ---\n")
             f.write(f"  训练 episodes:  {args.max_episodes}\n")
@@ -1063,6 +1107,10 @@ if __name__ == "__main__":
     parser.add_argument("--eval_obstacles", default=6, type=int,
                         help="评估时障碍物数量")
     parser.add_argument("--eval_seed", default=42, type=int)
+    parser.add_argument("--eval_selector_model_path", default=None, type=str,
+                        help="评估时 Selector 模型路径 (默认: output_dir/best_selector.pth)")
+    parser.add_argument("--eval_actuator_model_path", default=None, type=str,
+                        help="评估时 Actuator Actor 模型路径 (默认: output_dir/best_actuator_actor.pth)")
     parser.add_argument("--eval_save_csv", action="store_true",
                         help="评估时保存路径 CSV 文件")
     parser.add_argument("--eval_tb_motion", action="store_true",

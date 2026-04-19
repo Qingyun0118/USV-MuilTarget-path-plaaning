@@ -127,11 +127,11 @@ class GoalConditionedLAPBuffer:
     def update_priority(self, priority):
         """更新采样的优先级 (对齐参考实现)"""
         self.priority[self.ind] = priority.reshape(-1).detach()
-        self.max_priority = max(float(priority.max()), self.max_priority)
+        self.max_priority = max(float(priority.detach().max()), self.max_priority)
 
     def reset_max_priority(self):
         """重置 max_priority (每次 target update 时调用, 防止优先级爆炸)"""
-        self.max_priority = float(self.priority[:self.size].max())
+        self.max_priority = float(self.priority[:self.size].detach().max()) if hasattr(self.priority, 'detach') else float(self.priority[:self.size].max())
 
     def update_last_n_rewards(self, n, reward_modifier_fn):
         """
@@ -400,7 +400,7 @@ class TD7ActuatorAgent:
       · critic_target (目标, 周期性硬拷贝)
 
     训练流程:
-    1. Encoder 自监督更新: MSE(g(f(s,g),a), f(s',g))
+    1. Encoder 自监督更新: MSE(encoder.zsa(zs, a), encoder.zs(s', g))
     2. Critic 更新: LAP Huber 损失 + fixed_encoder 嵌入
     3. LAP 优先级更新
     4. Actor 延迟更新: -Q.mean() + BC loss
@@ -411,7 +411,8 @@ class TD7ActuatorAgent:
                  lr_actor=3e-4, lr_critic=3e-4, lr_encoder=3e-4,
                  gamma=0.99, target_update_rate=250,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2,
-                 zs_dim=256, lap_alpha=0.4, lap_min_priority=1.0):
+                 zs_dim=256, lap_alpha=0.4, lap_min_priority=1.0,
+                 bc_tau=0.5, use_soft_q_filter=True):
 
         self.max_action = max_action
         self.gamma = gamma
@@ -422,6 +423,8 @@ class TD7ActuatorAgent:
         self.zs_dim = zs_dim
         self.lap_alpha = lap_alpha
         self.lap_min_priority = lap_min_priority
+        self.bc_tau = bc_tau
+        self.use_soft_q_filter = use_soft_q_filter
 
         # ---- Encoder: current + fixed + fixed_target + checkpoint ----
         self.encoder = Encoder(
@@ -508,7 +511,7 @@ class TD7ActuatorAgent:
         1. Encoder 自监督更新: MSE(encoder.zsa(zs, a), encoder.zs(s', g))
         2. Critic 更新: LAP Huber 损失, 使用 fixed_encoder 嵌入
         3. LAP 优先级更新: td_loss.max(Q1,Q2).clamp(min).pow(alpha)
-        4. Actor 延迟更新: -Q.mean() + BC loss (Q-filtered)
+        4. Actor 延迟更新: -Q.mean() + BC loss
         5. 周期性硬目标更新 (每 target_update_rate 步)
         """
         if len(replay_buffer) < batch_size:
@@ -607,22 +610,37 @@ class TD7ActuatorAgent:
             if bc_weight > 0.0 and is_expert.sum() > 0:
                 expert_mask = (is_expert > 0.5).squeeze()
                 if expert_mask.any():
-                    with torch.no_grad():
-                        # Q of expert's original actions
-                        Q_expert = self.critic(
-                            state[expert_mask], goal[expert_mask],
-                            action[expert_mask],
-                            fixed_zsa[expert_mask],
-                            fixed_zs[expert_mask]
-                        ).mean(dim=1)
-                        # Q of our policy actions on expert states
-                        Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
-                        bc_filter = (Q_expert > Q_policy)
+                    if self.use_soft_q_filter:
+                        with torch.no_grad():
+                            Q_expert = self.critic(
+                                state[expert_mask], goal[expert_mask],
+                                action[expert_mask],
+                                fixed_zsa[expert_mask],
+                                fixed_zs[expert_mask]
+                            ).mean(dim=1)
+                            Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
+                            q_advantage = Q_expert - Q_policy
+                            soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
 
-                    if bc_filter.any():
-                        bc_loss = F.mse_loss(
-                            pi_action[expert_mask][bc_filter],
-                            action[expert_mask][bc_filter])
+                        per_sample_bc = (pi_action[expert_mask] - action[expert_mask]).pow(2).mean(dim=1, keepdim=True)
+                        bc_loss = (soft_weight * per_sample_bc).mean()
+                    else:
+                        with torch.no_grad():
+                            # Q of expert's original actions
+                            Q_expert = self.critic(
+                                state[expert_mask], goal[expert_mask],
+                                action[expert_mask],
+                                fixed_zsa[expert_mask],
+                                fixed_zs[expert_mask]
+                            ).mean(dim=1)
+                            # Q of our policy actions on expert states
+                            Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
+                            bc_filter = (Q_expert > Q_policy)
+
+                        if bc_filter.any():
+                            bc_loss = F.mse_loss(
+                                pi_action[expert_mask][bc_filter],
+                                action[expert_mask][bc_filter])
 
             total_actor_loss = rl_loss + bc_weight * bc_loss
 

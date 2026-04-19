@@ -121,7 +121,8 @@ def train_expert_hrl(args):
         noise_clip=args.noise_clip, policy_freq=args.policy_freq,
         zs_dim=args.zs_dim,
         lap_alpha=args.lap_alpha,
-        lap_min_priority=args.lap_min_priority
+        lap_min_priority=args.lap_min_priority,
+        use_soft_q_filter=args.use_soft_q_filter
     )
 
     # ---- 3. Replay Buffers ----
@@ -1080,7 +1081,15 @@ if __name__ == "__main__":
 
     # --- 行为克隆参数 ---
     parser.add_argument("--bc_weight", default=1.0, type=float,
-                        help="行为克隆损失基础权重 (实际权重 = bc_weight * expert_prob)")
+                        help="行为克隆损失权重 (>0 开启)")
+    parser.add_argument("--use_soft_q_filter", action="store_true",
+                        help="是否使用 Soft Q-filter (默认使用硬过滤)")
+
+    # --- 碰撞回溯 ---
+    parser.add_argument("--crash_backtrack_steps", default=5, type=int,
+                        help="碰撞后回溯的步数 (0 禁用回溯惩罚)")
+    parser.add_argument("--crash_penalty_factor", default=5.0, type=float,
+                        help="碰撞惩罚因子 (惩罚 = 因子 * 回溯步数)")
 
     # --- 输出参数 ---
     parser.add_argument("--output_dir", default="expert_hrl_td7_output", type=str)

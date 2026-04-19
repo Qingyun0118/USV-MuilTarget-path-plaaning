@@ -172,7 +172,7 @@ class SACCritic(nn.Module):
     SAC Twin Critic (Goal-Conditioned) — 改进版
 
     改进:
-    1. Q1/Q2 各自拥有独立的 SensorCNN, 确保 Twin Q 真正独立
+    1. Q1/Q2 各自拥有独立的 SensorCNN, 确保 Twin Q 真正獨立
     2. 3 层隐藏层 + LayerNorm
     3. 输入归一化
 
@@ -261,7 +261,8 @@ class SACActuatorAgent:
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
                  lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
                  alpha=0.2, automatic_entropy_tuning=True,
-                 target_update_interval=1, lr_alpha=None):
+                 target_update_interval=1, lr_alpha=None,
+                 bc_tau=0.5, use_soft_q_filter=True):
         # Actor (Gaussian Policy)
         self.actor = GaussianActor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
@@ -275,22 +276,10 @@ class SACActuatorAgent:
         self.max_action = max_action
         self.gamma = gamma
         self.tau = tau
-        self.target_update_interval = target_update_interval
-        self.total_it = 0
-
-        # 熵正则化
         self.automatic_entropy_tuning = automatic_entropy_tuning
-        if lr_alpha is None:
-            lr_alpha = lr_actor
-        if automatic_entropy_tuning:
-            # 目标熵 = -0.5 * dim(action)
-            self.target_entropy = -0.5 * float(action_dim)
-            self.log_alpha = torch.tensor([np.log(alpha)], requires_grad=True, device=device)
-            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr_alpha)
-            self.log_alpha_min = np.log(0.01)  # alpha 下限 clamp
-            self.alpha = self.log_alpha.exp().item()
-        else:
-            self.alpha = alpha
+        self.target_update_interval = target_update_interval
+        self.bc_tau = bc_tau
+        self.use_soft_q_filter = use_soft_q_filter
 
     def select_action(self, state, goal, evaluate=False):
         """
@@ -377,15 +366,25 @@ class SACActuatorAgent:
                 # 使用 actor 的 mean 输出进行 BC (确定性部分)
                 expert_pi_mean = pi_mean[expert_mask]
 
-                # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
-                with torch.no_grad():
-                    q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                    q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
-                    bc_filter = (q_expert > q_pi).squeeze()
+                if self.use_soft_q_filter:
+                    with torch.no_grad():
+                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                        q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
+                        q_advantage = q_expert - q_pi
+                        soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
 
-                if bc_filter.any():
-                    bc_loss = F.mse_loss(
-                        expert_pi_mean[bc_filter], expert_actions[bc_filter])
+                    per_sample_bc = (expert_pi_mean - expert_actions).pow(2).mean(dim=1, keepdim=True)
+                    bc_loss = (soft_weight * per_sample_bc).mean()
+                else:
+                    # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
+                    with torch.no_grad():
+                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                        q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
+                        bc_filter = (q_expert > q_pi).squeeze()
+
+                    if bc_filter.any():
+                        bc_loss = F.mse_loss(
+                            expert_pi_mean[bc_filter], expert_actions[bc_filter])
 
         total_actor_loss = rl_loss + bc_weight * bc_loss
 

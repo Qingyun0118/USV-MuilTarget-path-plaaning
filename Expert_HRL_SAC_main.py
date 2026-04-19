@@ -105,7 +105,8 @@ def train_expert_hrl(args):
         gamma=args.gamma, tau=args.tau, alpha=args.sac_alpha,
         automatic_entropy_tuning=args.automatic_entropy_tuning,
         target_update_interval=args.target_update_interval,
-        lr_alpha=args.lr_alpha
+        lr_alpha=args.lr_alpha,
+        use_soft_q_filter=args.use_soft_q_filter
     )
 
     # ---- 3. Replay Buffers ----
@@ -944,6 +945,8 @@ if __name__ == "__main__":
     # --- 行为克隆参数 ---
     parser.add_argument("--bc_weight", default=3.0, type=float,
                         help="行为克隆损失基础权重 (实际权重 = bc_weight * expert_prob)")
+    parser.add_argument("--use_soft_q_filter", action="store_true",
+                        help="是否使用 Soft Q-filter (默认使用硬过滤)")
 
     # --- 输出参数 ---
     parser.add_argument("--output_dir", default="expert_hrl_sac_output", type=str)

@@ -243,7 +243,7 @@ class TD3ActuatorAgent:
     def __init__(self, state_dim, goal_dim, action_dim, max_action=1.0,
                  lr_actor=3e-4, lr_critic=3e-4, gamma=0.99, tau=0.005,
                  policy_noise=0.2, noise_clip=0.5, policy_freq=2,
-                 bc_tau=0.5):
+                 bc_tau=0.5, use_soft_q_filter=True):
         self.actor = Actor(state_dim, goal_dim, action_dim, max_action).to(device)
         self.actor_target = copy.deepcopy(self.actor)
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=lr_actor)
@@ -259,6 +259,7 @@ class TD3ActuatorAgent:
         self.noise_clip = noise_clip
         self.policy_freq = policy_freq
         self.bc_tau = bc_tau  # Soft Q-filter 温度参数
+        self.use_soft_q_filter = use_soft_q_filter
         self.total_it = 0
 
     def select_action(self, state, goal, noise=0.0):
@@ -386,15 +387,26 @@ class TD3ActuatorAgent:
                     expert_actions = action[expert_mask]  # Expert 专家动作
                     pi_expert = pi_action[expert_mask]    # actor 当前输出
 
-                    # Soft Q-filter: sigmoid 连续权重
-                    with torch.no_grad():
-                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                        q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
-                        q_advantage = q_expert - q_pi  # (n_expert, 1)
-                        soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # (n_expert, 1)
+                    if self.use_soft_q_filter:
+                        # Soft Q-filter: sigmoid 连续权重
+                        with torch.no_grad():
+                            q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                            q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
+                            q_advantage = q_expert - q_pi  # (n_expert, 1)
+                            soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # (n_expert, 1)
 
-                    per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
-                    bc_loss = (soft_weight * per_sample_bc).mean()
+                        per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
+                        bc_loss = (soft_weight * per_sample_bc).mean()
+                    else:
+                        # 硬 Q-filter
+                        with torch.no_grad():
+                            q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
+                            q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
+                            # 仅保留 Q(expert) > Q(pi) 的样本
+                            mask = (q_expert > q_pi).float()
+                        
+                        per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
+                        bc_loss = (mask * per_sample_bc).sum() / (mask.sum() + 1e-8)
 
             total_actor_loss = rl_loss + bc_weight * bc_loss
 

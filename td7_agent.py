@@ -617,12 +617,15 @@ class TD7ActuatorAgent:
                                 action[expert_mask],
                                 fixed_zsa[expert_mask],
                                 fixed_zs[expert_mask]
-                            ).mean(dim=1)
-                            Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
+                            ).mean(dim=1, keepdim=True)
+                            Q_policy = Q_pi[expert_mask].mean(
+                                dim=1, keepdim=True).detach()
                             q_advantage = Q_expert - Q_policy
                             soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
 
-                        per_sample_bc = (pi_action[expert_mask] - action[expert_mask]).pow(2).mean(dim=1, keepdim=True)
+                        per_sample_bc = (
+                            pi_action[expert_mask] - action[expert_mask]
+                        ).pow(2).mean(dim=1, keepdim=True)
                         bc_loss = (soft_weight * per_sample_bc).mean()
                     else:
                         with torch.no_grad():

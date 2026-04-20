@@ -280,6 +280,21 @@ class SACActuatorAgent:
         self.target_update_interval = target_update_interval
         self.bc_tau = bc_tau
         self.use_soft_q_filter = use_soft_q_filter
+        self.total_it = 0
+
+        # 熵正则化
+        self.automatic_entropy_tuning = automatic_entropy_tuning
+        if lr_alpha is None:
+            lr_alpha = lr_actor
+        if automatic_entropy_tuning:
+            # 目标熵 = -0.5 * dim(action)
+            self.target_entropy = -0.5 * float(action_dim)
+            self.log_alpha = torch.tensor([np.log(alpha)], requires_grad=True, device=device)
+            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=lr_alpha)
+            self.log_alpha_min = np.log(0.01)  # alpha 下限 clamp
+            self.alpha = self.log_alpha.exp().item()
+        else:
+            self.alpha = alpha
 
     def select_action(self, state, goal, evaluate=False):
         """

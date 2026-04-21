@@ -444,6 +444,10 @@ def train_expert_hrl(args):
         writer.add_scalar('Training/Epsilon', selector.epsilon, episode)
         writer.add_scalar('Training/ExplorationNoise', exploration_noise, episode)
         writer.add_scalar('Training/BC_Weight', args.bc_weight * expert_prob, episode)
+        bc_metrics = actuator.consume_bc_metrics()
+        writer.add_scalar('Training/BC_AvgSoftWeight', bc_metrics['avg_soft_weight'], episode)
+        writer.add_scalar('Training/BC_HitRate', bc_metrics['bc_hit_rate'], episode)
+        writer.add_scalar('Training/BC_ExpertSampleRatio', bc_metrics['expert_sample_ratio'], episode)
         writer.add_scalar('Buffer/Actuator', len(actuator_buffer), episode)
         writer.add_scalar('Buffer/Selector', len(selector_buffer), episode)
 

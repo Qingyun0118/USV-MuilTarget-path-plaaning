@@ -282,6 +282,12 @@ class SACActuatorAgent:
         self.use_soft_q_filter = use_soft_q_filter
         self.total_it = 0
 
+        # 训练期 BC 统计（按 train 调用累计，供主循环按 episode 消费）
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+
         # 熵正则化
         self.automatic_entropy_tuning = automatic_entropy_tuning
         if lr_alpha is None:
@@ -313,6 +319,34 @@ class SACActuatorAgent:
             else:
                 action, _, _ = self.actor.sample(state_t, goal_t)
         return action.cpu().numpy().flatten()
+
+    def _record_bc_metrics(self, soft_weight_avg, bc_hit_rate, expert_sample_ratio):
+        self._bc_metric_sum_soft_weight += float(soft_weight_avg)
+        self._bc_metric_sum_hit_rate += float(bc_hit_rate)
+        self._bc_metric_sum_expert_ratio += float(expert_sample_ratio)
+        self._bc_metric_count += 1
+
+    def consume_bc_metrics(self):
+        if self._bc_metric_count == 0:
+            return {
+                'avg_soft_weight': 0.0,
+                'bc_hit_rate': 0.0,
+                'expert_sample_ratio': 0.0,
+                'num_updates': 0,
+            }
+
+        inv_n = 1.0 / float(self._bc_metric_count)
+        stats = {
+            'avg_soft_weight': self._bc_metric_sum_soft_weight * inv_n,
+            'bc_hit_rate': self._bc_metric_sum_hit_rate * inv_n,
+            'expert_sample_ratio': self._bc_metric_sum_expert_ratio * inv_n,
+            'num_updates': self._bc_metric_count,
+        }
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+        return stats
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
         """
@@ -370,6 +404,10 @@ class SACActuatorAgent:
         # SAC actor loss: 最小化 α*log_π - Q
         rl_loss = (self.alpha * log_pi - min_q_pi).mean()
 
+        expert_sample_ratio = (is_expert > 0.5).float().mean().item()
+        soft_weight_avg = 0.0
+        bc_hit_rate = 0.0
+
         # 行为克隆损失 (Q-filtered BC)
         bc_loss = torch.tensor(0.0, device=device)
         if bc_weight > 0.0 and is_expert.sum() > 0:
@@ -387,6 +425,8 @@ class SACActuatorAgent:
                         q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
                         q_advantage = q_expert - q_pi
                         soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
+                        soft_weight_avg = soft_weight.mean().item()
+                        bc_hit_rate = (q_advantage > 0).float().mean().item()
 
                     per_sample_bc = (expert_pi_mean - expert_actions).pow(2).mean(dim=1, keepdim=True)
                     bc_loss = (soft_weight * per_sample_bc).mean()
@@ -396,6 +436,8 @@ class SACActuatorAgent:
                         q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
                         q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
                         bc_filter = (q_expert > q_pi).squeeze()
+                        bc_hit_rate = bc_filter.float().mean().item()
+                        soft_weight_avg = bc_hit_rate
 
                     if bc_filter.any():
                         bc_loss = F.mse_loss(
@@ -427,5 +469,7 @@ class SACActuatorAgent:
         # 更新 PER 优先级
         if indices is not None:
             replay_buffer.update_priorities(indices, td_errors)
+
+        self._record_bc_metrics(soft_weight_avg, bc_hit_rate, expert_sample_ratio)
 
         return critic_loss.item(), rl_loss.item(), bc_loss.item(), td_errors, indices

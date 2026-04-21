@@ -475,6 +475,12 @@ class TD7ActuatorAgent:
         self.max_Q_target = 0
         self.min_Q_target = 0
 
+        # 训练期 BC 统计（按 actor 更新累计，供主循环按 episode 消费）
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+
     def select_action(self, state, goal, noise=0.0, use_checkpoint=False):
         """
         选择动作, 支持 Checkpoint Policy
@@ -502,6 +508,34 @@ class TD7ActuatorAgent:
         self.actor_checkpoint.load_state_dict(self.actor.state_dict())
         self.checkpoint_encoder.load_state_dict(self.fixed_encoder.state_dict())
         self.checkpoint_ready = True
+
+    def _record_bc_metrics(self, soft_weight_avg, bc_hit_rate, expert_sample_ratio):
+        self._bc_metric_sum_soft_weight += float(soft_weight_avg)
+        self._bc_metric_sum_hit_rate += float(bc_hit_rate)
+        self._bc_metric_sum_expert_ratio += float(expert_sample_ratio)
+        self._bc_metric_count += 1
+
+    def consume_bc_metrics(self):
+        if self._bc_metric_count == 0:
+            return {
+                'avg_soft_weight': 0.0,
+                'bc_hit_rate': 0.0,
+                'expert_sample_ratio': 0.0,
+                'num_updates': 0,
+            }
+
+        inv_n = 1.0 / float(self._bc_metric_count)
+        stats = {
+            'avg_soft_weight': self._bc_metric_sum_soft_weight * inv_n,
+            'bc_hit_rate': self._bc_metric_sum_hit_rate * inv_n,
+            'expert_sample_ratio': self._bc_metric_sum_expert_ratio * inv_n,
+            'num_updates': self._bc_metric_count,
+        }
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+        return stats
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0):
         """
@@ -602,6 +636,10 @@ class TD7ActuatorAgent:
             Q_pi = self.critic(state, goal, pi_action,
                                fixed_zsa_pi, fixed_zs)
 
+            expert_sample_ratio = (is_expert > 0.5).float().mean().item()
+            soft_weight_avg = 0.0
+            bc_hit_rate = 0.0
+
             # RL 目标: 最大化平均 Q 值 (Q1 + Q2 都参与, 与参考一致)
             rl_loss = -Q_pi.mean()
 
@@ -622,6 +660,8 @@ class TD7ActuatorAgent:
                                 dim=1, keepdim=True).detach()
                             q_advantage = Q_expert - Q_policy
                             soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
+                            soft_weight_avg = soft_weight.mean().item()
+                            bc_hit_rate = (q_advantage > 0).float().mean().item()
 
                         per_sample_bc = (
                             pi_action[expert_mask] - action[expert_mask]
@@ -639,6 +679,8 @@ class TD7ActuatorAgent:
                             # Q of our policy actions on expert states
                             Q_policy = Q_pi[expert_mask].mean(dim=1).detach()
                             bc_filter = (Q_expert > Q_policy)
+                            bc_hit_rate = bc_filter.float().mean().item()
+                            soft_weight_avg = bc_hit_rate
 
                         if bc_filter.any():
                             bc_loss = F.mse_loss(
@@ -653,6 +695,7 @@ class TD7ActuatorAgent:
 
             actor_loss_val = rl_loss.item()
             bc_loss_val = bc_loss.item()
+            self._record_bc_metrics(soft_weight_avg, bc_hit_rate, expert_sample_ratio)
 
         # ==================================================================
         # 5. 周期性硬目标更新 (非 EMA, 与参考完全一致)

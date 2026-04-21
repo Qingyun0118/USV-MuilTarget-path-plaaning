@@ -262,6 +262,12 @@ class TD3ActuatorAgent:
         self.use_soft_q_filter = use_soft_q_filter
         self.total_it = 0
 
+        # 训练期 BC 统计（按 actor 更新累计，供主循环按 episode 消费）
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+
     def select_action(self, state, goal, noise=0.0):
         state_t = torch.FloatTensor(state).unsqueeze(0).to(device)
         goal_t = torch.FloatTensor(goal).unsqueeze(0).to(device)
@@ -271,6 +277,34 @@ class TD3ActuatorAgent:
             action = (action + np.random.normal(0, noise, size=action.shape)).clip(
                 -self.max_action, self.max_action)
         return action
+
+    def _record_bc_metrics(self, soft_weight_avg, bc_hit_rate, expert_sample_ratio):
+        self._bc_metric_sum_soft_weight += float(soft_weight_avg)
+        self._bc_metric_sum_hit_rate += float(bc_hit_rate)
+        self._bc_metric_sum_expert_ratio += float(expert_sample_ratio)
+        self._bc_metric_count += 1
+
+    def consume_bc_metrics(self):
+        if self._bc_metric_count == 0:
+            return {
+                'avg_soft_weight': 0.0,
+                'bc_hit_rate': 0.0,
+                'expert_sample_ratio': 0.0,
+                'num_updates': 0,
+            }
+
+        inv_n = 1.0 / float(self._bc_metric_count)
+        stats = {
+            'avg_soft_weight': self._bc_metric_sum_soft_weight * inv_n,
+            'bc_hit_rate': self._bc_metric_sum_hit_rate * inv_n,
+            'expert_sample_ratio': self._bc_metric_sum_expert_ratio * inv_n,
+            'num_updates': self._bc_metric_count,
+        }
+        self._bc_metric_sum_soft_weight = 0.0
+        self._bc_metric_sum_hit_rate = 0.0
+        self._bc_metric_sum_expert_ratio = 0.0
+        self._bc_metric_count = 0
+        return stats
 
     def train(self, replay_buffer, batch_size=256, bc_weight=0.0,
               demo_buffer=None, demo_ratio=0.25):
@@ -370,6 +404,10 @@ class TD3ActuatorAgent:
         if self.total_it % self.policy_freq == 0:
             pi_action = self.actor(state, goal)
 
+            expert_sample_ratio = (is_expert > 0.5).float().mean().item()
+            soft_weight_avg = 0.0
+            bc_hit_rate = 0.0
+
             # 标准 RL 目标: 最大化 Q 值
             rl_loss = -self.critic.Q1(state, goal, pi_action).mean()
 
@@ -394,6 +432,8 @@ class TD3ActuatorAgent:
                             q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
                             q_advantage = q_expert - q_pi  # (n_expert, 1)
                             soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # (n_expert, 1)
+                            soft_weight_avg = soft_weight.mean().item()
+                            bc_hit_rate = (q_advantage > 0).float().mean().item()
 
                         per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
                         bc_loss = (soft_weight * per_sample_bc).mean()
@@ -404,6 +444,8 @@ class TD3ActuatorAgent:
                             q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
                             # 仅保留 Q(expert) > Q(pi) 的样本
                             mask = (q_expert > q_pi).float()
+                            bc_hit_rate = mask.mean().item()
+                            soft_weight_avg = bc_hit_rate
                         
                         per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
                         bc_loss = (mask * per_sample_bc).sum() / (mask.sum() + 1e-8)
@@ -422,6 +464,7 @@ class TD3ActuatorAgent:
 
             actor_loss_val = rl_loss.item()
             bc_loss_val = bc_loss.item()
+            self._record_bc_metrics(soft_weight_avg, bc_hit_rate, expert_sample_ratio)
 
         # 更新 PER 优先级 (仅主 Buffer 部分, Demo Buffer 无 PER)
         if indices is not None:

@@ -883,7 +883,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=2026, type=int)
     parser.add_argument("--usv_length", default=3.0, type=float)
     parser.add_argument("--usv_width", default=1.5, type=float)
-    parser.add_argument("--target_radius", default=3.0, type=float)
+    parser.add_argument("--target_radius", default=5.0, type=float)
     parser.add_argument("--obstacle_radius_min", default=3.0, type=float)
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
     parser.add_argument("--use_random_shapes", action="store_true", default=True)

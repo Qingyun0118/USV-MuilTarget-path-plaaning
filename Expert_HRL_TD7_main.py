@@ -271,7 +271,8 @@ def train_expert_hrl(args):
         effective_ep = max(0, episode - args.fixed_env_episodes)
         expert_prob = expert_scheduler.get_expert_probability(effective_ep)
         # TD7 参考实现使用恒定探索噪声 (确定性策略需要持续探索)
-        exploration_noise = args.exploration_noise
+        exploration_noise = args.exploration_noise * max(
+        args.noise_min_ratio, 1.0 - episode / args.noise_decay_episodes)
 
         # ---- Episode 级跟踪变量 ----
         usv_pos = get_usv_pos(obs_dict)
@@ -1009,7 +1010,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=2026, type=int)
     parser.add_argument("--usv_length", default=3.0, type=float)
     parser.add_argument("--usv_width", default=1.5, type=float)
-    parser.add_argument("--target_radius", default=3.0, type=float)
+    parser.add_argument("--target_radius", default=5.0, type=float)
     parser.add_argument("--obstacle_radius_min", default=3.0, type=float)
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
     parser.add_argument("--use_random_shapes", action="store_true", default=True)
@@ -1072,8 +1073,8 @@ if __name__ == "__main__":
                         help="RL 策略探索噪声标准差 (参考实现: 0.1)")
     parser.add_argument("--noise_decay_episodes", default=800, type=int,
                         help="探索噪声衰减到最低值的 episode 数")
-    parser.add_argument("--noise_min_ratio", default=0.3, type=float,
-                        help="探索噪声最低比例")
+    parser.add_argument("--noise_min_ratio", default=1.0, type=float,
+                        help="探索噪声最低比例(1.0=不衰减, 对齐原始 TD7)")
 
     # --- Expert 概率衰减参数 ---
     parser.add_argument("--expert_p0", default=0.5, type=float,

@@ -117,9 +117,9 @@ def train_expert_hrl(args):
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
     actuator_buffer = GoalConditionedReplayBuffer(
         args.actuator_buffer_size,
-        alpha=args.per_alpha,
-        beta0=args.per_beta0,
-        expert_bonus=args.per_expert_bonus
+        # alpha=args.per_alpha,
+        # beta0=args.per_beta0,
+        # expert_bonus=args.per_expert_bonus
     )
 
     # ---- 4. Expert Controller ----
@@ -223,7 +223,7 @@ def train_expert_hrl(args):
         effective_ep = max(0, episode - args.fixed_env_episodes)
         expert_prob = expert_scheduler.get_expert_probability(effective_ep)
         exploration_noise = args.exploration_noise * max(
-            args.noise_min_ratio, 1.0 - episode / args.noise_decay_episodes)
+            args.noise_min_ratio, 1.0 - episode / args.noise_decay_episodes)# 恒定探索噪声
 
         # ---- Episode 级跟踪变量 ----
         usv_pos = get_usv_pos(obs_dict)
@@ -942,7 +942,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=2026, type=int)
     parser.add_argument("--usv_length", default=3.0, type=float)
     parser.add_argument("--usv_width", default=1.5, type=float)
-    parser.add_argument("--target_radius", default=3.0, type=float)
+    parser.add_argument("--target_radius", default=5.0, type=float)
     parser.add_argument("--obstacle_radius_min", default=3.0, type=float)
     parser.add_argument("--obstacle_radius_max", default=10.0, type=float)
     parser.add_argument("--use_random_shapes", action="store_true", default=True)

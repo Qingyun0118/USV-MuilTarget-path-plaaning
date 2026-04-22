@@ -60,4 +60,4 @@ def compute_actuator_reward(prev_dist, next_dist, min_sensor, crush, sub_done,
     elif sub_done:
         return approach + 5.0 + boundary_penalty
     else:
-        return approach + proximity_penalty + boundary_penalty - 0.01
+        return approach + proximity_penalty + boundary_penalty - 0.015

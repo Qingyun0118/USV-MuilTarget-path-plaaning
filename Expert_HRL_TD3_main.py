@@ -329,11 +329,9 @@ def train_expert_hrl(args):
                     is_expert=use_expert
                 )
 
-                # ---- 碰撞回溯惩罚 (可选, 默认关闭) ----
-                # 碰撞不仅是最后一步的错, 之前接近障碍物的步骤也有责任
-                # 注意: 与 PER 组合使用时可能导致 Critic 过度偏向极端负样本
-                if crush and getattr(args, 'crash_backtrack', False):
-                    backtrack_steps = min(nav_steps, 10)
+                # ---- 碰撞回溯惩罚 ----
+                if crush:
+                    backtrack_steps = min(nav_steps, args.crash_backtrack_steps)
                     actuator_buffer.update_last_n_rewards(
                         backtrack_steps + 1,
                         lambda k, old_r: old_r + (-5.0 * (1.0 - (k - 1) / backtrack_steps))
@@ -956,7 +954,7 @@ if __name__ == "__main__":
                         help="总训练 episode 数")
     parser.add_argument("--max_steps_per_target", default=1000, type=int,
                         help="导航到单个目标的最大步数")
-    parser.add_argument("--warmup_steps", default=1000, type=int,
+    parser.add_argument("--warmup_steps", default=5000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
     parser.add_argument("--fixed_env_episodes", default=0, type=int,
                         help="前 N 个 episode 使用固定种子环境 (先学会一个环境再泛化)")
@@ -1021,8 +1019,8 @@ if __name__ == "__main__":
                         help="Expert 数据优先级加成 (0=无加成, 避免采样偏向专家数据)")
 
     # --- 碰撞回溯 ---
-    parser.add_argument("--crash_backtrack", action="store_true", default=False,
-                        help="启用碰撞回溯惩罚 (与 PER 组合可能导致训练不稳定, 默认关闭)")
+    parser.add_argument("--crash_backtrack_steps", default=10, type=int,
+                        help="碰撞后回溯的步数 (0 禁用回溯惩罚)")
 
     # --- 输出参数 ---
     parser.add_argument("--output_dir", default="expert_hrl_td3_output", type=str)

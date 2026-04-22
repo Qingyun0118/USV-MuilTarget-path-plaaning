@@ -389,7 +389,7 @@ def train_expert_hrl(args):
 
                 # ---- 碰撞回溯惩罚 ----
                 if crush:
-                    backtrack_steps = min(nav_steps, 10)
+                    backtrack_steps = min(nav_steps, args.crash_backtrack_steps)
                     actuator_buffer.update_last_n_rewards(
                         backtrack_steps + 1,
                         lambda k, old_r: old_r + (-5.0 * (1.0 - (k - 1) / backtrack_steps))
@@ -1078,7 +1078,7 @@ if __name__ == "__main__":
 
     # --- Expert 概率衰减参数 ---
     parser.add_argument("--expert_p0", default=0.5, type=float,
-                        help="Expert 初始使用概率 (TD7 建议略高于 TD3, 因 checkpoint 会分流 RL 步数)")
+                        help="Expert 初始使用概率")
     parser.add_argument("--expert_p_min", default=0.05, type=float,
                         help="Expert 最低使用概率")
     parser.add_argument("--success_window", default=100, type=int,
@@ -1091,10 +1091,8 @@ if __name__ == "__main__":
                         help="是否使用 Soft Q-filter (默认使用硬过滤)")
 
     # --- 碰撞回溯 ---
-    parser.add_argument("--crash_backtrack_steps", default=5, type=int,
+    parser.add_argument("--crash_backtrack_steps", default=10, type=int,
                         help="碰撞后回溯的步数 (0 禁用回溯惩罚)")
-    parser.add_argument("--crash_penalty_factor", default=5.0, type=float,
-                        help="碰撞惩罚因子 (惩罚 = 因子 * 回溯步数)")
 
     # --- 输出参数 ---
     parser.add_argument("--output_dir", default="expert_hrl_td7_output", type=str)

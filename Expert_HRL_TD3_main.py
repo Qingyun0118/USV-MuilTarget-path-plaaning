@@ -117,9 +117,9 @@ def train_expert_hrl(args):
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
     actuator_buffer = GoalConditionedReplayBuffer(
         args.actuator_buffer_size,
-        # alpha=args.per_alpha,
-        # beta0=args.per_beta0,
-        # expert_bonus=args.per_expert_bonus
+        alpha=args.per_alpha,
+        beta0=args.per_beta0,
+        expert_bonus=args.per_expert_bonus
     )
 
     # ---- 4. Expert Controller ----
@@ -954,7 +954,7 @@ if __name__ == "__main__":
                         help="总训练 episode 数")
     parser.add_argument("--max_steps_per_target", default=1000, type=int,
                         help="导航到单个目标的最大步数")
-    parser.add_argument("--warmup_steps", default=5000, type=int,
+    parser.add_argument("--warmup_steps", default=1000, type=int,
                         help="Actuator 开始训练前的最小 buffer 数据量")
     parser.add_argument("--fixed_env_episodes", default=0, type=int,
                         help="前 N 个 episode 使用固定种子环境 (先学会一个环境再泛化)")
@@ -1019,7 +1019,7 @@ if __name__ == "__main__":
                         help="Expert 数据优先级加成 (0=无加成, 避免采样偏向专家数据)")
 
     # --- 碰撞回溯 ---
-    parser.add_argument("--crash_backtrack_steps", default=10, type=int,
+    parser.add_argument("--crash_backtrack_steps", default=0, type=int,
                         help="碰撞后回溯的步数 (0 禁用回溯惩罚)")
 
     # --- 输出参数 ---

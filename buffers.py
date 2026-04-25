@@ -224,31 +224,6 @@ class GoalConditionedReplayBuffer:
             self.tree.update(idx, priority)
             self.max_priority = max(self.max_priority, priority)
 
-    def update_priorities_raw(self, indices, priorities):
-        """
-        直接用已变换的优先级更新 (跳过内部 α 变换)
-
-        供 TD7 LAP 使用: 调用方已完成 clamp + pow(α) 变换,
-        此处仅做 Expert 加成和 SumTree 写入。
-
-        Args:
-            indices: tree indices (从 sample 返回)
-            priorities: numpy array or tensor, 已变换的优先级, shape (batch,)
-        """
-        if isinstance(priorities, torch.Tensor):
-            priorities = priorities.detach().cpu().numpy()
-        priorities = np.squeeze(priorities)
-
-        for idx, p in zip(indices, priorities):
-            priority = max(float(p), 1e-8)
-            # Expert 数据加成
-            data_idx = idx - self.tree.capacity + 1
-            data = self.tree.get_data_by_index(data_idx)
-            if data is not None and data[6] > 0.5:  # is_expert
-                priority += self.expert_bonus ** self.alpha
-            self.tree.update(idx, priority)
-            self.max_priority = max(self.max_priority, priority)
-
     def update_last_n_rewards(self, n, reward_modifier_fn):
         """
         修改最近 n 条 transition 的 reward (用于碰撞回溯惩罚)

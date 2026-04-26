@@ -251,7 +251,7 @@ def replay_multi(args, episode: int, params: dict):
             csv_dir,
             f"replay_multi_{args.num_usvs}usv_ep_{episode}.gif")
 
-    ep_seed = params['eval_seed'] + episode - 1
+    ep_seed = params['eval_seed'] + episode
     print(f"[replay] multi-USV ({args.num_usvs}) | episode={episode}, "
           f"ep_seed={ep_seed}")
     print(f"[replay] T={params['num_targets']}, O={params['num_obstacles']}")
@@ -388,7 +388,7 @@ if __name__ == "__main__":
     # ---- 动画参数 ----
     parser.add_argument("--interval", type=int, default=40,
                         help="帧间隔 (毫秒)")
-    parser.add_argument("--speed", type=int, default=5,
+    parser.add_argument("--speed", type=int, default=2,
                         help="每帧前进的点数")
     parser.add_argument("--trail_length", type=int, default=0,
                         help="尾迹保留长度 (0 = 全部)")

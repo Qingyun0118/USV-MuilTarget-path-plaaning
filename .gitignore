@@ -8,33 +8,16 @@ __pycache__/
 *.npy
 *.dump
 models/
-globalsea_20250901.nc
+data/
 runs/
 usvTest/
 Paper/
 .gitignore
-Paper/Dawood 等 - 2023 - Handling Sparse Rewards in Reinforcement Learning Using Model Predictive Control.pdf
-Paper/Han 等 - 2017 - Nonlinear Modeling for a Water-Jet Propulsion USV An Experimental Study.pdf
-Paper/Ma 等 - 2018 - Multi-objective path planning for unmanned surface vehicle with currents effects.pdf
-Paper/NeurIPS-2019-exploration-via-hindsight-goal-generation-Paper.pdf
-Paper/Yan 等 - 2024 - Hierarchical reinforcement learning for handling sparse rewards in multi-goal navigation.pdf
 debugLog/
 *.gif
 *.json
 *.txt
-expert_hrl_sac_output/
-expert_hrl_td3_output/
-expert_hrl_td7_output/
-ctde_mappo_output_hungarian/
-ctde_mappo_output_selector_dqn/
-ctde_mappo_output_selector_dqn_coord/
-ctde_mappo_output_selector_ppo/
-expert_hrl_td3_output_318/
-expert_hrl_td3_output_401/
-expert_hrl_td3_output_411/
-expert_hrl_td3_output_411_softQfilter/
-expert_hrl_td3_output_noexpert/
-expert_hrl_td7_output_404/
-expert_hrl_td7_output_409/
-expert_hrl_td7_output_410/
-expert_hrl_td7_output_noexpert/
+
+architecture_diagram.drawio
+1_Result/
+2_traincompare/

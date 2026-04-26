@@ -154,14 +154,14 @@ class MakespanHungarianAssigner(BaseAssigner):
         # 检查是否有USV完成队列, 需要从负载最重的偷取
         for i in usv_indices:
             if self.queue_ptr[i] >= len(self.queues[i]):
-                self._steal_target(i)
+                self._steal_target(i, obs_dict, scale)
 
         # 用 makespan 代价矩阵 + 匈牙利重新分配下一个目标
         self._hungarian_makespan_reassign(
             obs_dict, num_usvs, valid_mask, scale,
             current_target_idx, target_pos_norm, target_pos_abs)
 
-    def _steal_target(self, usv_idx):
+    def _steal_target(self, usv_idx, obs_dict=None, scale=None):
         """从估计剩余时间最长的USV队列末尾偷取目标。"""
         best_donor = -1
         best_time = -1
@@ -170,8 +170,7 @@ class MakespanHungarianAssigner(BaseAssigner):
                 continue
             remaining = len(q) - self.queue_ptr[i]
             if remaining > 1:
-                # 估算剩余时间
-                est_time = remaining * 20.0  # 粗略估计
+                est_time = self._estimate_queue_time(i, obs_dict, scale)
                 if est_time > best_time:
                     best_time = est_time
                     best_donor = i
@@ -179,6 +178,24 @@ class MakespanHungarianAssigner(BaseAssigner):
             stolen = self.queues[best_donor].pop()
             self.queues[usv_idx].append(stolen)
             self.queue_ptr[usv_idx] = len(self.queues[usv_idx]) - 1
+
+    def _estimate_queue_time(self, usv_idx, obs_dict=None, scale=None):
+        """估算 USV 完成剩余队列的时间 (基于欧氏距离/速度)。"""
+        ptr = self.queue_ptr[usv_idx]
+        q = self.queues[usv_idx]
+        remaining_targets = q[ptr:]
+        if not remaining_targets:
+            return 0.0
+        if obs_dict is None or scale is None:
+            return len(remaining_targets) * 30.0 / self.usv_speed
+
+        total_time = 0.0
+        cur_pos = get_usv_pos(obs_dict[f"usv_{usv_idx}"]) * scale
+        for t_idx in remaining_targets:
+            tp = get_target_pos(obs_dict[f"usv_{usv_idx}"], t_idx) * scale
+            total_time += np.linalg.norm(cur_pos - tp) / self.usv_speed
+            cur_pos = tp
+        return total_time
 
     def _hungarian_makespan_reassign(
         self, obs_dict, num_usvs, valid_mask, scale,
@@ -191,20 +208,9 @@ class MakespanHungarianAssigner(BaseAssigner):
         if n_valid == 0:
             return
 
-        # 计算每个USV队列剩余时间
         remaining_times = np.zeros(num_usvs, dtype=np.float64)
         for i in range(num_usvs):
-            ptr = self.queue_ptr[i]
-            if ptr < len(self.queues[i]):
-                # 估计: 当前目标剩余距离 + 队列中后续距离
-                remaining = 0.0
-                up = get_usv_pos(obs_dict[f"usv_{i}"]) * scale
-                tp = get_target_pos(obs_dict[f"usv_{i}"],
-                                    current_target_idx[i]) * scale
-                remaining += np.linalg.norm(up - tp) / self.usv_speed
-                # 粗略估计后续队列时间
-                remaining += max(0, len(self.queues[i]) - ptr - 1) * 15.0
-                remaining_times[i] = remaining
+            remaining_times[i] = self._estimate_queue_time(i, obs_dict, scale)
 
         # 构建 makespan 代价矩阵
         n_cols = max(num_usvs, n_valid)

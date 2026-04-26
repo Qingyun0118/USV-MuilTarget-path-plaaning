@@ -505,14 +505,29 @@ class MakespanSelectorPPOAssigner(BaseAssigner):
         self._pending_decisions = {}
 
     def _estimate_remaining(self, info, obs_dict, usv_idx):
-        """估计剩余 makespan: 剩余目标数 和 平均距离."""
+        """估计剩余 makespan: 剩余目标数 和 平均距离到最近未完成目标."""
         target_status = info.get('target_status', None)
-        if target_status is not None:
-            remaining = int(np.sum(target_status == 0))
-        else:
-            remaining = 1
-        # 粗略平均距离估计
-        avg_dist = 100.0
+        if target_status is None:
+            return 1, 50.0
+
+        remaining = int(np.sum(target_status == 0))
+        if remaining == 0:
+            return 0, 0.0
+
+        usv_key = f"usv_{usv_idx}"
+        if usv_key not in obs_dict:
+            return remaining, 50.0
+
+        usv_pos = get_usv_pos(obs_dict[usv_key])
+        n_targets = len(target_status)
+        dists = []
+        for j in range(n_targets):
+            if target_status[j] == 0:
+                tp = get_target_pos(obs_dict[usv_key], j)
+                dists.append(np.linalg.norm(usv_pos - tp))
+
+        avg_dist_norm = float(np.mean(dists)) if dists else 0.0
+        avg_dist = avg_dist_norm * 100.0
         return remaining, avg_dist
 
     # ==========================================================================

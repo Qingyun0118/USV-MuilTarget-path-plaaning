@@ -17,7 +17,8 @@ from USV import USV
 from colregs_module import (
     EncounterType, NUM_ENCOUNTER_TYPES, OTHER_USV_OBS_DIM,
     ShipDomain, compute_full_colregs_assessment,
-    compute_colregs_penalty, get_other_usv_obs_features, normalize_angle
+    compute_colregs_penalty, compute_colregs_reward,
+    get_other_usv_obs_features, normalize_angle
 )
 
 # 障碍物形状枚举
@@ -1409,6 +1410,7 @@ class MultiUsvEnv(MyUsvEnv):
                  per_usv_max_steps=2000,
                  fixed_start_positions=None,
                  colregs_k_C=5.0,
+                 colregs_k_R=1.0,
                  starboard_threshold=-0.05,
                  **kwargs):
         self.num_usvs = int(max(1, num_usvs))
@@ -1429,6 +1431,7 @@ class MultiUsvEnv(MyUsvEnv):
         self.ship_domain = ShipDomain(r_min=max(4.0, usv_bounding * 2))
         self.colregs_matrix = {}          # (i,j) → colregs assessment dict
         self.colregs_k_C = float(colregs_k_C)
+        self.colregs_k_R = float(colregs_k_R)
         self.starboard_threshold = float(starboard_threshold)
         self._other_usv_obs_dim = OTHER_USV_OBS_DIM  # 16 per other USV
 
@@ -1671,6 +1674,11 @@ class MultiUsvEnv(MyUsvEnv):
 
         self._update_sensors()
         self._update_colregs_matrix()
+
+        # 趋近奖励归一化: 记录每艘 USV 到当前目标的初始距离
+        self._goal_initial_dists = np.zeros(self.num_usvs, dtype=np.float32)
+        self._prev_goal_positions = [None] * self.num_usvs
+
         return self._get_observation()
 
     def step(self, actions, goal_positions_global, usv_active_mask=None):
@@ -1869,6 +1877,14 @@ class MultiUsvEnv(MyUsvEnv):
             prev_dists[i] = np.linalg.norm(
                 self.current_positions[i] - goal_positions_global[i])
 
+            # 检测目标是否变更 → 记录初始距离 (用于趋近奖励归一化)
+            goal_changed = (self._prev_goal_positions[i] is None or
+                            not np.array_equal(self._prev_goal_positions[i],
+                                               goal_positions_global[i]))
+            if goal_changed:
+                self._goal_initial_dists[i] = max(prev_dists[i], 1.0)
+                self._prev_goal_positions[i] = goal_positions_global[i].copy()
+
         # ---------- 2. 执行物理步进 (复用 step) ----------
         obs, done, crush, truncated, info = self.step(
             actions, goal_positions_global, usv_active_mask)
@@ -1880,7 +1896,7 @@ class MultiUsvEnv(MyUsvEnv):
         for i in range(self.num_usvs):
             r_i, details_i = self._compute_per_agent_reward(
                 i, actions[i], goal_positions_global[i],
-                prev_dists[i], info, obs)
+                prev_dists[i], self._goal_initial_dists[i], info, obs)
             rewards_dict[f"usv_{i}"] = r_i
             reward_details[i] = details_i
 
@@ -1914,16 +1930,17 @@ class MultiUsvEnv(MyUsvEnv):
         return obs, rewards_dict, dones_dict, truncated_dict, info
 
     def _compute_per_agent_reward(self, usv_idx, action, goal_global,
-                                  prev_dist, info, obs):
+                                  prev_dist, init_dist, info, obs):
         """
         计算单个 USV 的 CTDE reward.
 
         Components:
-          r_approach:    趋近子目标奖励
+          r_approach:    归一化趋近子目标奖励 (Δdist / d_0 × R_max)
           r_reach:       到达子目标奖励
           r_obs_col:     静态障碍物碰撞惩罚
           r_usv_col:     USV 间碰撞惩罚
           r_colregs:     COLREGs 合规惩罚 (R_C = k_C × u_CRI)
+          r_colregs_reward: COLREGs 合规正奖励
           r_proximity:   传感器接近惩罚
           r_boundary:    越界惩罚
           r_step:        时间步惩罚
@@ -1932,24 +1949,27 @@ class MultiUsvEnv(MyUsvEnv):
             total_reward: float
             details: dict 各分项
         """
-        # --- 趋近奖励 ---
+        # --- 归一化趋近奖励 ---
+        # Δdist / d_0 × R_max: 无论距离远近, 完整趋近一个目标的总奖励恒为 R_max
+        R_max = 5.0
         new_pos = info['usv_positions'][usv_idx]
         new_dist = np.linalg.norm(new_pos - goal_global)
-        r_approach = (prev_dist - new_dist) * 10.0
+        r_approach = (prev_dist - new_dist) / max(init_dist, 1.0) * R_max
 
         # --- 到达奖励 ---
         r_reach = 5.0 if info['reached_goals'][usv_idx] else 0.0
 
         # --- 静态障碍碰撞 ---
-        r_obs_col = -10.0 if info['obstacle_collisions'][usv_idx] else 0.0
+        r_obs_col = -50.0 if info['obstacle_collisions'][usv_idx] else 0.0
 
         # --- USV 间碰撞 ---
         usv_collided = any(
             usv_idx in pair for pair in info['usv_collision_pairs'])
-        r_usv_col = -10.0 if usv_collided else 0.0
+        r_usv_col = -50.0 if usv_collided else 0.0
 
-        # --- COLREGs 合规惩罚 ---
+        # --- COLREGs 惩罚 + 合规奖励 ---
         r_colregs = 0.0
+        r_colregs_reward = 0.0
         rudder_action = float(action[1])
         for j in range(self.num_usvs):
             if j == usv_idx:
@@ -1960,6 +1980,10 @@ class MultiUsvEnv(MyUsvEnv):
             r_colregs += compute_colregs_penalty(
                 ci['encounter_type'], ci['cri'], rudder_action,
                 k_C=self.colregs_k_C,
+                starboard_threshold=self.starboard_threshold)
+            r_colregs_reward += compute_colregs_reward(
+                ci['encounter_type'], ci['cri'], rudder_action,
+                k_R=self.colregs_k_R,
                 starboard_threshold=self.starboard_threshold)
 
         # --- 传感器近距惩罚 ---
@@ -1980,7 +2004,8 @@ class MultiUsvEnv(MyUsvEnv):
         r_step = -0.01
 
         total = (r_approach + r_reach + r_obs_col + r_usv_col +
-                 r_colregs + r_proximity + r_boundary + r_step)
+                 r_colregs + r_colregs_reward + r_proximity +
+                 r_boundary + r_step)
 
         details = {
             'approach': r_approach,
@@ -1988,6 +2013,7 @@ class MultiUsvEnv(MyUsvEnv):
             'obs_collision': r_obs_col,
             'usv_collision': r_usv_col,
             'colregs': r_colregs,
+            'colregs_reward': r_colregs_reward,
             'proximity': r_proximity,
             'boundary': r_boundary,
             'step': r_step,
@@ -2414,6 +2440,214 @@ class MultiUsvEnv(MyUsvEnv):
             plt.close()
         else:
             plt.show()
+
+
+# ==================== COLREGs 专项测试场景 ====================
+
+def _deg2rad(deg):
+    return float(np.deg2rad(deg))
+
+
+COLREGS_TEST_SCENARIOS = {
+    # E1: 本船追越他船，本船让路（左/右均可）
+    "E1": {
+        "description": "追越-让路：本船追越他船，本船应主动规避。",
+        "expected_encounter": EncounterType.OVERTAKING_GIVE_WAY,
+        "expected_behavior": "本船应改变航向（左/右均可），避免直航硬追。",
+        "start_positions": [[20.0, 50.0], [36.0, 50.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(0.0)],
+        "initial_speeds": [2.6, 1.2],
+        "targets": [{"x": 92.0, "y": 50.0}, {"x": 96.0, "y": 50.0}],
+        "obstacles": [
+            {"x": 85.0, "y": 20.0, "shape": ObstacleShape.CIRCLE, "radius_o": 4.0}
+        ],
+        "rule_violation_pairs": []
+    },
+    # E2: 他船追越本船，本船直航保持
+    "E2": {
+        "description": "追越-直航：他船追越本船，本船应保持航向。",
+        "expected_encounter": EncounterType.OVERTAKING_STAND_ON,
+        "expected_behavior": "本船应保持航向，避免不必要避让。",
+        "start_positions": [[30.0, 50.0], [20.0, 50.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(0.0)],
+        "initial_speeds": [1.2, 2.6],
+        "targets": [{"x": 84.0, "y": 50.0}, {"x": 88.0, "y": 50.0}],
+        "obstacles": [
+            {"x": 85.0, "y": 20.0, "shape": ObstacleShape.CIRCLE, "radius_o": 4.0}
+        ],
+        "rule_violation_pairs": []
+    },
+    # E3: 对遇，双方应右转
+    "E3": {
+        "description": "对遇：两船迎面相遇，双方均应向右转。",
+        "expected_encounter": EncounterType.HEAD_ON,
+        "expected_behavior": "本船应右转避让（rudder<0）。",
+        "start_positions": [[42.0, 50.0], [58.0, 50.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(180.0)],
+        "initial_speeds": [2.2, 2.2],
+        "targets": [{"x": 90.0, "y": 50.0}, {"x": 10.0, "y": 50.0}],
+        "obstacles": [
+            {"x": 50.0, "y": 82.0, "shape": ObstacleShape.CIRCLE, "radius_o": 4.0}
+        ],
+        "rule_violation_pairs": []
+    },
+    # E4: 右舷交叉，本船让路（右转）
+    "E4": {
+        "description": "交叉-让路：他船位于本船右舷交叉，本船应向右转让路。",
+        "expected_encounter": EncounterType.CROSSING_GIVE_WAY,
+        "expected_behavior": "本船应右转避让（rudder<0）。",
+        "start_positions": [[40.0, 50.0], [50.0, 45.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(90.0)],
+        "initial_speeds": [2.3, 2.0],
+        "targets": [{"x": 90.0, "y": 50.0}, {"x": 50.0, "y": 90.0}],
+        "obstacles": [
+            {"x": 14.0, "y": 15.0, "shape": ObstacleShape.CIRCLE, "radius_o": 3.5}
+        ],
+        "rule_violation_pairs": []
+    },
+    # E5: 左舷交叉，本船直航保持
+    "E5": {
+        "description": "交叉-直航：他船位于本船左舷交叉，本船应保持航向。",
+        "expected_encounter": EncounterType.CROSSING_STAND_ON,
+        "expected_behavior": "本船应保持航向，避免过度规避。",
+        "start_positions": [[40.0, 50.0], [50.0, 55.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(-90.0)],
+        "initial_speeds": [2.3, 2.0],
+        "targets": [{"x": 90.0, "y": 50.0}, {"x": 50.0, "y": 10.0}],
+        "obstacles": [
+            {"x": 14.0, "y": 85.0, "shape": ObstacleShape.CIRCLE, "radius_o": 3.5}
+        ],
+        "rule_violation_pairs": []
+    },
+    # E6: 他船违规/失控，本船主动让路（通过 override 注入）
+    "E6": {
+        "description": "违规或失控：他船违反规则或失去机动性，本船应主动让路。",
+        "expected_encounter": EncounterType.RULE_VIOLATION,
+        "expected_behavior": "本船应主动规避（通常右转更安全）。",
+        "start_positions": [[40.0, 50.0], [50.0, 45.0]],
+        "headings": [_deg2rad(0.0), _deg2rad(110.0)],
+        "initial_speeds": [2.4, 1.8],
+        "targets": [{"x": 90.0, "y": 50.0}, {"x": 50.0, "y": 90.0}],
+        "obstacles": [
+            {"x": 82.0, "y": 82.0, "shape": ObstacleShape.CIRCLE, "radius_o": 4.0}
+        ],
+        "rule_violation_pairs": [(0, 1)]
+    }
+}
+
+
+def get_colregs_test_case_config(case_name):
+    """获取 COLREGs 测试场景配置（E1-E6）。"""
+    key = str(case_name).upper().strip()
+    if key not in COLREGS_TEST_SCENARIOS:
+        valid = ", ".join(sorted(COLREGS_TEST_SCENARIOS.keys()))
+        raise ValueError(f"Unknown COLREGs case '{case_name}', valid cases: {valid}")
+
+    base = COLREGS_TEST_SCENARIOS[key]
+    return {
+        "case_id": key,
+        "description": base["description"],
+        "expected_encounter": base["expected_encounter"],
+        "expected_behavior": base["expected_behavior"],
+        "start_positions": [np.array(p, dtype=np.float32) for p in base["start_positions"]],
+        "headings": [float(h) for h in base["headings"]],
+        "initial_speeds": [float(s) for s in base["initial_speeds"]],
+        "targets": [dict(t) for t in base["targets"]],
+        "obstacles": [dict(o) for o in base["obstacles"]],
+        "rule_violation_pairs": list(base.get("rule_violation_pairs", []))
+    }
+
+
+def list_colregs_test_cases():
+    """列出所有可用 COLREGs 测试场景及说明。"""
+    return {
+        case_id: cfg["description"]
+        for case_id, cfg in COLREGS_TEST_SCENARIOS.items()
+    }
+
+
+class ColregsTestMultiUsvEnv(MultiUsvEnv):
+    """
+    COLREGs 专项测试环境（硬编码场景）。
+
+    - 固定 USV 起点、初始航向、初始速度
+    - 固定目标点与障碍物
+    - 支持 E6 场景的 encounter override（RULE_VIOLATION）
+    """
+
+    def __init__(self, case_name="E3", **kwargs):
+        self.colregs_case = get_colregs_test_case_config(case_name)
+        self.colregs_rule_violation_pairs = set(
+            tuple(p) for p in self.colregs_case.get("rule_violation_pairs", []))
+
+        kwargs.setdefault("num_usvs", 2)
+        kwargs.setdefault("num_targets", len(self.colregs_case["targets"]))
+        kwargs.setdefault("num_obstacles", len(self.colregs_case["obstacles"]))
+        kwargs.setdefault("fixed_start_positions", self.colregs_case["start_positions"])
+        kwargs.setdefault("fixed_targets", self.colregs_case["targets"])
+        kwargs.setdefault("fixed_obstacles", self.colregs_case["obstacles"])
+        kwargs.setdefault("use_random_shapes", False)
+        kwargs.setdefault("current_type", "generated")
+
+        super().__init__(**kwargs)
+
+    def _generate_environment(self):
+        """先按父类生成，再强制注入场景初始航向/速度。"""
+        super()._generate_environment()
+
+        headings = self.colregs_case["headings"]
+        speeds = self.colregs_case["initial_speeds"]
+        for i, usv in enumerate(self.usvs):
+            if i < len(headings):
+                usv.heading = float(headings[i])
+            if i < len(speeds):
+                usv.u = float(speeds[i])
+            usv.v = 0.0
+            usv.r = 0.0
+            usv._update_polygon()
+
+        self.current_positions = np.array(
+            [[u.x, u.y] for u in self.usvs], dtype=np.float32)
+        self.current_pos = self.current_positions[0].copy()
+        self.usv = self.usvs[0]
+
+    def _update_colregs_matrix(self):
+        """常规计算后，按测试需求覆盖特定 pair 的会遇类型。"""
+        super()._update_colregs_matrix()
+        for pair in self.colregs_rule_violation_pairs:
+            if pair in self.colregs_matrix:
+                self.colregs_matrix[pair]["encounter_type"] = EncounterType.RULE_VIOLATION
+
+    def get_case_summary(self):
+        """返回当前测试场景的摘要信息。"""
+        return {
+            "case_id": self.colregs_case["case_id"],
+            "description": self.colregs_case["description"],
+            "expected_encounter": int(self.colregs_case["expected_encounter"]),
+            "expected_encounter_name": self.colregs_case["expected_encounter"].name,
+            "expected_behavior": self.colregs_case["expected_behavior"]
+        }
+
+    def get_current_encounter(self, own_idx=0, target_idx=1):
+        """读取当前 pair 的会遇类型与风险指标。"""
+        ci = self.colregs_matrix.get((own_idx, target_idx))
+        if ci is None:
+            return None
+        et = EncounterType(ci["encounter_type"])
+        return {
+            "pair": (own_idx, target_idx),
+            "encounter_type": int(et),
+            "encounter_name": et.name,
+            "cri": float(ci.get("cri", 0.0)),
+            "dcpa": float(ci.get("dcpa", 0.0)),
+            "tcpa": float(ci.get("tcpa", 0.0)),
+            "bearing_rel": float(ci.get("bearing_rel", 0.0))
+        }
+
+
+def create_colregs_test_env(case_name, **kwargs):
+    """工厂函数：创建一个硬编码 COLREGs 测试环境。"""
+    return ColregsTestMultiUsvEnv(case_name=case_name, **kwargs)
 
 
 # 兼容性：保留旧的全局变量定义

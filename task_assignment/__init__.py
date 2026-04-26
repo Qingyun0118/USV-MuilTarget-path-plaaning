@@ -1,38 +1,22 @@
 """
 task_assignment — 任务分配算法包
 
-将不同的目标分配策略封装为独立模块:
-  - hungarian:    匈牙利算法 (全局最优分配)
-  - selector_ppo: PPO 目标选择器 (on-policy, 可学习)
-  - coord_dqn:    协调 DQN 目标选择器 (off-policy, 可学习)
-  - coord_utils:  多智能体协调信息构建工具
-
-用法:
-  from task_assignment import hungarian_assign, build_coord_info
-  from task_assignment import SelectorPPOAgent
-  from task_assignment import CoordSelectorDQNAgent
+三种分配方法:
+  - hungarian:          匈牙利算法全局最优二部图匹配 (Baseline 2)
+  - hungarian_makespan: 最小化 Makespan 的匈牙利分配器 (Proposed 1)
+  - mappo_makespan:     PPO 学习型 Makespan 分配器 (Proposed 2)
 """
 
-from task_assignment.hungarian import hungarian_assign
-from task_assignment.coord_utils import build_coord_info
-from task_assignment.selector_ppo import (
-    SelectorPolicyNet, SelectorValueNet,
-    SelectorPPORolloutBuffer, SelectorPPOAgent,
-)
-from task_assignment.coord_dqn import (
-    CoordSelectorQNet, SelectorDQNReplayBuffer,
-    CoordSelectorDQNAgent,
-)
+from task_assignment.base import BaseAssigner
+from task_assignment.hungarian import HungarianAssigner, hungarian_assign
+from task_assignment.hungarian_makespan import MakespanHungarianAssigner
+from task_assignment.selector_ppo_makespan import MakespanSelectorPPOAssigner
+from task_assignment.factory import create_assigner
 
 __all__ = [
-    # 匈牙利算法
-    'hungarian_assign',
-    # 协调工具
-    'build_coord_info',
-    # PPO Selector
-    'SelectorPolicyNet', 'SelectorValueNet',
-    'SelectorPPORolloutBuffer', 'SelectorPPOAgent',
-    # 协调 DQN Selector
-    'CoordSelectorQNet', 'SelectorDQNReplayBuffer',
-    'CoordSelectorDQNAgent',
+    'BaseAssigner',
+    'HungarianAssigner', 'hungarian_assign',
+    'MakespanHungarianAssigner',
+    'MakespanSelectorPPOAssigner',
+    'create_assigner',
 ]

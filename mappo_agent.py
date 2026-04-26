@@ -36,7 +36,7 @@ class CentralizedCritic(nn.Module):
     使用 LayerNorm + Orthogonal Init (PPO 标准做法).
     """
 
-    def __init__(self, global_state_dim, hidden_dim=256):
+    def __init__(self, global_state_dim, hidden_dim=512):
         super().__init__()
         self.net = nn.Sequential(
             nn.LayerNorm(global_state_dim),
@@ -219,6 +219,11 @@ def compute_log_prob(actor, state_t, goal_t, action_t):
     mean, log_std = actor(state_t, goal_t)
     std = log_std.exp()
 
+    # NaN 防护: 如果 Actor 权重爆炸导致输出 NaN, 用零均值 + 大方差兜底
+    if torch.isnan(mean).any() or torch.isnan(std).any():
+        mean = torch.zeros_like(mean)
+        std = torch.ones_like(std)
+
     # 反 tanh: action = tanh(x) * max_action → x = atanh(action / max_action)
     max_action = actor.max_action
     a_norm = (action_t / max_action).clamp(-0.999, 0.999)
@@ -257,7 +262,8 @@ class MAPPOTrainer:
                  lr_actor=3e-5, lr_critic=3e-4,
                  clip_eps=0.2, entropy_coef=0.01,
                  max_grad_norm=0.5, ppo_epochs=10,
-                 mini_batch_size=256, gamma=0.99, gae_lambda=0.95):
+                 mini_batch_size=256, gamma=0.99, gae_lambda=0.95,
+                 target_kl=0.02):
         self.actor = actor
         self.critic = critic
 
@@ -273,6 +279,31 @@ class MAPPOTrainer:
         self.mini_batch_size = mini_batch_size
         self.gamma = gamma
         self.gae_lambda = gae_lambda
+        self.target_kl = target_kl
+
+        # Return 归一化: 追踪 returns 的运行均值/标准差, 用于缩放 Critic Loss
+        self._ret_rms_mean = 0.0
+        self._ret_rms_var = 1.0
+        self._ret_rms_count = 1e-4  # 避免除零
+
+    def _update_ret_rms(self, returns_np):
+        """用 Welford 算法更新 return 运行统计量."""
+        batch_mean = returns_np.mean()
+        batch_var = returns_np.var()
+        batch_count = len(returns_np)
+
+        delta = batch_mean - self._ret_rms_mean
+        total = self._ret_rms_count + batch_count
+        self._ret_rms_mean += delta * batch_count / total
+        m_a = self._ret_rms_var * self._ret_rms_count
+        m_b = batch_var * batch_count
+        m2 = m_a + m_b + delta ** 2 * self._ret_rms_count * batch_count / total
+        self._ret_rms_var = m2 / total
+        self._ret_rms_count = total
+
+    @property
+    def _ret_std(self):
+        return max(np.sqrt(self._ret_rms_var), 1e-6)
 
     # ---- 推理辅助 ----
 
@@ -298,15 +329,19 @@ class MAPPOTrainer:
         action, log_prob, _ = self.actor.sample(s, g)
         value = self.critic(gs)
 
+        # 反归一化: Critic 输出归一化 V(s), 还原到原始 reward 尺度用于 GAE
+        denorm_value = value.cpu().item() * self._ret_std + self._ret_rms_mean
+
         return (action.cpu().numpy().flatten(),
                 log_prob.cpu().item(),
-                value.cpu().item())
+                denorm_value)
 
     @torch.no_grad()
     def get_value(self, global_state):
-        """获取价值估计 (用于 GAE bootstrap)."""
+        """获取价值估计 (用于 GAE bootstrap), 反归一化到原始尺度."""
         gs = torch.FloatTensor(global_state).unsqueeze(0).to(device)
-        return self.critic(gs).item()
+        v = self.critic(gs).item()
+        return v * self._ret_std + self._ret_rms_mean
 
     @torch.no_grad()
     def get_deterministic_action(self, state, goal):
@@ -333,8 +368,20 @@ class MAPPOTrainer:
         total_entropy = 0.0
         total_approx_kl = 0.0
         n_updates = 0
+        kl_early_stopped = False
+
+        # 保存 Actor 权重快照, 用于 NaN 回滚
+        import copy
+        actor_snapshot = copy.deepcopy(self.actor.state_dict())
+
+        # 更新 return 运行统计 (用于归一化 Critic 目标)
+        n = buffer.ptr
+        all_returns = buffer.returns[:n].reshape(-1)
+        self._update_ret_rms(all_returns)
 
         for _epoch in range(self.ppo_epochs):
+            if kl_early_stopped:
+                break
             for batch in buffer.get_batches(self.mini_batch_size):
                 obs = batch['obs']
                 actions = batch['actions']
@@ -344,14 +391,56 @@ class MAPPOTrainer:
                 goals = batch['goals']
                 global_states = batch['global_states']
 
-                # 标准化优势
-                adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                # 归一化 returns 作为 Critic 训练目标
+                returns_norm = (returns - self._ret_rms_mean) / self._ret_std
+
+                # 标准化优势 (防止单样本 batch std=NaN)
+                if advantages.numel() > 1:
+                    adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                else:
+                    adv = advantages - advantages.mean()
+                # 裁剪极端优势值, 防止梯度爆炸
+                adv = adv.clamp(-10.0, 10.0)
 
                 # ---- Actor 更新 ----
                 new_log_probs, entropy = compute_log_prob(
                     self.actor, obs, goals, actions)
 
+                # NaN 检查: Actor 权重爆炸时跳过该 batch
+                if torch.isnan(new_log_probs).any():
+                    print("[WARNING] NaN detected in Actor output, skipping batch")
+                    # 仍然更新 Critic
+                    values = self.critic(global_states).squeeze(-1)
+                    critic_loss = F.mse_loss(values, returns_norm)
+                    self.critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm)
+                    self.critic_optimizer.step()
+                    total_critic_loss += critic_loss.item()
+                    n_updates += 1
+                    continue
+
                 ratio = torch.exp(new_log_probs - old_log_probs)
+
+                # KL 早停检查 — 在 Actor 梯度更新前
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1) - ratio.log()).mean().item()
+                if self.target_kl is not None and approx_kl > self.target_kl:
+                    kl_early_stopped = True
+                    # 仍然更新 Critic (Critic 不受 KL 约束)
+                    values = self.critic(global_states).squeeze(-1)
+                    critic_loss = F.mse_loss(values, returns_norm)
+                    self.critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm)
+                    self.critic_optimizer.step()
+                    total_critic_loss += critic_loss.item()
+                    total_approx_kl += approx_kl
+                    n_updates += 1
+                    break
+
                 surr1 = ratio * adv
                 surr2 = torch.clamp(
                     ratio, 1 - self.clip_eps, 1 + self.clip_eps) * adv
@@ -366,9 +455,17 @@ class MAPPOTrainer:
                     self.actor.parameters(), self.max_grad_norm)
                 self.actor_optimizer.step()
 
+                # NaN 回滚: 如果 Actor 权重爆炸, 恢复快照并停止更新
+                if any(torch.isnan(p).any() for p in self.actor.parameters()):
+                    print("[WARNING] Actor weights NaN after update, "
+                          "rolling back to snapshot")
+                    self.actor.load_state_dict(actor_snapshot)
+                    kl_early_stopped = True
+                    break
+
                 # ---- Critic 更新 ----
                 values = self.critic(global_states).squeeze(-1)
-                critic_loss = F.mse_loss(values, returns)
+                critic_loss = F.mse_loss(values, returns_norm)
 
                 self.critic_optimizer.zero_grad()
                 critic_loss.backward()
@@ -392,4 +489,44 @@ class MAPPOTrainer:
             'critic_loss': total_critic_loss / n,
             'entropy': total_entropy / n,
             'approx_kl': total_approx_kl / n,
+            'kl_early_stopped': kl_early_stopped,
+        }
+
+    def update_critic_only(self, buffer):
+        """
+        仅更新 Critic, 冻结 Actor (Critic warmup 阶段使用).
+        """
+        total_critic_loss = 0.0
+        n_updates = 0
+
+        # 更新 return 运行统计 (归一化 Critic 目标)
+        n = buffer.ptr
+        all_returns = buffer.returns[:n].reshape(-1)
+        self._update_ret_rms(all_returns)
+
+        for _epoch in range(self.ppo_epochs):
+            for batch in buffer.get_batches(self.mini_batch_size):
+                global_states = batch['global_states']
+                returns = batch['returns']
+                returns_norm = (returns - self._ret_rms_mean) / self._ret_std
+
+                values = self.critic(global_states).squeeze(-1)
+                critic_loss = F.mse_loss(values, returns_norm)
+
+                self.critic_optimizer.zero_grad()
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(
+                    self.critic.parameters(), self.max_grad_norm)
+                self.critic_optimizer.step()
+
+                total_critic_loss += critic_loss.item()
+                n_updates += 1
+
+        n = max(1, n_updates)
+        return {
+            'actor_loss': 0.0,
+            'critic_loss': total_critic_loss / n,
+            'entropy': 0.0,
+            'approx_kl': 0.0,
+            'kl_early_stopped': False,
         }

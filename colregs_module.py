@@ -465,6 +465,53 @@ def compute_colregs_penalty(encounter_type, cri, rudder_action,
     return 0.0
 
 
+def compute_colregs_reward(encounter_type, cri, rudder_action,
+                           k_R=1.0, starboard_threshold=-0.05):
+    """
+    Compute COLREGs compliance reward (R_comply).
+
+    正向激励合规行为, 系数远小于惩罚 (k_R << k_C) 以防止
+    Agent 故意制造会遇来获取奖励.
+
+    Reward logic:
+      - HEAD_ON / CROSSING_GIVE_WAY: 正确右转 → +k_R × CRI
+      - OVERTAKING_GIVE_WAY: 采取规避动作 → +0.5 × k_R × CRI
+      - CROSSING_STAND_ON / OVERTAKING_STAND_ON: 保持航向 → +0.3 × k_R × CRI
+      - SAFE: 无奖励
+
+    Args:
+        encounter_type: EncounterType enum value.
+        cri:            Collision Risk Index in [0, 1].
+        rudder_action:  Rudder action value (action[1]).
+        k_R:            Compliance reward coefficient.
+        starboard_threshold: Threshold for starboard detection.
+
+    Returns:
+        reward: Non-negative float.
+    """
+    if cri < 1e-6:
+        return 0.0
+
+    if encounter_type == EncounterType.HEAD_ON or \
+       encounter_type == EncounterType.CROSSING_GIVE_WAY:
+        if rudder_action <= starboard_threshold:
+            return k_R * cri
+        return 0.0
+
+    if encounter_type == EncounterType.OVERTAKING_GIVE_WAY:
+        if abs(rudder_action) >= 0.1:
+            return 0.5 * k_R * cri
+        return 0.0
+
+    if encounter_type == EncounterType.CROSSING_STAND_ON or \
+       encounter_type == EncounterType.OVERTAKING_STAND_ON:
+        if abs(rudder_action) < 0.1:
+            return 0.3 * k_R * cri
+        return 0.0
+
+    return 0.0
+
+
 # ============================================================================
 # ========================= Observation Features =============================
 # ============================================================================

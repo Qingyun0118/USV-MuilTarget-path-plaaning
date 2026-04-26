@@ -224,6 +224,13 @@ def train_ctde_mappo(args):
         usv_crush = False
         episode_done = False
 
+        # per-USV 完成时间 (步数), -1 表示未完成全部序列
+        usv_finish_steps = np.full(args.num_usvs, -1, dtype=np.int32)
+        # 跟踪每艘USV已到达的目标数
+        usv_targets_reached = np.zeros(args.num_usvs, dtype=np.int32)
+        # 跟踪空闲USV (已完成序列且无剩余目标可分配)
+        usv_idle = np.zeros(args.num_usvs, dtype=bool)
+
         # ---- 导航循环 ----
         while not episode_done and episode_steps < max_ep_steps:
             global_state = env.get_global_state()
@@ -239,10 +246,17 @@ def train_ctde_mappo(args):
             for i in range(args.num_usvs):
                 act_state = get_actuator_state(obs_dict[f"usv_{i}"])
                 usv_pos = get_usv_pos(obs_dict[f"usv_{i}"])
-                rel_goal = target_pos_norm[i] - usv_pos
 
-                action, log_prob, value = trainer.get_action_and_value(
-                    act_state, rel_goal, global_state)
+                if usv_idle[i]:
+                    # 空闲USV: 零动作 (定点), rel_goal 设为零
+                    rel_goal = np.zeros(goal_dim, dtype=np.float32)
+                    action = np.zeros(action_dim, dtype=np.float32)
+                    log_prob = 0.0
+                    value = trainer.get_value(global_state)
+                else:
+                    rel_goal = target_pos_norm[i] - usv_pos
+                    action, log_prob, value = trainer.get_action_and_value(
+                        act_state, rel_goal, global_state)
 
                 obs_arr[i] = act_state
                 actions_arr[i] = action
@@ -292,22 +306,50 @@ def train_ctde_mappo(args):
             new_target_status = info['target_status']
             if np.all(new_target_status == 1.0):
                 episode_done = True
+                # 记录最后完成者的时间
+                for i in range(args.num_usvs):
+                    if usv_finish_steps[i] < 0:
+                        usv_finish_steps[i] = episode_steps
                 break
 
             # ---- 目标重新分配 ----
             new_valid = (new_target_status == 0).astype(bool)
-            reached_usv_indices = []
+            reassign_usv_indices = []
+
+            # 情况A: USV本步到达子目标
             for i in range(args.num_usvs):
                 if info['reached_goals'][i]:
                     targets_reached_count += 1
-                    reached_usv_indices.append(i)
+                    usv_targets_reached[i] += 1
+                    reassign_usv_indices.append(i)
 
-            if reached_usv_indices and np.any(new_valid):
+            # 情况B: 空闲USV仍有剩余目标可接管
+            if np.any(new_valid):
+                for i in range(args.num_usvs):
+                    if usv_idle[i] and i not in reassign_usv_indices:
+                        reassign_usv_indices.append(i)
+                        usv_idle[i] = False
+
+            if reassign_usv_indices and np.any(new_valid):
                 new_gs = env.get_global_state()
                 assigner.reassign(
-                    next_obs, reached_usv_indices, new_valid,
+                    next_obs, reassign_usv_indices, new_valid,
                     current_target_idx, target_pos_norm, target_pos_abs,
                     SCALE, global_state=new_gs)
+
+                # 检查 reassign 后是否有USV未获得有效目标 → 标记空闲
+                for i in reassign_usv_indices:
+                    t_idx = current_target_idx[i]
+                    if t_idx < 0 or (t_idx < len(new_valid) and not new_valid[t_idx]):
+                        usv_idle[i] = True
+                        if usv_finish_steps[i] < 0:
+                            usv_finish_steps[i] = episode_steps
+            elif reassign_usv_indices and not np.any(new_valid):
+                # 无剩余目标, 所有刚到达的USV变为空闲
+                for i in reassign_usv_indices:
+                    usv_idle[i] = True
+                    if usv_finish_steps[i] < 0:
+                        usv_finish_steps[i] = episode_steps
 
             obs_dict = next_obs
 
@@ -354,10 +396,23 @@ def train_ctde_mappo(args):
         success_rate = np.mean(success_history)
         avg_reward = float(episode_rewards.mean())
 
+        # Makespan 指标: 未完成的USV用 episode_steps 填充
+        for i in range(args.num_usvs):
+            if usv_finish_steps[i] < 0:
+                usv_finish_steps[i] = episode_steps
+        makespan = int(np.max(usv_finish_steps))
+        load_balance_std = float(np.std(usv_finish_steps))
+        per_usv_finish = usv_finish_steps.tolist()
+
         training_history['episode_rewards'].append(avg_reward)
         training_history['episode_steps'].append(episode_steps)
         training_history['episode_successes'].append(bool(success))
         training_history['episode_colregs_violations'].append(colregs_violations)
+        training_history.setdefault('episode_makespan', []).append(makespan)
+        training_history.setdefault('episode_load_balance_std', []).append(
+            load_balance_std)
+        training_history.setdefault('episode_per_usv_finish', []).append(
+            per_usv_finish)
 
         ep_time = time.time() - ep_start_time
 
@@ -369,10 +424,12 @@ def train_ctde_mappo(args):
                             f" SE:{sel_losses['sel_entropy']:.3f}"
                             f" SB:{sel_losses.get('_buf_size', 0)}")
             warmup_tag = "[WARMUP] " if episode < args.freeze_actor_episodes else ""
+            finish_str = "/".join(str(s) for s in per_usv_finish)
             print(
                 f"EP {episode} {warmup_tag}[{args.num_usvs}USV|{assigner.name}] | "
                 f"R:{avg_reward:.1f} | "
                 f"Tgt:{final_targets_reached}/{args.num_targets} | "
+                f"MS:{makespan}({finish_str}) LB:{load_balance_std:.1f} | "
                 f"Crush:{crush}(obs:{obs_crush},usv:{usv_crush}) | "
                 f"CR_viol:{colregs_violations} | "
                 f"SR:{success_rate:.2f} | "
@@ -399,6 +456,11 @@ def train_ctde_mappo(args):
         writer.add_scalar('Metrics/COLREGs_Violations',
                           colregs_violations, episode)
         writer.add_scalar('Metrics/EpisodeSteps', episode_steps, episode)
+        writer.add_scalar('Metrics/Makespan', makespan, episode)
+        writer.add_scalar('Metrics/LoadBalanceStd', load_balance_std, episode)
+        for i in range(args.num_usvs):
+            writer.add_scalar(f'Metrics/USV_{i}_FinishSteps',
+                              per_usv_finish[i], episode)
         writer.add_scalar('Training/ActorLoss', losses['actor_loss'], episode)
         writer.add_scalar('Training/CriticLoss', losses['critic_loss'], episode)
         writer.add_scalar('Training/Entropy', losses['entropy'], episode)

@@ -48,17 +48,21 @@ class StochasticWrapper(nn.Module):
     """为确定性 Actor (TD3/TD7) 添加随机策略接口, 适配 MAPPO PPO 训练."""
 
     def __init__(self, deterministic_actor, action_dim, max_action=1.0,
-                 log_std_init=-0.5, is_td7=False):
+                 log_std_init=-0.5, is_td7=False, encoder=None):
         super().__init__()
         self.actor = deterministic_actor
         self.max_action = max_action
         self.log_std = nn.Parameter(torch.ones(action_dim) * log_std_init)
         self.is_td7 = is_td7
+        self.encoder = encoder  # TD7 Encoder (nn.Module), 自动纳入 state_dict
 
     def _get_mean(self, state, goal):
         if self.is_td7:
-            zs_dim = self.actor.l1.in_features - self.actor.l0.out_features
-            zs = torch.zeros(state.size(0), zs_dim, device=state.device)
+            if self.encoder is not None:
+                zs = self.encoder.zs(state, goal)
+            else:
+                zs_dim = self.actor.l1.in_features - self.actor.l0.out_features
+                zs = torch.zeros(state.size(0), zs_dim, device=state.device)
             return self.actor(state, goal, zs)
         return self.actor(state, goal)
 
@@ -94,15 +98,17 @@ def create_actor_for_algo(algo, state_dim, goal_dim, action_dim):
         det_actor = TD3Actor(state_dim, goal_dim, action_dim, max_action=1.0).to(device)
         return StochasticWrapper(det_actor, action_dim, max_action=1.0, is_td7=False).to(device)
     elif algo == 'td7':
-        from td7_agent import Actor as TD7Actor
+        from td7_agent import Actor as TD7Actor, Encoder
         det_actor = TD7Actor(state_dim, goal_dim, action_dim).to(device)
-        return StochasticWrapper(det_actor, action_dim, max_action=1.0, is_td7=True).to(device)
+        encoder = Encoder(state_dim, goal_dim, action_dim).to(device)
+        return StochasticWrapper(det_actor, action_dim, max_action=1.0,
+                                 is_td7=True, encoder=encoder).to(device)
     else:
         raise ValueError(f"Unsupported algo: {algo}, expected sac/td3/td7")
 
 
 def create_pretrained_actor(algo, state_dim, goal_dim, action_dim, pretrained_path):
-    """根据算法类型创建并加载预训练 Actor."""
+    """根据算法类型创建并加载预训练 Actor (含 TD7 Encoder)."""
     actor = create_actor_for_algo(algo, state_dim, goal_dim, action_dim)
 
     if pretrained_path and os.path.exists(pretrained_path):
@@ -112,6 +118,21 @@ def create_pretrained_actor(algo, state_dim, goal_dim, action_dim, pretrained_pa
         else:
             actor.actor.load_state_dict(state_dict)
         print(f"[Load] Actor ({algo.upper()}) ← {pretrained_path}")
+
+        # TD7: 同时加载 Encoder
+        if algo == 'td7' and actor.encoder is not None:
+            pretrained_dir = os.path.dirname(pretrained_path)
+            encoder_loaded = False
+            for enc_name in ["actuator_encoder.pth", "best_actuator_encoder.pth"]:
+                enc_path = os.path.join(pretrained_dir, enc_name)
+                if os.path.exists(enc_path):
+                    actor.encoder.load_state_dict(
+                        torch.load(enc_path, map_location=device, weights_only=True))
+                    encoder_loaded = True
+                    print(f"[Load] Encoder (TD7) ← {enc_path}")
+                    break
+            if not encoder_loaded:
+                print("[Warning] TD7 Encoder 未找到, zs 将使用零向量")
     elif pretrained_path:
         print(f"[Warning] 预训练 Actor 不存在: {pretrained_path}, 随机初始化")
 
@@ -161,8 +182,17 @@ def train_ctde_mappo(args):
         algo = detect_algo_from_dir(args.pretrained_dir)
     print(f"[Algo] 检测到预训练算法: {algo.upper()}")
 
-    pretrained_actor_path = os.path.join(
-        args.pretrained_dir, "best_actuator_actor.pth")
+    # 优先加载最后模型, 其次 best 模型
+    pretrained_actor_path = None
+    for fname in ["actuator_actor.pth", "best_actuator_actor.pth"]:
+        candidate = os.path.join(args.pretrained_dir, fname)
+        if os.path.exists(candidate):
+            pretrained_actor_path = candidate
+            break
+    if pretrained_actor_path is None:
+        pretrained_actor_path = os.path.join(
+            args.pretrained_dir, "actuator_actor.pth")  # 触发 warning
+
     actor = create_pretrained_actor(
         algo, actuator_state_dim, goal_dim, action_dim,
         pretrained_actor_path)

@@ -34,6 +34,9 @@ def parse_args():
     # ---- 预训练 ----
     parser.add_argument("--pretrained_dir", default="expert_hrl_td7_0426_seed2022_softQ",
                         type=str)
+    parser.add_argument("--algo", default=None, type=str,
+                        choices=["sac", "td3", "td7"],
+                        help="预训练 Actor 算法类型 (默认从 pretrained_dir 自动检测)")
 
     # ---- MAPPO ----
     parser.add_argument("--lr_actor", default=1e-5, type=float)

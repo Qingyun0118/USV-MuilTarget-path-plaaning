@@ -13,12 +13,14 @@ import datetime
 import time
 import numpy as np
 import torch
+import torch.nn as nn
 from collections import deque
+from torch.distributions import Normal
 from torch.utils.tensorboard import SummaryWriter
 
 from my_USV_Env import MultiUsvEnv
 from hrl_config import device, SCALE, set_global_seed
-from sac_agent import GaussianActor
+from sac_agent import GaussianActor, SAC_EPSILON
 from hrl_helpers import (
     get_actuator_state, get_usv_pos, get_target_pos,
 )
@@ -26,6 +28,94 @@ from mappo_agent import (
     CentralizedCritic, MAPPORolloutBuffer, MAPPOTrainer
 )
 from task_assignment import create_assigner
+
+
+# ============================================================================
+# ==================== Actor 工厂 ============================================
+# ============================================================================
+
+def detect_algo_from_dir(pretrained_dir):
+    """从预训练目录名检测算法类型 (sac/td3/td7)."""
+    name = os.path.basename(pretrained_dir).lower()
+    if 'td7' in name:
+        return 'td7'
+    elif 'td3' in name:
+        return 'td3'
+    return 'sac'
+
+
+class StochasticWrapper(nn.Module):
+    """为确定性 Actor (TD3/TD7) 添加随机策略接口, 适配 MAPPO PPO 训练."""
+
+    def __init__(self, deterministic_actor, action_dim, max_action=1.0,
+                 log_std_init=-0.5, is_td7=False):
+        super().__init__()
+        self.actor = deterministic_actor
+        self.max_action = max_action
+        self.log_std = nn.Parameter(torch.ones(action_dim) * log_std_init)
+        self.is_td7 = is_td7
+
+    def _get_mean(self, state, goal):
+        if self.is_td7:
+            zs_dim = self.actor.l1.in_features - self.actor.l0.out_features
+            zs = torch.zeros(state.size(0), zs_dim, device=state.device)
+            return self.actor(state, goal, zs)
+        return self.actor(state, goal)
+
+    def forward(self, state, goal):
+        mean = self._get_mean(state, goal)
+        log_std = self.log_std.expand_as(mean)
+        return mean, log_std
+
+    def sample(self, state, goal):
+        mean, log_std = self.forward(state, goal)
+        std = log_std.exp()
+        normal = Normal(mean, std)
+        x_t = normal.rsample()
+        y_t = torch.tanh(x_t)
+        action = y_t * self.max_action
+        log_prob = normal.log_prob(x_t)
+        log_prob -= torch.log(self.max_action * (1 - y_t.pow(2)) + SAC_EPSILON)
+        log_prob = log_prob.sum(dim=1, keepdim=True)
+        mean_action = torch.tanh(mean) * self.max_action
+        return action, log_prob, mean_action
+
+    def get_deterministic_action(self, state, goal):
+        mean = self._get_mean(state, goal)
+        return torch.tanh(mean) * self.max_action
+
+
+def create_actor_for_algo(algo, state_dim, goal_dim, action_dim):
+    """根据算法类型创建 Actor (不加载权重)."""
+    if algo == 'sac':
+        return GaussianActor(state_dim, goal_dim, action_dim, max_action=1.0).to(device)
+    elif algo == 'td3':
+        from td3_agent import Actor as TD3Actor
+        det_actor = TD3Actor(state_dim, goal_dim, action_dim, max_action=1.0).to(device)
+        return StochasticWrapper(det_actor, action_dim, max_action=1.0, is_td7=False).to(device)
+    elif algo == 'td7':
+        from td7_agent import Actor as TD7Actor
+        det_actor = TD7Actor(state_dim, goal_dim, action_dim).to(device)
+        return StochasticWrapper(det_actor, action_dim, max_action=1.0, is_td7=True).to(device)
+    else:
+        raise ValueError(f"Unsupported algo: {algo}, expected sac/td3/td7")
+
+
+def create_pretrained_actor(algo, state_dim, goal_dim, action_dim, pretrained_path):
+    """根据算法类型创建并加载预训练 Actor."""
+    actor = create_actor_for_algo(algo, state_dim, goal_dim, action_dim)
+
+    if pretrained_path and os.path.exists(pretrained_path):
+        state_dict = torch.load(pretrained_path, map_location=device, weights_only=True)
+        if algo == 'sac':
+            actor.load_state_dict(state_dict)
+        else:
+            actor.actor.load_state_dict(state_dict)
+        print(f"[Load] Actor ({algo.upper()}) ← {pretrained_path}")
+    elif pretrained_path:
+        print(f"[Warning] 预训练 Actor 不存在: {pretrained_path}, 随机初始化")
+
+    return actor
 
 
 def train_ctde_mappo(args):
@@ -66,19 +156,16 @@ def train_ctde_mappo(args):
           f"action={action_dim}, global_state={global_state_dim}")
 
     # ---- 2. 模型初始化 ----
-    actor = GaussianActor(
-        actuator_state_dim, goal_dim, action_dim, max_action=1.0
-    ).to(device)
+    algo = getattr(args, 'algo', None)
+    if not algo:
+        algo = detect_algo_from_dir(args.pretrained_dir)
+    print(f"[Algo] 检测到预训练算法: {algo.upper()}")
 
     pretrained_actor_path = os.path.join(
         args.pretrained_dir, "best_actuator_actor.pth")
-    if os.path.exists(pretrained_actor_path):
-        actor.load_state_dict(
-            torch.load(pretrained_actor_path, map_location=device,
-                       weights_only=True))
-        print(f"[Load] Actor ← {pretrained_actor_path}")
-    else:
-        print(f"[Warning] 预训练 Actor 不存在: {pretrained_actor_path}, 随机初始化")
+    actor = create_pretrained_actor(
+        algo, actuator_state_dim, goal_dim, action_dim,
+        pretrained_actor_path)
 
     critic = CentralizedCritic(global_state_dim).to(device)
     print(f"[Init] CentralizedCritic (global_state_dim={global_state_dim})")
@@ -492,6 +579,7 @@ def train_ctde_mappo(args):
                 'best_reward': best_reward,
                 'training_history': training_history,
                 'assign_method': args.assign_method,
+                'algo': algo,
             }
             if assigner.is_learnable:
                 ckpt['assigner'] = assigner.state_dict_for_checkpoint()

@@ -11,10 +11,12 @@ import torch
 
 from my_USV_Env import MultiUsvEnv
 from hrl_config import device, SCALE, set_global_seed
-from sac_agent import GaussianActor
 from hrl_helpers import get_actuator_state, get_usv_pos
 from mappo_agent import CentralizedCritic, MAPPOTrainer
 from task_assignment import create_assigner
+from training.train_loop import (
+    detect_algo_from_dir, create_actor_for_algo,
+)
 
 
 def evaluate_ctde_mappo(args):
@@ -50,11 +52,22 @@ def evaluate_ctde_mappo(args):
     if not os.path.exists(actor_path):
         actor_path = os.path.join(args.output_dir, "actor.pth")
 
-    actor = GaussianActor(act_dim, 2, 2, max_action=1.0).to(device)
-    actor.load_state_dict(
-        torch.load(actor_path, map_location=device, weights_only=True))
+    state_dict = torch.load(actor_path, map_location=device, weights_only=True)
+
+    # 从 state_dict 检测算法类型
+    if 'log_std_linear.weight' in state_dict:
+        algo = 'sac'
+    elif 'actor.l0.weight' in state_dict:
+        algo = 'td7'
+    elif 'actor.fc1.weight' in state_dict:
+        algo = 'td3'
+    else:
+        algo = detect_algo_from_dir(args.output_dir)
+
+    actor = create_actor_for_algo(algo, act_dim, 2, 2)
+    actor.load_state_dict(state_dict)
     actor.eval()
-    print(f"[Eval] Actor ← {actor_path}")
+    print(f"[Eval] Actor ({algo.upper()}) ← {actor_path}")
 
     # ---- 加载 Critic ----
     critic = CentralizedCritic(gs_dim).to(device)

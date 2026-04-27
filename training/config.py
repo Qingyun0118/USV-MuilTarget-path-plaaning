@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument("--starboard_threshold", default=-0.05, type=float)
 
     # ---- 预训练 ----
-    parser.add_argument("--pretrained_dir", default="expert_hrl_sac_output_329",
+    parser.add_argument("--pretrained_dir", default="expert_hrl_td7_0426_seed2022_softQ",
                         type=str)
 
     # ---- MAPPO ----

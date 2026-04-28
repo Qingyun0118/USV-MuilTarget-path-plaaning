@@ -50,7 +50,7 @@ from hrl_helpers import (
     get_selector_state, get_actuator_state,
     get_usv_pos, get_target_pos, compute_actuator_reward
 )
-from td3_agent import TD3ActuatorAgent
+from td3_agent import TD3ActuatorAgent, ExpertDemoBuffer
 
 
 
@@ -114,6 +114,7 @@ def train_expert_hrl(args):
     )
 
     # ---- 3. Replay Buffers ----
+    demo_ratio = float(np.clip(args.demo_ratio, 0.0, 0.99))
     selector_buffer = ReplayBuffer(args.selector_buffer_size)
     actuator_buffer = GoalConditionedReplayBuffer(
         args.actuator_buffer_size,
@@ -121,6 +122,19 @@ def train_expert_hrl(args):
         beta0=args.per_beta0,
         expert_bonus=args.per_expert_bonus
     )
+    use_expert_demo_buffer = (
+        args.expert_demo_buffer_size > 0 and demo_ratio > 0.0
+    )
+    expert_demo_buffer = (
+        ExpertDemoBuffer(capacity=args.expert_demo_buffer_size)
+        if use_expert_demo_buffer else None
+    )
+
+    if use_expert_demo_buffer:
+        print(f"Expert Demo Buffer: ON (size={args.expert_demo_buffer_size}, "
+              f"demo_ratio={demo_ratio:.2f})")
+    else:
+        print("Expert Demo Buffer: OFF (size<=0 or demo_ratio<=0)")
 
     # ---- 4. Expert Controller ----
     expert = ReactiveController()
@@ -328,6 +342,11 @@ def train_expert_hrl(args):
                     next_actuator_state, float(is_terminal), relative_goal,
                     is_expert=use_expert
                 )
+                if use_expert and expert_demo_buffer is not None:
+                    expert_demo_buffer.push(
+                        actuator_state, action, r_actuator,
+                        next_actuator_state, float(is_terminal), relative_goal
+                    )
 
                 # ---- 碰撞回溯惩罚 ----
                 if crush:
@@ -342,8 +361,13 @@ def train_expert_hrl(args):
                 bc_w = args.bc_weight * expert_prob
                 if len(actuator_buffer) >= args.warmup_steps:
                     for _ in range(args.actuator_train_iters):
-                        actuator.train(actuator_buffer, args.actuator_batch_size,
-                                       bc_weight=bc_w)
+                        actuator.train(
+                            actuator_buffer,
+                            args.actuator_batch_size,
+                            bc_weight=bc_w,
+                            demo_buffer=expert_demo_buffer,
+                            demo_ratio=demo_ratio
+                        )
 
                 # ---- 检查目标到达 ----
                 reached_indices = info.get('reached_targets', [])
@@ -447,6 +471,11 @@ def train_expert_hrl(args):
         writer.add_scalar('Training/BC_HitRate', bc_metrics['bc_hit_rate'], episode)
         writer.add_scalar('Training/BC_ExpertSampleRatio', bc_metrics['expert_sample_ratio'], episode)
         writer.add_scalar('Buffer/Actuator', len(actuator_buffer), episode)
+        writer.add_scalar(
+            'Buffer/ExpertDemo',
+            0 if expert_demo_buffer is None else len(expert_demo_buffer),
+            episode
+        )
         writer.add_scalar('Buffer/Selector', len(selector_buffer), episode)
 
         # ---- 定期保存检查点 (完整训练快照, 支持断点续训) ----
@@ -903,6 +932,8 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             f.write(f"  Expert p0:         {args.expert_p0}\n")
             f.write(f"  Expert p_min:      {args.expert_p_min}\n")
             f.write(f"  BC weight:      {args.bc_weight}\n")
+            f.write(f"  Demo buffer size:  {args.expert_demo_buffer_size}\n")
+            f.write(f"  Demo ratio:        {float(np.clip(args.demo_ratio, 0.0, 0.99)):.2f}\n")
             f.write(f"  Seed:           {args.seed}\n")
             # 汇总
             f.write(f"\n--- 评估结果汇总 ---\n")
@@ -978,6 +1009,10 @@ if __name__ == "__main__":
     parser.add_argument("--actuator_buffer_size", default=1000000, type=int)
     parser.add_argument("--actuator_train_iters", default=1, type=int,
                         help="每步 Actuator 训练迭代次数 (对齐原始 TD3: 1次/步)")
+    parser.add_argument("--expert_demo_buffer_size", default=50000, type=int,
+                        help="Expert Demo Buffer 容量 (<=0 关闭)")
+    parser.add_argument("--demo_ratio", default=0.25, type=float,
+                        help="每个 Actuator batch 中 demo 样本占比 [0,1) (<=0 关闭)")
 
     # --- Selector 参数 ---
     parser.add_argument("--selector_batch_size", default=64, type=int)
@@ -1015,7 +1050,7 @@ if __name__ == "__main__":
                         help="PER 优先级指数 (0=均匀采样, 1=完全优先)")
     parser.add_argument("--per_beta0", default=0.4, type=float,
                         help="PER IS 权重初始 β")
-    parser.add_argument("--per_expert_bonus", default=0.0, type=float,
+    parser.add_argument("--per_expert_bonus", default=0.1, type=float,
                         help="Expert 数据优先级加成 (0=无加成, 避免采样偏向专家数据)")
 
     # --- 碰撞回溯 ---

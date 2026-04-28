@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 DATA_SOURCE = "tensorboard"  # "tensorboard" | "csv"
 # DATA_SOURCE = "csv"  # "tensorboard" | "csv"
 # 横轴: "episode" 按 episode 编号, "global_steps" 按累计环境步数（从 training_history.json）
-X_AXIS = "episode"  # "episode" | "global_steps"
-# X_AXIS = "global_steps"  # "episode" | "global_steps"
+X_AXIS = "episodes"  # "episodes" | "global_steps"
+# X_AXIS = "global_steps"  # "episodes" | "global_steps"
 # 每个算法：名称 -> 该算法各种子的日志目录列表
 # DATA_SOURCE="tensorboard" 时: 填 TensorBoard event 目录 (含 events.out.tfevents.* 的目录)
 # DATA_SOURCE="csv" 时: 填 CSV 文件所在目录, CSV 文件名需与 tag 一致 (如 Reward_Actuator.csv)
@@ -24,36 +24,47 @@ X_AXIS = "episode"  # "episode" | "global_steps"
 #       (即 <output_dir>/runs/<run_name>/ -> <output_dir>/training_history.json)
 #       如果目录结构不同, 可在 HISTORY_OVERRIDE 中手动指定
 ALGORITHMS = {
-    "Expert-HRL-TD7-HardQ": [
-        r"expert_hrl_td7_0419_seed2025_hardQ\runs\Expert_HRL_TD7_20260419_091306",
-        r"expert_hrl_td7_0420_seed2026_hardQ\runs\Expert_HRL_TD7_20260420_122101",
-        r"expert_hrl_td7_0422_seed2024_hardQ\runs\Expert_HRL_TD7_20260422_174900",
-        r"expert_hrl_td7_0426_seed2022_hardQ\runs\Expert_HRL_TD7_20260426_004431"
-    ],
-    "Expert-HRL-TD7-SoftQ": [
-        r"expert_hrl_td7_0419_seed2025_softQ\runs\Expert_HRL_TD7_20260419_091241",
-        r"expert_hrl_td7_0420_seed2026_softQ\runs\Expert_HRL_TD7_20260420_122208",
-        r"expert_hrl_td7_0422_seed2024_softQ\runs\Expert_HRL_TD7_20260422_175006",
-        r"expert_hrl_td7_0426_seed2022_softQ\runs\Expert_HRL_TD7_20260426_004603"
-    ],
-    # "Expert-HRL-TD3-HardQ": [
-    #     r"expert_hrl_td3_0411_seed2026_hardQ\runs\Expert_HRL_TD3_20260411_040859",
-    #     r"expert_hrl_td3_0420_seed2025_hardQ\runs\Expert_HRL_TD3_20260421_000007",
-    #     r"expert_hrl_td3_0424_seed2024_hardQ2\runs\Expert_HRL_TD3_20260424_205959",
+    # "Expert-HRL-TD7-HardQ": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
     # ],
-    # "Expert-HRL-TD3-SoftQ": [
-    #     r"expert_hrl_td3_0411_seed2026_softQ\runs\Expert_HRL_TD3SoftQfilter_20260411_042033",
-    #     r"expert_hrl_td3_0420_seed2025_softQ\runs\Expert_HRL_TD3_20260421_033144",
-    #     r"expert_hrl_td3_0424_seed2024_softQ2\runs\Expert_HRL_TD3_20260424_210011"
+    # "Expert-HRL-TD7-SoftQ": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
     # ],
+    "Expert-HRL-TD3-HardQ": [
+        r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_HardQ2022",
+        r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_HardQ2025",
+        r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_HardQ2024",
+        r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_HardQ2023",
+        r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_HardQ2026",
+    ],
+    "Expert-HRL-TD3-SoftQ": [
+        r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_SoftQ2026",
+        r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_SoftQ2025",
+        r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_SoftQ2024",
+        r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_SoftQ2023",
+        r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_SoftQ2022",
+    ],
     # "Expert-HRL-SAC-HardQ": [
-    # r"expert_hrl_sac_0420_seed2025_hardQ\runs\Expert_HRL_SAC_20260420_011628",
-    # r"expert_hrl_sac_0422_seed2024_hardQ\runs\Expert_HRL_SAC_20260422_181458",
+    #     r"1_Result\trainingResult\SAC\seed2022\Expert_HRL_SAC_HardQ2022",
+    #     r"1_Result\trainingResult\SAC\seed2023\Expert_HRL_SAC_HardQ2023",
+    #     r"1_Result\trainingResult\SAC\seed2024\Expert_HRL_SAC_HardQ2024",
+    #     r"1_Result\trainingResult\SAC\seed2025\Expert_HRL_SAC_HardQ2025",
     # ],
     # "Expert-HRL-SAC-SoftQ": [
-    #     r"expert_hrl_sac_0420_seed2025_softQ\runs\Expert_HRL_SAC_20260420_011746",
-    #     r"expert_hrl_sac_0422_seed2024_softQ\runs\Expert_HRL_SAC_20260422_175429",
-
+    #     r"1_Result\trainingResult\SAC\seed2025\Expert_HRL_SAC_SoftQ2025",
+    #     r"1_Result\trainingResult\SAC\seed2024\Expert_HRL_SAC_SoftQ2024",
+    #     r"1_Result\trainingResult\SAC\seed2023\Expert_HRL_SAC_SoftQ2023",
+    #     r"1_Result\trainingResult\SAC\seed2022\Expert_HRL_SAC_SoftQ2022",
     # ],
 
 }
@@ -65,10 +76,9 @@ TAGS = [
     "Metrics/TotalDistance",
     "Metrics/SuccessRate",
     # ---- Soft vs Hard Q-filter 对比分析 ----
-    "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
-    "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
-    "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
-    # "TD7/Max_Q",                   # Q 值上界 (BC 方式是否影响 Q 值稳定性)
+    # "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
+    # "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
+    # "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
 ]
 
 # 平滑窗口大小（设为 1 则不平滑）
@@ -180,13 +190,13 @@ def interpolate_and_aggregate(all_x, all_values, n_points=1000):
 
 
 def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
-                      data_source="tensorboard", x_axis="episode"):
+                      data_source="tensorboard", x_axis="episodes"):
     n_tags = len(tags)
     n_cols = (n_tags + 1) // 2
     fig, axes = plt.subplots(2, n_cols, figsize=(6 * n_cols, 10), squeeze=False)
     axes = axes.flatten()
 
-    x_label = "Global Steps" if x_axis == "global_steps" else "Episode"
+    x_label = "global steps" if x_axis == "global_steps" else "episodes"
 
     for idx, tag in enumerate(tags):
         ax = axes[idx]
@@ -227,12 +237,12 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
                 else:
                     x_interp, mean, std = align_and_aggregate(all_x, all_values)
                 ax.plot(x_interp, mean, linewidth=1.5, color=color,
-                        label=f"{algo_name} ({len(all_values)} seeds)")
+                        label=f"{algo_name} ")
                 ax.fill_between(x_interp, mean - std, mean + std, alpha=0.15, color=color)
 
         ax.set_xlabel(x_label)
-        ax.set_ylabel(tag.split("/")[-1])
-        ax.set_title(tag)
+        y_label = tag.split("/")[-1] + " Reward" if tag.startswith("Reward/") else tag.split("/")[-1]
+        ax.set_ylabel(y_label)
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
@@ -240,7 +250,7 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
     for idx in range(len(tags), len(axes)):
         axes[idx].set_visible(False)
 
-    fig.suptitle(f"Algorithm Comparison (smooth={smooth_window}, x={x_axis})", fontsize=14)
+    # fig.suptitle(f"Algorithm Comparison", fontsize=14)
     plt.tight_layout()
 
     if save_path:

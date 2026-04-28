@@ -384,7 +384,7 @@ def main():
 
     # --- 保存结果文件 ---
     result_path = os.path.join(args.model_dir, "batch_eval_results.txt")
-    with open(result_path, 'w', encoding='utf-8') as f:
+    with open(result_path, 'a', encoding='utf-8') as f:
         f.write(f"批量评估结果\n")
         f.write(f"{'=' * 60}\n")
         f.write(f"评估时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")

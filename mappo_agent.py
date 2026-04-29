@@ -100,6 +100,7 @@ class MAPPORolloutBuffer:
         self.terminals = np.zeros((max_steps, num_agents), dtype=np.float32)
         self.goals = np.zeros((max_steps, num_agents, goal_dim), dtype=np.float32)
         self.values = np.zeros((max_steps, num_agents), dtype=np.float32)
+        self.active_masks = np.zeros((max_steps, num_agents), dtype=np.float32)
 
         # (T, global_state_dim) — 同一时间步所有智能体共享
         self.global_states = np.zeros((max_steps, global_state_dim), dtype=np.float32)
@@ -111,19 +112,21 @@ class MAPPORolloutBuffer:
         self.ptr = 0
 
     def add(self, obs_arr, actions_arr, log_probs_arr, rewards_arr,
-            terminals_arr, goals_arr, global_state, values_arr):
+            terminals_arr, goals_arr, global_state, values_arr,
+            active_masks_arr=None):
         """
         添加一个时间步的全部智能体数据.
 
         Args:
-            obs_arr:        (N, obs_dim)
-            actions_arr:    (N, action_dim)
-            log_probs_arr:  (N,)
-            rewards_arr:    (N,)
-            terminals_arr:  (N,)  — 1.0 表示真正终止 (非 truncation)
-            goals_arr:      (N, goal_dim)
-            global_state:   (global_state_dim,)
-            values_arr:     (N,)
+            obs_arr:          (N, obs_dim)
+            actions_arr:      (N, action_dim)
+            log_probs_arr:    (N,)
+            rewards_arr:      (N,)
+            terminals_arr:    (N,)  — 1.0 表示真正终止 (非 truncation)
+            goals_arr:        (N, goal_dim)
+            global_state:     (global_state_dim,)
+            values_arr:       (N,)
+            active_masks_arr: (N,)  — 1.0 活跃, 0.0 空闲 (可选, 默认全活跃)
         """
         t = self.ptr
         self.obs[t] = obs_arr
@@ -134,6 +137,10 @@ class MAPPORolloutBuffer:
         self.goals[t] = goals_arr
         self.global_states[t] = global_state
         self.values[t] = values_arr
+        if active_masks_arr is not None:
+            self.active_masks[t] = active_masks_arr
+        else:
+            self.active_masks[t] = 1.0
         self.ptr += 1
 
     def compute_gae(self, last_values, gamma=0.99, gae_lambda=0.95):
@@ -174,6 +181,8 @@ class MAPPORolloutBuffer:
         advantages_flat = self.advantages[:n].reshape(total)
         returns_flat = self.returns[:n].reshape(total)
         goals_flat = self.goals[:n].reshape(total, -1)
+        values_flat = self.values[:n].reshape(total)
+        active_masks_flat = self.active_masks[:n].reshape(total)
 
         # 全局状态: (T, gs_dim) → 复制 N 次 → (T*N, gs_dim)
         gs_expanded = np.repeat(self.global_states[:n], self.num_agents, axis=0)
@@ -190,6 +199,8 @@ class MAPPORolloutBuffer:
                 'returns': torch.FloatTensor(returns_flat[idx]).to(device),
                 'goals': torch.FloatTensor(goals_flat[idx]).to(device),
                 'global_states': torch.FloatTensor(gs_expanded[idx]).to(device),
+                'old_values': torch.FloatTensor(values_flat[idx]).to(device),
+                'active_masks': torch.FloatTensor(active_masks_flat[idx]).to(device),
             }
 
     def clear(self):
@@ -263,7 +274,7 @@ class MAPPOTrainer:
                  clip_eps=0.2, entropy_coef=0.01,
                  max_grad_norm=0.5, ppo_epochs=10,
                  mini_batch_size=256, gamma=0.99, gae_lambda=0.95,
-                 target_kl=0.02):
+                 target_kl=0.02, huber_delta=10.0):
         self.actor = actor
         self.critic = critic
 
@@ -280,6 +291,7 @@ class MAPPOTrainer:
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.target_kl = target_kl
+        self.huber_delta = huber_delta
 
         # Return 归一化: 追踪 returns 的运行均值/标准差, 用于缩放 Critic Loss
         self._ret_rms_mean = 0.0
@@ -304,6 +316,24 @@ class MAPPOTrainer:
     @property
     def _ret_std(self):
         return max(np.sqrt(self._ret_rms_var), 1e-6)
+
+    def _cal_value_loss(self, values, old_values_norm, returns_norm,
+                        active_masks=None):
+        """双重裁剪 Value Loss + Huber (对齐参考 MAPPO)."""
+        value_pred_clipped = old_values_norm + (
+            values - old_values_norm
+        ).clamp(-self.clip_eps, self.clip_eps)
+
+        loss_original = F.huber_loss(
+            values, returns_norm, reduction='none', delta=self.huber_delta)
+        loss_clipped = F.huber_loss(
+            value_pred_clipped, returns_norm,
+            reduction='none', delta=self.huber_delta)
+        value_loss = torch.max(loss_original, loss_clipped)
+
+        if active_masks is not None and active_masks.sum() > 0:
+            return (value_loss * active_masks).sum() / active_masks.sum()
+        return value_loss.mean()
 
     # ---- 推理辅助 ----
 
@@ -357,6 +387,11 @@ class MAPPOTrainer:
         """
         PPO 多 epoch mini-batch 更新.
 
+        改进 (对齐参考 MAPPO):
+          - 双重裁剪 Value Loss + Huber
+          - Active Masks 排除空闲智能体
+          - Masked Advantage 归一化
+
         Args:
             buffer: MAPPORolloutBuffer (已调用 compute_gae)
 
@@ -370,11 +405,9 @@ class MAPPOTrainer:
         n_updates = 0
         kl_early_stopped = False
 
-        # 保存 Actor 权重快照, 用于 NaN 回滚
         import copy
         actor_snapshot = copy.deepcopy(self.actor.state_dict())
 
-        # 更新 return 运行统计 (用于归一化 Critic 目标)
         n = buffer.ptr
         all_returns = buffer.returns[:n].reshape(-1)
         self._update_ret_rms(all_returns)
@@ -390,28 +423,34 @@ class MAPPOTrainer:
                 returns = batch['returns']
                 goals = batch['goals']
                 global_states = batch['global_states']
+                old_values = batch['old_values']
+                active_masks = batch['active_masks']
 
-                # 归一化 returns 作为 Critic 训练目标
                 returns_norm = (returns - self._ret_rms_mean) / self._ret_std
+                old_values_norm = (old_values - self._ret_rms_mean) / self._ret_std
 
-                # 标准化优势 (防止单样本 batch std=NaN)
-                if advantages.numel() > 1:
-                    adv = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                # Masked Advantage 归一化 (排除空闲智能体)
+                if active_masks.sum() > 1:
+                    active_adv = advantages[active_masks == 1]
+                    adv_mean = active_adv.mean()
+                    adv_std = active_adv.std()
+                    adv = ((advantages - adv_mean) / (adv_std + 1e-5)
+                           ).clamp(-10.0, 10.0)
+                elif advantages.numel() > 1:
+                    adv = ((advantages - advantages.mean())
+                           / (advantages.std() + 1e-5)).clamp(-10.0, 10.0)
                 else:
-                    adv = advantages - advantages.mean()
-                # 裁剪极端优势值, 防止梯度爆炸
-                adv = adv.clamp(-10.0, 10.0)
+                    adv = (advantages - advantages.mean()).clamp(-10.0, 10.0)
 
                 # ---- Actor 更新 ----
                 new_log_probs, entropy = compute_log_prob(
                     self.actor, obs, goals, actions)
 
-                # NaN 检查: Actor 权重爆炸时跳过该 batch
                 if torch.isnan(new_log_probs).any():
-                    print("[WARNING] NaN detected in Actor output, skipping batch")
-                    # 仍然更新 Critic
+                    print("[WARNING] NaN in Actor output, skipping batch")
                     values = self.critic(global_states).squeeze(-1)
-                    critic_loss = F.mse_loss(values, returns_norm)
+                    critic_loss = self._cal_value_loss(
+                        values, old_values_norm, returns_norm, active_masks)
                     self.critic_optimizer.zero_grad()
                     critic_loss.backward()
                     nn.utils.clip_grad_norm_(
@@ -423,14 +462,13 @@ class MAPPOTrainer:
 
                 ratio = torch.exp(new_log_probs - old_log_probs)
 
-                # KL 早停检查 — 在 Actor 梯度更新前
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - ratio.log()).mean().item()
                 if self.target_kl is not None and approx_kl > self.target_kl:
                     kl_early_stopped = True
-                    # 仍然更新 Critic (Critic 不受 KL 约束)
                     values = self.critic(global_states).squeeze(-1)
-                    critic_loss = F.mse_loss(values, returns_norm)
+                    critic_loss = self._cal_value_loss(
+                        values, old_values_norm, returns_norm, active_masks)
                     self.critic_optimizer.zero_grad()
                     critic_loss.backward()
                     nn.utils.clip_grad_norm_(
@@ -444,8 +482,15 @@ class MAPPOTrainer:
                 surr1 = ratio * adv
                 surr2 = torch.clamp(
                     ratio, 1 - self.clip_eps, 1 + self.clip_eps) * adv
-                actor_loss = -torch.min(surr1, surr2).mean()
+                policy_loss = -torch.min(surr1, surr2)
                 entropy_mean = entropy.mean()
+
+                # Masked Actor Loss
+                if active_masks.sum() > 0:
+                    actor_loss = ((policy_loss * active_masks).sum()
+                                  / active_masks.sum())
+                else:
+                    actor_loss = policy_loss.mean()
 
                 actor_total = actor_loss - self.entropy_coef * entropy_mean
 
@@ -455,17 +500,16 @@ class MAPPOTrainer:
                     self.actor.parameters(), self.max_grad_norm)
                 self.actor_optimizer.step()
 
-                # NaN 回滚: 如果 Actor 权重爆炸, 恢复快照并停止更新
                 if any(torch.isnan(p).any() for p in self.actor.parameters()):
-                    print("[WARNING] Actor weights NaN after update, "
-                          "rolling back to snapshot")
+                    print("[WARNING] Actor weights NaN, rolling back")
                     self.actor.load_state_dict(actor_snapshot)
                     kl_early_stopped = True
                     break
 
-                # ---- Critic 更新 ----
+                # ---- Critic 更新 (双重裁剪 + Huber) ----
                 values = self.critic(global_states).squeeze(-1)
-                critic_loss = F.mse_loss(values, returns_norm)
+                critic_loss = self._cal_value_loss(
+                    values, old_values_norm, returns_norm, active_masks)
 
                 self.critic_optimizer.zero_grad()
                 critic_loss.backward()
@@ -473,7 +517,6 @@ class MAPPOTrainer:
                     self.critic.parameters(), self.max_grad_norm)
                 self.critic_optimizer.step()
 
-                # 统计
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - ratio.log()).mean().item()
 
@@ -499,7 +542,6 @@ class MAPPOTrainer:
         total_critic_loss = 0.0
         n_updates = 0
 
-        # 更新 return 运行统计 (归一化 Critic 目标)
         n = buffer.ptr
         all_returns = buffer.returns[:n].reshape(-1)
         self._update_ret_rms(all_returns)
@@ -508,10 +550,15 @@ class MAPPOTrainer:
             for batch in buffer.get_batches(self.mini_batch_size):
                 global_states = batch['global_states']
                 returns = batch['returns']
+                old_values = batch['old_values']
+                active_masks = batch['active_masks']
+
                 returns_norm = (returns - self._ret_rms_mean) / self._ret_std
+                old_values_norm = (old_values - self._ret_rms_mean) / self._ret_std
 
                 values = self.critic(global_states).squeeze(-1)
-                critic_loss = F.mse_loss(values, returns_norm)
+                critic_loss = self._cal_value_loss(
+                    values, old_values_norm, returns_norm, active_masks)
 
                 self.critic_optimizer.zero_grad()
                 critic_loss.backward()

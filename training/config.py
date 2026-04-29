@@ -39,16 +39,16 @@ def parse_args():
                         help="预训练 Actor 算法类型 (默认从 pretrained_dir 自动检测)")
 
     # ---- MAPPO ----
-    parser.add_argument("--lr_actor", default=1e-5, type=float)
+    parser.add_argument("--lr_actor", default=3e-4, type=float)
     parser.add_argument("--lr_critic", default=3e-4, type=float)
     parser.add_argument("--gamma", default=0.99, type=float)
     parser.add_argument("--gae_lambda", default=0.95, type=float)
-    parser.add_argument("--clip_eps", default=0.1, type=float)
+    parser.add_argument("--clip_eps", default=0.2, type=float)
     parser.add_argument("--entropy_coef", default=0.01, type=float)
-    parser.add_argument("--max_grad_norm", default=0.5, type=float)
-    parser.add_argument("--ppo_epochs", default=4, type=int)
+    parser.add_argument("--max_grad_norm", default=10.0, type=float)
+    parser.add_argument("--ppo_epochs", default=10, type=int)
     parser.add_argument("--mini_batch_size", default=256, type=int)
-    parser.add_argument("--target_kl", default=0.05, type=float)
+    parser.add_argument("--target_kl", default=0.15, type=float)
 
     # ---- 训练 ----
     parser.add_argument("--max_episodes", default=1000, type=int)
@@ -56,9 +56,9 @@ def parse_args():
     parser.add_argument("--min_update_steps", default=32, type=int)
 
     # ---- Critic warmup & COLREGs 退火 ----
-    parser.add_argument("--freeze_actor_episodes", default=100, type=int)
+    parser.add_argument("--freeze_actor_episodes", default=30, type=int)
     parser.add_argument("--colregs_k_C_start", default=1.0, type=float)
-    parser.add_argument("--colregs_anneal_episodes", default=300, type=int)
+    parser.add_argument("--colregs_anneal_episodes", default=800, type=int)
     parser.add_argument("--log_interval", default=10, type=int)
     parser.add_argument("--checkpoint_interval", default=200, type=int)
     parser.add_argument("--output_dir", default=None, type=str)

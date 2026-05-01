@@ -421,8 +421,12 @@ class SACActuatorAgent:
 
                 if self.use_soft_q_filter:
                     with torch.no_grad():
-                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                        q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
+                        q1_expert, q2_expert = self.critic(
+                            expert_states, expert_goals, expert_actions)
+                        q1_pi, q2_pi = self.critic(
+                            expert_states, expert_goals, expert_pi_mean)
+                        q_expert = 0.5 * (q1_expert + q2_expert)
+                        q_pi = 0.5 * (q1_pi + q2_pi)
                         q_advantage = q_expert - q_pi
                         soft_weight = torch.sigmoid(q_advantage / self.bc_tau)
                         soft_weight_avg = soft_weight.mean().item()
@@ -433,8 +437,12 @@ class SACActuatorAgent:
                 else:
                     # Q-filter: 只在 Q(s,g,a_expert) > Q(s,g,π(s,g)) 时模仿
                     with torch.no_grad():
-                        q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                        q_pi = self.critic.Q1(expert_states, expert_goals, expert_pi_mean)
+                        q1_expert, q2_expert = self.critic(
+                            expert_states, expert_goals, expert_actions)
+                        q1_pi, q2_pi = self.critic(
+                            expert_states, expert_goals, expert_pi_mean)
+                        q_expert = 0.5 * (q1_expert + q2_expert)
+                        q_pi = 0.5 * (q1_pi + q2_pi)
                         bc_filter = (q_expert > q_pi).squeeze()
                         bc_hit_rate = bc_filter.float().mean().item()
                         soft_weight_avg = bc_hit_rate

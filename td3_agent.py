@@ -428,8 +428,12 @@ class TD3ActuatorAgent:
                     if self.use_soft_q_filter:
                         # Soft Q-filter: sigmoid 连续权重
                         with torch.no_grad():
-                            q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                            q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
+                            q1_expert, q2_expert = self.critic(
+                                expert_states, expert_goals, expert_actions)
+                            q1_pi, q2_pi = self.critic(
+                                expert_states, expert_goals, pi_expert)
+                            q_expert = 0.5 * (q1_expert + q2_expert)
+                            q_pi = 0.5 * (q1_pi + q2_pi)
                             q_advantage = q_expert - q_pi  # (n_expert, 1)
                             soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # (n_expert, 1)
                             soft_weight_avg = soft_weight.mean().item()
@@ -440,8 +444,12 @@ class TD3ActuatorAgent:
                     else:
                         # 硬 Q-filter
                         with torch.no_grad():
-                            q_expert = self.critic.Q1(expert_states, expert_goals, expert_actions)
-                            q_pi = self.critic.Q1(expert_states, expert_goals, pi_expert)
+                            q1_expert, q2_expert = self.critic(
+                                expert_states, expert_goals, expert_actions)
+                            q1_pi, q2_pi = self.critic(
+                                expert_states, expert_goals, pi_expert)
+                            q_expert = 0.5 * (q1_expert + q2_expert)
+                            q_pi = 0.5 * (q1_pi + q2_pi)
                             # 仅保留 Q(expert) > Q(pi) 的样本
                             mask = (q_expert > q_pi).float()
                             bc_hit_rate = mask.mean().item()

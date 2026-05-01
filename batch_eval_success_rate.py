@@ -10,6 +10,7 @@
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -31,6 +32,52 @@ from selector_agent import SelectorAgent
 # 硬编码的评估随机种子列表
 # ============================================================================
 EVAL_SEEDS = [42, 123, 456, 789, 1024, 2048, 4096, 8192, 16384, 32768]
+
+
+# ============================================================================
+# 障碍物半径自动调整
+# ============================================================================
+
+def auto_obstacle_radius_max(num_obstacles, map_size=100.0, rou_c=1.5, rou_s=1.5,
+                             base_n=6, base_rmax=10.0, r_min=3.0):
+    """
+    根据障碍物数量自动调整最大半径，保持空间密度大致恒定。
+
+    推导思路：
+    - 可用区域边长 = map_size - 2*(r_max + rou_c + rou_s + 5)
+    - 单个障碍物平均投影面积 ≈ π * ((r_min+r_max)/2 + rou_c + rou_s)^2
+    - 令"可用面积 / 总投影面积"与 base case (N=6, rmax=10) 保持一致
+
+    Returns:
+        调整后的 obstacle_radius_max
+    """
+    if num_obstacles <= base_n:
+        return base_rmax
+
+    # base case 的空间冗余比例（约 2.4，已包含随机放置的 inefficiency）
+    base_margin = base_rmax + rou_c + rou_s + 5
+    base_avail = (map_size - 2 * base_margin) ** 2
+    base_avg_r = (r_min + base_rmax) / 2
+    base_safe_r = base_avg_r + rou_c + rou_s
+    base_total_area = base_n * math.pi * base_safe_r ** 2
+    target_ratio = base_avail / base_total_area
+
+    # 求解方程：(A - 2*rmax)^2 = B * (rmax/2 + c)^2
+    # 其中 A = map_size - 2*(rou_c+rou_s+5), c = r_min/2 + rou_c + rou_s
+    margin_const = rou_c + rou_s + 5          # 默认 8.0
+    A = map_size - 2 * margin_const           # 默认 84.0
+    c = r_min / 2 + rou_c + rou_s             # 默认 4.5
+    B = target_ratio * num_obstacles * math.pi
+
+    sqrt_B = math.sqrt(B)
+    numerator = A - sqrt_B * c
+    denominator = 2 + sqrt_B / 2
+
+    if denominator <= 0 or numerator <= 0:
+        return r_min
+
+    rmax = numerator / denominator
+    return max(r_min, min(base_rmax, rmax))
 
 
 # ============================================================================
@@ -250,6 +297,14 @@ def main():
     M = args.eval_episodes
     N = len(seeds)
 
+    # --- 自动调整障碍物最大半径（高密度场景） ---
+    original_rmax = args.obstacle_radius_max
+    adjusted_rmax = auto_obstacle_radius_max(args.eval_obstacles)
+    if adjusted_rmax != original_rmax:
+        args.obstacle_radius_max = adjusted_rmax
+        print(f"[AUTO] 障碍物数={args.eval_obstacles}，自动调整 obstacle_radius_max: "
+              f"{original_rmax:.1f} → {adjusted_rmax:.2f}")
+
     print("=" * 60)
     print(f"  批量评估 — {algo.upper()}")
     print("=" * 60)
@@ -258,6 +313,7 @@ def main():
     print(f"  每种子评估数: {M}")
     print(f"  总评估回合:   {N * M}")
     print(f"  环境:         {args.eval_targets} 目标 / {args.eval_obstacles} 障碍物")
+    print(f"  障碍半径范围: {args.obstacle_radius_min:.1f} ~ {args.obstacle_radius_max:.2f}")
     print(f"  种子列表:     {seeds}")
 
     # --- 加载模型 (一次性) ---

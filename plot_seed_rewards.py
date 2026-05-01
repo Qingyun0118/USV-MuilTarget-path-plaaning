@@ -24,36 +24,38 @@ X_AXIS = "episodes"  # "episodes" | "global_steps"
 #       (即 <output_dir>/runs/<run_name>/ -> <output_dir>/training_history.json)
 #       如果目录结构不同, 可在 HISTORY_OVERRIDE 中手动指定
 ALGORITHMS = {
-    # "Expert-HRL-TD7-HardQ": [
-    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
-    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
-    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
-    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
-    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
-    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
-    # ],
-    # "Expert-HRL-TD7-SoftQ": [
-    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
-    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
-    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
-    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
-    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
-    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
-    # ],
-    "Expert-HRL-TD3-HardQ": [
-        r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_HardQ2022",
-        r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_HardQ2025",
-        r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_HardQ2024",
-        r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_HardQ2023",
-        r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_HardQ2026",
+    "Expert-HRL-TD7-HardQ": [
+        r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
+        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
+        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
+        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
+        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
+        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
     ],
-    "Expert-HRL-TD3-SoftQ": [
-        r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_SoftQ2026",
-        r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_SoftQ2025",
-        r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_SoftQ2024",
-        r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_SoftQ2023",
-        r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_SoftQ2022",
+    "Expert-HRL-TD7-SoftQ": [
+        r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
+        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
     ],
+    # "Expert-HRL-TD3-HardQ": [
+    #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_HardQ2021",
+    #     r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_HardQ2022",
+    #     r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_HardQ2025",
+    #     r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_HardQ2024",
+    #     r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_HardQ2023",
+    #     r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_HardQ2026",
+    # ],
+    # "Expert-HRL-TD3-SoftQ": [
+    #     r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_SoftQ2026",
+    #     r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_SoftQ2025",
+    #     r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_SoftQ2024",
+    #     r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_SoftQ2023",
+    #     r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_SoftQ2022",
+    #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_SoftQ2021",
+    # ],
     # "Expert-HRL-SAC-HardQ": [
     #     r"1_Result\trainingResult\SAC\seed2022\Expert_HRL_SAC_HardQ2022",
     #     r"1_Result\trainingResult\SAC\seed2023\Expert_HRL_SAC_HardQ2023",
@@ -71,14 +73,14 @@ ALGORITHMS = {
 
 # 要绘制的 tag（TensorBoard 中的标量名）
 TAGS = [
-    "Reward/Actuator",
-    "Reward/Selector",
-    "Metrics/TotalDistance",
-    "Metrics/SuccessRate",
+    # "Reward/Actuator",
+    # "Reward/Selector",
+    # "Metrics/TotalDistance",
+    # "Metrics/SuccessRate",
     # ---- Soft vs Hard Q-filter 对比分析 ----
     # "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
     # "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
-    # "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
+    "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
 ]
 
 # 平滑窗口大小（设为 1 则不平滑）

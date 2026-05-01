@@ -303,6 +303,13 @@ def train_ctde_mappo(args):
         ep_start_time = time.time()
         buffer.clear()
 
+        # ---- 线性学习率衰减 ----
+        lr_frac = 1.0 - episode / args.max_episodes
+        for pg in trainer.actor_optimizer.param_groups:
+            pg['lr'] = args.lr_actor * lr_frac
+        for pg in trainer.critic_optimizer.param_groups:
+            pg['lr'] = args.lr_critic * lr_frac
+
         # ---- COLREGs 退火 ----
         if episode < args.colregs_anneal_episodes:
             progress = episode / max(1, args.colregs_anneal_episodes)
@@ -359,17 +366,18 @@ def train_ctde_mappo(args):
             log_probs_arr = np.zeros(args.num_usvs, dtype=np.float32)
             values_arr = np.zeros(args.num_usvs, dtype=np.float32)
             goals_arr = np.zeros((args.num_usvs, goal_dim), dtype=np.float32)
+            active_masks_arr = np.ones(args.num_usvs, dtype=np.float32)
 
             for i in range(args.num_usvs):
                 act_state = get_actuator_state(obs_dict[f"usv_{i}"])
                 usv_pos = get_usv_pos(obs_dict[f"usv_{i}"])
 
                 if usv_idle[i]:
-                    # 空闲USV: 零动作 (定点), rel_goal 设为零
                     rel_goal = np.zeros(goal_dim, dtype=np.float32)
                     action = np.zeros(action_dim, dtype=np.float32)
                     log_prob = 0.0
                     value = trainer.get_value(global_state)
+                    active_masks_arr[i] = 0.0
                 else:
                     rel_goal = target_pos_norm[i] - usv_pos
                     action, log_prob, value = trainer.get_action_and_value(
@@ -398,7 +406,8 @@ def train_ctde_mappo(args):
             ], dtype=np.float32)
 
             buffer.add(obs_arr, actions_arr, log_probs_arr, rewards_arr,
-                       terminal_flags, goals_arr, global_state, values_arr)
+                       terminal_flags, goals_arr, global_state, values_arr,
+                       active_masks_arr)
 
             episode_rewards += rewards_arr
 
@@ -585,6 +594,10 @@ def train_ctde_mappo(args):
         writer.add_scalar('Training/COLREGs_kC', current_k_C, episode)
         writer.add_scalar('Training/CriticWarmup',
                           float(episode < args.freeze_actor_episodes), episode)
+        writer.add_scalar('Training/LR_Actor',
+                          trainer.actor_optimizer.param_groups[0]['lr'], episode)
+        writer.add_scalar('Training/LR_Critic',
+                          trainer.critic_optimizer.param_groups[0]['lr'], episode)
         if assigner.is_learnable:
             writer.add_scalar('Selector/PolicyLoss',
                               sel_losses['sel_policy_loss'], episode)

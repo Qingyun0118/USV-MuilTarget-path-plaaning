@@ -122,6 +122,7 @@ def train_expert_hrl(args):
         zs_dim=args.zs_dim,
         lap_alpha=args.lap_alpha,
         lap_min_priority=args.lap_min_priority,
+        bc_tau=args.bc_tau,
         use_soft_q_filter=args.use_soft_q_filter
     )
 
@@ -664,7 +665,7 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
     selector = SelectorAgent()
     actuator = TD7ActuatorAgent(
         actuator_state_dim, 2, 2, max_action=1.0,
-        zs_dim=args.zs_dim)
+        zs_dim=args.zs_dim, bc_tau=args.bc_tau)
     expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
     default_selector_model = os.path.join(args.output_dir, "best_selector.pth")
@@ -972,6 +973,7 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
             f.write(f"  Expert p0:      {args.expert_p0}\n")
             f.write(f"  Expert p_min:   {args.expert_p_min}\n")
             f.write(f"  BC weight:      {args.bc_weight}\n")
+            f.write(f"  BC tau:         {args.bc_tau}\n")
             f.write(f"  Seed:           {args.seed}\n")
             # TD7 特有参数
             f.write(f"\n--- TD7 参数 (对齐参考实现) ---\n")
@@ -1089,6 +1091,8 @@ if __name__ == "__main__":
                         help="行为克隆损失权重 (>0 开启)")
     parser.add_argument("--use_soft_q_filter", action="store_true",
                         help="是否使用 Soft Q-filter (默认使用硬过滤)")
+    parser.add_argument("--bc_tau", default=0.5, type=float,
+                        help="Soft Q-filter 的温度参数 (控制 BC 权重的平滑度)")
 
     # --- 碰撞回溯 ---
     parser.add_argument("--crash_backtrack_steps", default=10, type=int,

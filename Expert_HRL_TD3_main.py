@@ -34,7 +34,7 @@ import torch
 #     compute_success_rate, print_evaluation_report,
 #     get_normalized_metrics_for_radar
 # )
-from radar_chart import plot_single_radar, plot_multi_radar, plot_metrics_bar_chart
+# from radar_chart import plot_single_radar, plot_multi_radar, plot_metrics_bar_chart
 from torch.utils.tensorboard import SummaryWriter
 import datetime
 from collections import deque

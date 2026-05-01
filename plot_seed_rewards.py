@@ -8,6 +8,7 @@ os.environ["MKL_THREADING_LAYER"] = "GNU"
 import json
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 
 # ============ 配置区 ============
 # 数据源: "tensorboard" 直接读取 event 文件, "csv" 从导出的 CSV 文件读取
@@ -24,21 +25,21 @@ X_AXIS = "episodes"  # "episodes" | "global_steps"
 #       (即 <output_dir>/runs/<run_name>/ -> <output_dir>/training_history.json)
 #       如果目录结构不同, 可在 HISTORY_OVERRIDE 中手动指定
 ALGORITHMS = {
-    "Expert-HRL-TD7-HardQ": [
-        r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
-        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
-        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
-        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
-        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
-        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
-    ],
+    # "Expert-HRL-TD7-HardQ": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
+    # ],
     "Expert-HRL-TD7-SoftQ": [
         r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
-        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
-        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
-        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
-        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
-        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
+        # r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+        # r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+        # r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+        # r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+        # r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
     ],
     # "Expert-HRL-TD3-HardQ": [
     #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_HardQ2021",
@@ -80,11 +81,16 @@ TAGS = [
     # ---- Soft vs Hard Q-filter 对比分析 ----
     # "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
     # "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
-    "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
+    # "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
+    'Training/Expert_Probability',
 ]
 
-# 平滑窗口大小（设为 1 则不平滑）
+# 平滑方法: "uniform" 均匀滑动窗口, "ema" 指数移动平均 (与 TensorBoard 一致), "both" 同时绘制两者对比
+SMOOTH_METHOD = "ema"  # "uniform" | "ema" | "both"
+# 平滑窗口大小（设为 1 则不平滑；对 EMA 则通过 alpha = 2/(window+1) 近似等效）
 SMOOTH_WINDOW = 50
+# EMA 的 alpha 参数（仅 SMOOTH_METHOD="ema" 或 "both" 时生效，设为 None 则自动用 2/(SMOOTH_WINDOW+1)）
+EMA_ALPHA = None
 
 # 输出图片路径（None 则只显示不保存）
 SAVE_PATH = None
@@ -161,12 +167,24 @@ def load_global_steps(log_dir: str):
 
 
 def smooth(values: np.ndarray, window: int):
-    if window <= 1:
+    if window <= 1 or len(values) < window:
         return values
     kernel = np.ones(window) / window
-    smoothed = np.convolve(values, kernel, mode="valid")
-    pad = len(values) - len(smoothed)
-    return np.concatenate([values[:pad], smoothed])
+    half = window // 2
+    padded = np.pad(values, (half, window - half - 1), mode="edge")
+    smoothed = np.convolve(padded, kernel, mode="valid")
+    return smoothed
+
+
+def smooth_ema(values: np.ndarray, window: int, alpha: float = None):
+    """EMA 平滑，与 TensorBoard 指数移动平均一致。"""
+    if window <= 1 or len(values) < window:
+        return values
+    if alpha is None:
+        alpha = 2.0 / (window + 1)  # 与 uniform window 近似等效
+    s = pd.Series(values)
+    smoothed = s.ewm(alpha=alpha, adjust=False).mean()
+    return smoothed.values
 
 
 def align_and_aggregate(all_steps, all_values):
@@ -191,22 +209,41 @@ def interpolate_and_aggregate(all_x, all_values, n_points=1000):
     return x_common, mean, std
 
 
+def _aggregate_and_draw(ax, all_x, all_values, x_axis, color, label, linestyle="-"):
+    """将多个种子的数据聚合为 mean±std 并绘制。"""
+    if len(all_values) == 1:
+        ax.plot(all_x[0], all_values[0], linewidth=1.2, linestyle=linestyle,
+                color=color, label=f"{label} (1 seed)")
+    else:
+        if x_axis == "global_steps":
+            x_interp, mean, std = interpolate_and_aggregate(all_x, all_values)
+        else:
+            x_interp, mean, std = align_and_aggregate(all_x, all_values)
+        ax.plot(x_interp, mean, linewidth=1.5, color=color, linestyle=linestyle,
+                label=label)
+        ax.fill_between(x_interp, mean - std, mean + std, alpha=0.12, color=color)
+
+
 def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
-                      data_source="tensorboard", x_axis="episodes"):
+                      data_source="tensorboard", x_axis="episodes",
+                      smooth_method="uniform", ema_alpha=None):
     n_tags = len(tags)
     n_cols = (n_tags + 1) // 2
     fig, axes = plt.subplots(2, n_cols, figsize=(6 * n_cols, 10), squeeze=False)
     axes = axes.flatten()
 
     x_label = "global steps" if x_axis == "global_steps" else "episodes"
+    plot_both = (smooth_method == "both")
 
     for idx, tag in enumerate(tags):
         ax = axes[idx]
 
         for algo_idx, (algo_name, seed_dirs) in enumerate(algorithms.items()):
             color = COLORS[algo_idx % len(COLORS)]
-            all_x = []
-            all_values = []
+
+            # --- 收集各 seed 的原始数据 ---
+            all_x_seeds = []
+            all_values_raw = []  # 原始数据，每个 seed 一份
 
             for d in seed_dirs:
                 steps, values = read_scalar(d, tag, data_source)
@@ -223,36 +260,40 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
                 else:
                     x = steps
 
-                values = smooth(values, smooth_window)
-                all_x.append(x)
-                all_values.append(values)
+                all_x_seeds.append(x)
+                all_values_raw.append(values)
 
-            if len(all_values) == 0:
+            if len(all_values_raw) == 0:
                 continue
 
-            if len(all_values) == 1:
-                ax.plot(all_x[0], all_values[0], linewidth=1.2,
-                        color=color, label=f"{algo_name} (1 seed)")
+            # --- 根据 smooth_method 绘制 ---
+            if plot_both:
+                # Uniform 平滑
+                all_val_u = [smooth(v.copy(), smooth_window) for v in all_values_raw]
+                suffix_u = f"{algo_name} [uniform]"
+                _aggregate_and_draw(ax, all_x_seeds, all_val_u, x_axis, color, suffix_u, "-")
+
+                # EMA 平滑
+                all_val_e = [smooth_ema(v, smooth_window, ema_alpha) for v in all_values_raw]
+                suffix_e = f"{algo_name} [EMA]"
+                _aggregate_and_draw(ax, all_x_seeds, all_val_e, x_axis, color, suffix_e, "--")
+            elif smooth_method == "ema":
+                all_val = [smooth_ema(v, smooth_window, ema_alpha) for v in all_values_raw]
+                _aggregate_and_draw(ax, all_x_seeds, all_val, x_axis, color, algo_name, "-")
             else:
-                if x_axis == "global_steps":
-                    x_interp, mean, std = interpolate_and_aggregate(all_x, all_values)
-                else:
-                    x_interp, mean, std = align_and_aggregate(all_x, all_values)
-                ax.plot(x_interp, mean, linewidth=1.5, color=color,
-                        label=f"{algo_name} ")
-                ax.fill_between(x_interp, mean - std, mean + std, alpha=0.15, color=color)
+                all_val = [smooth(v, smooth_window) for v in all_values_raw]
+                _aggregate_and_draw(ax, all_x_seeds, all_val, x_axis, color, algo_name, "-")
 
         ax.set_xlabel(x_label)
         y_label = tag.split("/")[-1] + " Reward" if tag.startswith("Reward/") else tag.split("/")[-1]
         ax.set_ylabel(y_label)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
     # 隐藏多余子图
     for idx in range(len(tags), len(axes)):
         axes[idx].set_visible(False)
 
-    # fig.suptitle(f"Algorithm Comparison", fontsize=14)
     plt.tight_layout()
 
     if save_path:
@@ -271,4 +312,5 @@ if __name__ == "__main__":
         print('  }')
         exit(1)
 
-    plot_algo_compare(ALGORITHMS, TAGS, SMOOTH_WINDOW, SAVE_PATH, DATA_SOURCE, X_AXIS)
+    plot_algo_compare(ALGORITHMS, TAGS, SMOOTH_WINDOW, SAVE_PATH, DATA_SOURCE, X_AXIS,
+                      SMOOTH_METHOD, EMA_ALPHA)

@@ -17,8 +17,10 @@
 """
 
 import argparse
+import ast
 import math
 import os
+import re
 import sys
 import time
 import numpy as np
@@ -91,6 +93,78 @@ def detect_algo(model_dir):
     raise SystemExit(
         f"无法从文件夹名检测算法类型 (td7/td3/sac): {name}\n"
         f"请确保文件夹名包含 'td7'、'td3' 或 'sac'。")
+
+
+def parse_existing_evals(model_dir):
+    """
+    解析模型目录下的 batch_eval_results.txt，提取已完成的评估参数组合与结果。
+    多块追加写入的文件会被逐一解析。
+
+    Returns:
+        dict: key = (targets, obstacles, eval_episodes, seeds_tuple)
+              value = {'mean_rate', 'std_rate', 'algo', 'total_episodes'}
+    """
+    result_path = os.path.join(model_dir, "batch_eval_results.txt")
+    if not os.path.exists(result_path):
+        return {}
+
+    with open(result_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    existing = {}
+    blocks = content.split("批量评估结果")
+
+    for block in blocks:
+        if not block.strip():
+            continue
+
+        # 场景: "环境:     3T / 6O"
+        scene_match = re.search(r"环境:\s*(\d+)T\s*/\s*(\d+)O", block)
+        if not scene_match:
+            continue
+        targets = int(scene_match.group(1))
+        obstacles = int(scene_match.group(2))
+
+        # 每种子评估回合数: "每种子评估回合数: 100"
+        ep_match = re.search(r"每种子评估回合数:\s*(\d+)", block)
+        if not ep_match:
+            continue
+        eval_episodes = int(ep_match.group(1))
+
+        # 评估种子列表: "评估种子列表: [42, 123, 456, 789, 1024]"
+        seeds_match = re.search(r"评估种子列表:\s*(\[.*?\])", block)
+        if not seeds_match:
+            continue
+        try:
+            seeds = tuple(ast.literal_eval(seeds_match.group(1)))
+        except (ValueError, SyntaxError):
+            continue
+
+        # 算法
+        algo_match = re.search(r"算法:\s*(\w+)", block)
+        algo = algo_match.group(1).lower() if algo_match else detect_algo(model_dir)
+
+        # Mean
+        mean_match = re.search(r"成功率均值\s*\(Mean\):\s*([\d.]+)", block)
+        mean_rate = float(mean_match.group(1)) if mean_match else 0.0
+
+        # Std
+        std_match = re.search(r"成功率均方差\s*\(Std\):\s*([\d.]+)", block)
+        std_rate = float(std_match.group(1)) if std_match else 0.0
+
+        # 总回合数
+        total_ep_match = re.search(r"总评估回合数:\s*(\d+)", block)
+        total_ep = int(total_ep_match.group(1)) if total_ep_match else 0
+
+        key = (targets, obstacles, eval_episodes, seeds)
+        existing[key] = {
+            'mean_rate': mean_rate,
+            'std_rate': std_rate,
+            'algo': algo,
+            'total_episodes': total_ep,
+        }
+
+    return existing
 
 
 def pick_model(model_dir, candidates):
@@ -385,6 +459,10 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                         help="自定义评估随机种子列表，覆盖默认")
 
+    # 跳过控制
+    parser.add_argument("--no-skip-existing", action="store_true",
+                        help="即使已有相同参数的评估记录，也强制重新评估")
+
     # 环境参数
     parser.add_argument("--usv_length", type=float, default=3.0)
     parser.add_argument("--usv_width", type=float, default=1.5)
@@ -430,24 +508,58 @@ def main():
     if hasattr(temp_env, 'close'):
         temp_env.close()
 
+    # --- 构建本次评估的匹配键 ---
+    eval_seeds = args.seeds if args.seeds is not None else DEFAULT_EVAL_SEEDS
+    current_key = (args.eval_targets, args.eval_obstacles, args.eval_episodes, tuple(eval_seeds))
+
+    skip_existing = not args.no_skip_existing
+
     # --- 逐个模型评估 ---
     print("\n" + "=" * 70)
     print("  多模型批量评估")
     print("=" * 70)
     print(f"  模型数量:     {len(model_dirs)}")
-    print(f"  评估种子数:   {len(args.seeds) if args.seeds else len(DEFAULT_EVAL_SEEDS)}")
+    print(f"  评估种子数:   {len(eval_seeds)}")
     print(f"  每种子回合数: {args.eval_episodes}")
     print(f"  环境:         {args.eval_targets}T / {args.eval_obstacles}O")
+    print(f"  跳过已有:     {'是' if skip_existing else '否'}")
     print(f"  State dim:    {state_dim}")
     print("=" * 70)
 
     all_model_results = []
+    skipped = 0
     total_start = time.time()
 
     for idx, model_dir in enumerate(model_dirs):
+        if not os.path.isdir(model_dir):
+            print(f"\n[{idx + 1}/{len(model_dirs)}] [SKIP] 目录不存在: {model_dir}")
+            continue
+
+        # 检查是否已有相同参数的评估记录
+        if skip_existing:
+            existing_evals = parse_existing_evals(model_dir)
+            if current_key in existing_evals:
+                prev = existing_evals[current_key]
+                short_name = os.path.basename(os.path.normpath(model_dir))
+                print(f"\n[{idx + 1}/{len(model_dirs)}] [SKIP] {short_name}"
+                      f" — 已有完全匹配的评估记录 "
+                      f"(Mean={prev['mean_rate']:.4f}, Std={prev['std_rate']:.4f})")
+                skipped += 1
+                all_model_results.append({
+                    'model_dir': model_dir,
+                    'algo': prev['algo'],
+                    'mean_rate': prev['mean_rate'],
+                    'std_rate': prev['std_rate'],
+                    'total_episodes': prev['total_episodes'],
+                    'elapsed': 0.0,
+                    '_skipped': True,
+                })
+                continue
+
         print(f"\n[{idx + 1}/{len(model_dirs)}] 开始评估: {model_dir}")
         result = eval_single_model(model_dir, args, state_dim, env_kwargs)
         if result is not None:
+            result['_skipped'] = False
             all_model_results.append(result)
 
     total_elapsed = time.time() - total_start
@@ -466,14 +578,17 @@ def main():
     method_std = float(np.std(rates, ddof=1))
     method_sem = method_std / math.sqrt(len(rates))
 
-    print(f"\n  评估模型数:         {len(all_model_results)}")
+    new_eval_count = sum(1 for r in all_model_results if not r.get('_skipped'))
+    print(f"\n  评估模型数:         {len(all_model_results)}"
+          f" (新评估: {new_eval_count}, 复用已有: {skipped})")
     print(f"  总评估回合数:       {sum(r['total_episodes'] for r in all_model_results)}")
     print(f"  总耗时:             {total_elapsed:.1f}s")
-    print(f"\n  {'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6}")
-    print(f"  {'─' * 66}")
+    print(f"\n  {'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6} {'备注':>8}")
+    print(f"  {'─' * 72}")
     for r in all_model_results:
         short_name = os.path.basename(os.path.normpath(r['model_dir']))
-        print(f"  {short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6}")
+        note = "(复用)" if r.get('_skipped') else ""
+        print(f"  {short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6} {note:>8}")
 
     print(f"\n  ── Method-level 统计 ──")
     print(f"  成功率均值 (Mean):      {method_mean:.4f}")
@@ -496,11 +611,13 @@ def main():
         f.write(f"评估种子列表: {args.seeds if args.seeds else DEFAULT_EVAL_SEEDS}\n")
         f.write(f"每种子评估回合: {args.eval_episodes}\n")
         f.write(f"总耗时: {total_elapsed:.1f}s\n")
-        f.write(f"\n{'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6}\n")
-        f.write(f"{'─' * 66}\n")
+        f.write(f"新评估: {new_eval_count} 个, 复用已有: {skipped} 个\n")
+        f.write(f"\n{'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6} {'备注':>8}\n")
+        f.write(f"{'─' * 72}\n")
         for r in all_model_results:
             short_name = os.path.basename(os.path.normpath(r['model_dir']))
-            f.write(f"{short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6}\n")
+            note = "(复用)" if r.get('_skipped') else ""
+            f.write(f"{short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6} {note:>8}\n")
         f.write(f"\nMethod-level 统计:\n")
         f.write(f"  成功率均值 (Mean):    {method_mean:.4f}\n")
         f.write(f"  成功率均方差 (Std):   {method_std:.4f}\n")

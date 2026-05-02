@@ -25,21 +25,70 @@ X_AXIS = "episodes"  # "episodes" | "global_steps"
 #       (即 <output_dir>/runs/<run_name>/ -> <output_dir>/training_history.json)
 #       如果目录结构不同, 可在 HISTORY_OVERRIDE 中手动指定
 ALGORITHMS = {
-    "Expert-HRL-TD7-HardQ": [
-        r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
-        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
-        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
+    # "Expert-HRL-TD7-HardQ": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_HardQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_HardQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_HardQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
+    # ],
+    # "Expert-HRL-TD7-SoftQ": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
+    # ],
+    ########################
+        "Expert-HRL-TD7-HardQ": [
         r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
         r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
         r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
     ],
-    "Expert-HRL-TD7-SoftQ": [
-        r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
-        r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
-        r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+        "Expert-HRL-TD7-SoftQ(tau=0.001)": [
+        r"expert_hrl_td7_0429_seed2021_softQ0.001\runs\Expert_HRL_TD7_20260429_231737",
+        r"expert_hrl_td7_0429_seed2022_softQ0.001\runs\Expert_HRL_TD7_20260429_231652",
+        r"expert_hrl_td7_0429_seed2023_softQ0.001\runs\Expert_HRL_TD7_20260429_231502",
+    ],
+        "Expert-HRL-TD7-SoftQ(tau=0.1)": [
+        r"expert_hrl_td7_0427_seed2021_softQ0.1\runs\Expert_HRL_TD7_20260428_182840",
+        r"expert_hrl_td7_0429_seed2022_softQ0.1\runs\Expert_HRL_TD7_20260429_092922",
+        r"expert_hrl_td7_0429_seed2023_softQ0.1\runs\Expert_HRL_TD7_20260429_093437",
+    ],
+        "Expert-HRL-TD7-SoftQ(tau=0.3)": [
+        r"expert_hrl_td7_0427_seed2021_softQ0.3\runs\Expert_HRL_TD7_20260428_184046",
+        r"expert_hrl_td7_0429_seed2022_softQ0.3\runs\Expert_HRL_TD7_20260429_093032",
+        r"expert_hrl_td7_0429_seed2023_softQ0.3\runs\Expert_HRL_TD7_20260429_093548",
+        
+    ],
+
+        "Expert-HRL-TD7-SoftQ(tau=0.5)": [
         r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
         r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
         r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
+    ],
+
+        "Expert-HRL-TD7-SoftQ(tau=0.7)": [
+        r"expert_hrl_td7_0427_seed2021_softQ0.7\runs\Expert_HRL_TD7_20260428_184127",
+        r"expert_hrl_td7_0429_seed2022_softQ0.7\runs\Expert_HRL_TD7_20260429_093109",
+        r"expert_hrl_td7_0429_seed2023_softQ0.7\runs\Expert_HRL_TD7_20260429_093625",
+
+    ],
+
+        "Expert-HRL-TD7-SoftQ(tau=1.0)": [
+        r"expert_hrl_td7_0427_seed2021_softQ1.0\runs\Expert_HRL_TD7_20260428_183017",
+        r"expert_hrl_td7_0429_seed2022_softQ1.0\runs\Expert_HRL_TD7_20260429_093157",
+        r"expert_hrl_td7_0429_seed2023_softQ1.0\runs\Expert_HRL_TD7_20260429_093722",
+
+    ],
+
+        "Expert-HRL-TD7-SoftQ(tau=5.0)": [
+        r"expert_hrl_td7_0429_seed2021_softQ5.0\runs\Expert_HRL_TD7_20260429_231940",
+        r"expert_hrl_td7_0429_seed2022_softQ5.0\runs\Expert_HRL_TD7_20260429_232007",
+        r"expert_hrl_td7_0429_seed2023_softQ5.0\runs\Expert_HRL_TD7_20260429_232047",
+
     ],
     # "Expert-HRL-TD3-HardQ": [
     #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_HardQ2021",
@@ -100,7 +149,8 @@ SAVE_PATH = None
 HISTORY_OVERRIDE = {}
 
 # 颜色列表（按算法顺序分配）
-COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"
+          , "#393b79", "#637939", "#8c6d31", "#843c39", "#7b4173", "#3182bd", "#e6550d", "#31a354", "#756bb1", "#020202"]
 # ================================
 
 

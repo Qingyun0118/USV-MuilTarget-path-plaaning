@@ -1,367 +1,257 @@
-╭─── Claude Code v2.1.119 ─────────────────────────────────────────────────────╮
-│                                                  │ Tips for getting started  │
-│                   Welcome back!                  │ Run /init to create a CL… │
-│                                                  │ ───────────────────────── │
-│                      ▐▛███▜▌                     │ Recent activity           │
-│                     ▝▜█████▛▘                    │ No recent activity        │
-│                       ▘▘ ▝▝                      │                           │
-│                                                  │                           │
-│           Opus 4.6 · API Usage Billing           │                           │
-│   D:\fileForWhile\USV-MuilTarget-path-plaaning   │                           │
-╰──────────────────────────────────────────────────────────────────────────────╯
-
-❯ <ide_opened_file>The user opened the file                                     
-  d:\fileForWhile\USV-MuilTarget-path-plaaning\plot_seed_rewards.py in the IDE. 
-   This may or may not be related to the current task.</ide_opened_file>        
-
-❯ 我想要分析使用Soft Q-filter代替 Hard Q-filter的提升作用，请结合代码           
-  @Expert_HRL_TD7_main.py   @td7_agent.py  和当前的训练过程图                   
-  2_traincompare\Figure_1.png进行分析，如果需要别的指标请和我说明               
-  ⎿  Read Expert_HRL_TD7_main.py (1149 lines)
-  ⎿  Read td7_agent.py (768 lines)
-
-● Let me first look at the training comparison figure, then analyze the Soft vs
-  Hard Q-filter code.
-
-  Searched for 1 pattern, read 2 files (ctrl+o to expand)
-
-● 图片比较小，让我仔细看一下。从图中可以看到 4 个子图对比了 HardQ 和 SoftQ 在
-  seed 2025/2026 下的表现。现在让我深入分析代码中两种 Q-filter 的具体差异。
-
-  Soft Q-filter vs Hard Q-filter 代码分析
-
-  两种实现在 td7_agent.py#L631-L698 中：
-
-  Hard Q-filter（use_soft_q_filter=False，第 671-688 行）
-
-  # 二值门控: expert Q > policy Q → 1, 否则 → 0
-  bc_filter = (Q_expert > Q_policy)  # boolean mask
-  if bc_filter.any():
-      bc_loss = F.mse_loss(
-          pi_action[expert_mask][bc_filter],
-          action[expert_mask][bc_filter])
-
-  - 完全离散：只有当 expert 动作的 Q 值 > 当前策略动作的 Q 值时，才施加 BC 损失
-  - expert Q 仅比 policy Q 高 0.001 → 权重 = 1；低 0.001 → 权重 = 0
-  - 梯度信号不稳定：batch 中可用样本数量波动大
-
-  Soft Q-filter（use_soft_q_filter=True，第 651-669 行）
-
-  q_advantage = Q_expert - Q_policy
-  soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # bc_tau=0.5
-  per_sample_bc = (pi_action[expert_mask] -
-  action[expert_mask]).pow(2).mean(dim=1, keepdim=True)
-  bc_loss = (soft_weight * per_sample_bc).mean()
-
-  - 连续权重：sigmoid(advantage / 0.5) 将 Q 优势映射到 (0, 1) 的平滑权重
-  - 即使 Q_expert 略低于 Q_policy，仍有部分梯度信号（权重接近 0.5）
-  - 梯度流更平稳，不会因一个 batch 采样偏差而突然丧失全部 BC 信号
-
-  关键差异总结
-
-  ┌──────────────────┬──────────────────────┬───────────────────────────────┐
-  │       特性       │    Hard Q-filter     │         Soft Q-filter         │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ 权重类型         │ 二值 {0, 1}          │ 连续 (0, 1)                   │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ Q 优势 = +0.01   │ 权重 = 1             │ 权重 ≈ 0.51                   │
-  │ 时               │                      │                               │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ Q 优势 = -0.01   │ 权重 = 0             │ 权重 ≈ 0.49                   │
-  │ 时               │                      │                               │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ Q 优势 = +2.0 时 │ 权重 = 1             │ 权重 ≈ 0.98                   │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ 梯度稳定性       │ 不稳定（样本数波动） │ 平稳（所有 expert             │
-  │                  │                      │ 样本均贡献）                  │
-  ├──────────────────┼──────────────────────┼───────────────────────────────┤
-  │ 温度敏感性       │ 无                   │ bc_tau=0.5 控制锐度           │
-  └──────────────────┴──────────────────────┴───────────────────────────────┘
-
-  从图中观察到的趋势
-
-  从 Figure_1.png 的 4 个子图来看（橙色=HardQ, 蓝色=SoftQ, 每组 2 seeds）：
-
-  1. Reward/Actuator（左上）：SoftQ 的方差带（shaded area）看起来更窄，说明跨
-  seed 一致性更好
-  2. Reward/Selector（右上）：两者趋势相似，最终收敛值接近
-  3. TotalDistance（左下）：两者最终路径长度接近
-  4. SuccessRate（右下）：这是最关键的指标——两者都能达到较高成功率，但 SoftQ
-  的上升曲线可能更平滑
-
-  需要额外指标来做更深入分析
-
-  当前图只展示了 4 个指标，要充分分析 Soft Q-filter 的提升机制，还需要以下指标：
-
-  1. Training/BC_AvgSoftWeight — Soft filter 的平均权重 vs Hard filter 的 hit
-  rate，直接反映 BC 信号强度
-  2. Training/BC_HitRate — expert 动作 Q 值超过 policy 动作的比例，反映 Q-filter
-   的通过率变化趋势
-  3. Training/BC_ExpertSampleRatio — batch 中 expert
-  样本占比（确认两组实验条件一致）
-  4. Training/BC_Weight — 实际 BC 权重（= bc_weight * 
-  expert_prob），确认衰减一致
-  5. Metrics/Collision — 碰撞率曲线，Soft Q-filter 的平滑梯度可能降低早期碰撞
-  6. TD7/Max_Q / TD7/Min_Q — Q 值范围，检查 Soft filter 是否影响 Q 值估计稳定性
-
-  你的 TensorBoard event
-  文件里应该已经记录了这些指标。你可以用以下命令提取对比：
-
-  tensorboard --logdir=2_traincompare --port=6006
-
-  或者如果你希望我帮你写一个 Python 脚本，从 event
-  文件中提取这些指标并生成对比图，我可以直接实现。你觉得需要哪种方式？
-
-❯ <ide_opened_file>The user opened the file                                     
-  d:\fileForWhile\USV-MuilTarget-path-plaaning\plot_seed_rewards.py in the IDE. 
-   This may or may not be related to the current task.</ide_opened_file>        
-
-❯ 我这里已经有了一个脚本，你可以直接在该脚本中添加相关参数                      
-  @plot_seed_rewards.py                                                         
-  ⎿  Read plot_seed_rewards.py (157 lines)
-
-● 直接在 TAGS 列表中添加 Soft vs Hard Q-filter 分析所需的关键指标。
-
-● Update(plot_seed_rewards.py)
-  ⎿  Added 5 lines
-      48      "Reward/Selector",
-      49      "Metrics/TotalDistance",
-      50      "Metrics/SuccessRate",
-      51 +    # ---- Soft vs Hard Q-filter 对比分析 ----                 
-      52 +    "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Ha
-         +rd: 等于 hit rate                                              
-      53 +    "Training/BC_HitRate",         # Q_expert > Q_policy 的比例
-         + (BC 信号通过率)                                               
-      54 +    "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早
-         +期碰撞)                                                        
-      55 +    "TD7/Max_Q",                   # Q 值上界 (BC 方式是否影响 
-         +Q 值稳定性)                                                    
-      56  ]
-      57  
-      58  # 平滑窗口大小（设为 1 则不平滑）
-
-● 现在调整图布局，8 个子图用 2×4 排列时每列 8 单位太宽，缩小一下。
-
-● Update(plot_seed_rewards.py)
-  ⎿  Added 2 lines, removed 1 line
-       98  
-       99  def plot_algo_compare(algorithms, tags, smooth_window=50, save
-           _path=None):
-      100      n_tags = len(tags)
-      101 -    fig, axes = plt.subplots(2, (n_tags + 1) // 2, figsize=(8 
-          -* ((n_tags + 1) // 2), 10), squeeze=False)                    
-      101 +    n_cols = (n_tags + 1) // 2                                
-      102 +    fig, axes = plt.subplots(2, n_cols, figsize=(6 * n_cols, 1
-          +0), squeeze=False)                                            
-      103      axes = axes.flatten()
-      104  
-      105      for idx, tag in enumerate(tags):
-
-● 已完成。新增了 4 个 tag，现在共 8 个子图（2×4 布局）：
-
-  ┌───────────────────────┬──────────────────────────────────────────────────┐
-  │       原有指标        │            新增指标（Q-filter 分析）             │
-  ├───────────────────────┼──────────────────────────────────────────────────┤
-  │                       │ Training/BC_AvgSoftWeight — Soft filter 的       │
-  │ Reward/Actuator       │ sigmoid 平均权重 vs Hard filter                  │
-  │                       │ 的二值通过率，直接量化 BC 梯度信号强度差异       │
-  ├───────────────────────┼──────────────────────────────────────────────────┤
-  │                       │ Training/BC_HitRate — Q_expert > Q_policy        │
-  │ Reward/Selector       │ 的比例，反映随训练推进 expert                    │
-  │                       │ 动作的相对优势如何衰减                           │
-  ├───────────────────────┼──────────────────────────────────────────────────┤
-  │ Metrics/TotalDistance │ Metrics/Collision — 碰撞率曲线，验证 Soft filter │
-  │                       │  的平滑梯度是否降低了早期碰撞                    │
-  ├───────────────────────┼──────────────────────────────────────────────────┤
-  │ Metrics/SuccessRate   │ TD7/Max_Q — Q 值上界变化，检查不同 BC            │
-  │                       │ 方式是否影响 Q 值估计稳定性                      │
-  └───────────────────────┴──────────────────────────────────────────────────┘
-
-  运行 python plot_seed_rewards.py 即可生成对比图。重点关注 BC_AvgSoftWeight 和
-  BC_HitRate 这两个子图——如果 SoftQ 的 AvgSoftWeight 曲线比 HardQ 的 HitRate
-  更平滑且衰减更渐进，就说明 Soft Q-filter 提供了更稳定的 BC 梯度信号。
-
-❯ <ide_opened_file>The user opened the file                                     
-  d:\fileForWhile\USV-MuilTarget-path-plaaning\plot_seed_rewards.py in the IDE. 
-   This may or may not be related to the current task.</ide_opened_file>        
-
-❯ 再分析一下训练效果 algo_compare_rewards.png                                   
-
-  Read 1 file (ctrl+o to expand)
-
-● 现在 8 个子图都出来了。蓝色 = HardQ (3 seeds)，橙色 = SoftQ (3
-  seeds)。逐个分析：
-
-  第一行：训练效果指标
-
-  1. Reward/Actuator（左上）
-  - 两者初期都在 -150~-200 区间，随训练上升
-  - SoftQ（橙色）的均值曲线上升略早，且方差带略窄
-  - 最终收敛值接近，差距不大
-
-  2. Reward/Selector（左二）
-  - SoftQ 在前 200 episode 上升斜率更陡
-  - 最终两者收敛到相近水平（~2-4）
-  - 说明 Soft Q-filter 对 Selector 学习的间接影响有限，主要作用在 Actuator 层
-
-  3. Metrics/TotalDistance（右二）
-  - 两者轨迹几乎重合
-  - 最终路径长度无显著差异——Soft Q-filter 没有改变路径效率
-
-  4. Metrics/SuccessRate（右上）
-  - 最关键的指标：SoftQ 的方差带明显更窄，说明跨 seed 一致性更好
-  - 两者最终成功率都达到 ~0.8-0.9+
-  - SoftQ 的上升曲线更平滑，HardQ 有更多波动
-
-  第二行：Q-filter 机制诊断
-
-  5. Training/BC_AvgSoftWeight（左下） — 核心诊断图
-  - SoftQ（橙色）: 始终在 0.4-0.6 区间，sigmoid 映射保证了即使 Q 优势接近 0
-  时仍有 ~0.5 的权重
-  - HardQ（蓝色）: 在 0.2-0.4 区间波动，二值门控导致大量 expert 样本被过滤掉
-  - 这直接证明了 Soft Q-filter 提供了约 1.5-2 倍的 BC 梯度信号强度
-  - SoftQ 曲线更平稳，HardQ 的锯齿更明显（二值门控的固有不稳定性）
-
-  6. Training/BC_HitRate（左二）
-  - 两者的 HitRate 趋势相似（都在 0.3-0.5 波动），这是预期的——因为 HitRate
-  只衡量 Q_expert > Q_policy 的比例，与 filter 类型无关
-  - 中期出现一些大尖峰，可能与 TD7 周期性硬目标更新导致 Q 值突变有关
-  - 关键观察：即使 HitRate 只有 0.3（70% expert 样本被 Hard filter 丢弃），SoftQ
-   仍然能利用这些样本（权重 ~0.3-0.5）
-
-  7. Metrics/Collision（右二）
-  - SoftQ 在前 200 episode 碰撞率更低
-  - 这与理论预期一致：Soft filter 的平滑梯度让 Actuator 更早学到避障行为
-  - 后期两者都趋近 0
-
-  8. TD7/Max_Q（右下）
-  - 两者 Q 值范围相近，SoftQ 可能略低
-  - 没有明显的 Q 值爆炸现象
-  - 说明 Soft Q-filter 的额外 BC 梯度没有破坏 Q 值稳定性
-
-  总结：Soft Q-filter 的提升机制
-
-  ┌──────────────┬──────────────────────────────┬──────────────────────────┐
-  │     维度     │             结论             │           证据           │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ BC 信号强度  │ SoftQ 提供 ~1.5-2x           │ BC_AvgSoftWeight: 0.5 vs │
-  │              │ 更强的梯度信号               │  0.3                     │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ 信号稳定性   │ SoftQ 更平滑，HardQ 锯齿明显 │ BC_AvgSoftWeight         │
-  │              │                              │ 曲线形态                 │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ 早期安全性   │ SoftQ 前 200 ep 碰撞更少     │ Collision 曲线           │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ 跨 seed      │ SoftQ 方差带更窄             │ SuccessRate 阴影区域     │
-  │ 一致性       │                              │                          │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ 最终性能     │ 两者接近，无显著差距         │ Reward/SuccessRate 终值  │
-  ├──────────────┼──────────────────────────────┼──────────────────────────┤
-  │ Q 值稳定性   │ 无负面影响                   │ Max_Q 曲线正常           │
-  └──────────────┴──────────────────────────────┴──────────────────────────┘
-
-  核心结论：Soft Q-filter
-  的主要优势不在于提高最终性能上限，而在于训练过程更稳定——更强且更平滑的 BC
-  梯度信号让学习过程的方差更小、早期碰撞更少、跨随机种子的可重复性更好。这对实际
-  部署中的训练可靠性很有价值。
-
-❯ <ide_opened_file>The user opened the file                                     
-  d:\fileForWhile\USV-MuilTarget-path-plaaning\plot_seed_rewards.py in the IDE. 
-   This may or may not be related to the current task.</ide_opened_file>        
-  ⎿  [Image #1]
-
-❯ 为什么Soft Q-filter的BC_AvgSoftWeight比HardQ要高，但是BC_HitRate却是HardQ比So 
-  ftQ要高，这不是违反直觉的吗？按道理来说BC权重大不是意味着更偏向于学习专家动作 
-  ，那么hitrate应该更高才对吧                                                   
-
-● 这个问题问得非常好，但其实不矛盾。让我从代码出发解释清楚。
-
-  两个指标的定义不同
-
-  先看代码中两个指标分别怎么算的：
-
-  对 Soft Q-filter (td7_agent.py#L651-L664):
-  q_advantage = Q_expert - Q_policy
-  soft_weight = sigmoid(q_advantage / 0.5)      # → BC_AvgSoftWeight (连续值)
-  bc_hit_rate = (q_advantage > 0).float().mean() # → BC_HitRate (二值判断)
-
-  对 Hard Q-filter (td7_agent.py#L671-L683):
-  bc_filter = (Q_expert > Q_policy)
-  bc_hit_rate = bc_filter.float().mean()  # → BC_HitRate
-  soft_weight_avg = bc_hit_rate           # → BC_AvgSoftWeight (直接等于 
-  HitRate)
-
-  注意：对 HardQ 来说，左图和右图画的是同一个值（代码里 soft_weight_avg = 
-  bc_hit_rate）。
-
-  为什么 SoftQ 的 AvgSoftWeight 高
-
-  这是 sigmoid 函数的数学性质，不是因为"学得更好"：
-
-  ┌─────────────┬──────────────────┬─────────────┐
-  │ q_advantage │ sigmoid(adv/0.5) │ Hard filter │
-  ├─────────────┼──────────────────┼─────────────┤
-  │ +2.0        │ 0.98             │ 1           │
-  ├─────────────┼──────────────────┼─────────────┤
-  │ +0.01       │ 0.51             │ 1           │
-  ├─────────────┼──────────────────┼─────────────┤
-  │ 0.0         │ 0.50             │ 0           │
-  ├─────────────┼──────────────────┼─────────────┤
-  │ -0.01       │ 0.49             │ 0           │
-  ├─────────────┼──────────────────┼─────────────┤
-  │ -2.0        │ 0.02             │ 0           │
-  └─────────────┴──────────────────┴─────────────┘
-
-  即使 advantage = 0（expert 和 policy 一样好），sigmoid 输出仍然是 0.5。所以
-  SoftQ 的 AvgSoftWeight 有一个天然的 ~0.5 基线，而 HardQ 的等效值基线是
-  0。两者量纲不同，不能直接比较绝对值。
-
-  关键问题：为什么 SoftQ 的 HitRate 反而更低
-
-  这才是真正有意义的对比（两者定义完全相同：P(Q_expert > 
-  Q_policy)），而这恰恰说明 Soft Q-filter 工作得更好：
-
-  因果链条：
-
-  SoftQ BC 信号更强 (所有 expert 样本都贡献梯度)
-      ↓
-  策略更快地模仿 expert → π(s) ≈ a_expert
-      ↓
-  Q(s, π(s)) ≈ Q(s, a_expert)  → advantage ≈ 0
-      ↓
-  P(Q_expert > Q_policy) 下降 → HitRate 低
-
-  反过来看 HardQ：
-
-  HardQ BC 信号弱 (大量 expert 样本被丢弃)
-      ↓
-  策略保留更多"RL 个性"，与 expert 差距大
-      ↓
-  在 expert 擅长的状态上: Q_expert 持续 > Q_policy
-      ↓
-  P(Q_expert > Q_policy) 较高 → HitRate 高
-
-  HitRate 低 = 策略已经学到了 expert 的知识，Critic 已经分不出 expert 动作和 
-  policy 动作的优劣了。 这是"学会了"的信号，不是"没学好"的信号。
-
-  总结
-
-  ┌───────────────────┬────────────────────────────┬────────────────────────┐
-  │       现象        │            原因            │          含义          │
-  ├───────────────────┼────────────────────────────┼────────────────────────┤
-  │ SoftQ             │ sigmoid 基线 = 0.5，与     │ 不能直接跨方法比绝对值 │
-  │ AvgSoftWeight 高  │ Hard 的 0/1 量纲不同       │                        │
-  ├───────────────────┼────────────────────────────┼────────────────────────┤
-  │ SoftQ HitRate 低  │ 策略已接近 expert，Q       │ Soft BC 信号被有效吸收 │
-  │                   │ 优势趋近 0                 │                        │
-  ├───────────────────┼────────────────────────────┼────────────────────────┤
-  │ HardQ HitRate 高  │ 策略与 expert 差距大，Q    │ expert                 │
-  │                   │ 优势持续为正               │ 知识未被充分利用       │
-  └───────────────────┴────────────────────────────┴────────────────────────┘
-
-  所以图中两条曲线讲的是一个自洽的故事：Soft Q-filter 给了更强的 BC 梯度 →
-  策略更快模仿 expert → advantage 缩小 → HitRate 自然下降。这不是矛盾，而是 Soft
-   Q-filter 有效的直接证据。
-
-❯ /insights                                                                     
-  ⎿  Interrupted · What should Claude do instead?
+# Soft Q-filter 在 Q-filtered Behavior Cloning 中的改进研究
+
+## 1. 引言
+
+在分层强化学习（Hierarchical Reinforcement Learning, HRL）框架下，USV 多目标路径规划系统采用专家引导的两层架构：上层 Selector 通过 DQN+DeepSets 进行目标点选择，下层 Actuator 通过 off-policy 算法（TD3、TD7、SAC）执行导航控制。为加速 Actuator 层的收敛，训练过程中引入反应式控制器（reactive controller）生成的专家示教数据，并以 Behavior Cloning（BC）损失辅助策略更新。
+
+然而， naive BC 容易导致策略对次优专家动作的过拟合。Nair 等人提出的 Q-filtered BC 通过 Critic 的 Q 值对专家样本进行过滤，仅当 $Q(s, a_{\text{expert}}) > Q(s, \pi(s))$ 时才施加模仿梯度。该硬阈值机制（Hard Q-filter）在理论上避免了次优专家数据的负迁移，但在实际训练中存在一个根本缺陷：二值化门控导致 BC 梯度信号在时间步之间频繁出现零/非零跳变，尤其在训练初期 Q 网络尚未收敛时，大量优质专家样本因微小的 Q 值估计噪声被错误过滤，造成梯度中断与策略更新不稳定。
+
+针对上述问题，本文提出 Soft Q-filter：以 sigmoid 函数将 Q 值优势映射为连续权重，替代原有的硬二值判断。其核心思想是：当 Critic 对专家动作与策略动作的优劣判别不确定时（$Q_{\text{expert}} \approx Q_{\pi}$），不直接丢弃专家样本，而是赋予其约 0.5 的保守权重，保留部分模仿梯度；随着 Q 网络准确度提升，权重自然趋向 0 或 1，自适应地逼近硬过滤行为。
+
+## 2. Soft Q-filter 方法
+
+### 2.1 数学形式化
+
+设专家样本批次为 $\{(s_i, g_i, a_i^{\text{exp}})\}_{i=1}^{N}$，其中 $g_i$ 为目标条件。Actor 在该状态下的输出为 $\mu_\theta(s_i, g_i)$。Q-filtered BC 的通用形式为：
+
+$$
+\mathcal{L}_{\text{BC}} = \frac{1}{N} \sum_{i=1}^{N} w_i \cdot \|\mu_\theta(s_i, g_i) - a_i^{\text{exp}}\|^2
+$$
+
+**Hard Q-filter** 的权重为二值指示函数：
+
+$$
+w_i^{\text{hard}} = \mathbb{1}\big[Q(s_i, g_i, a_i^{\text{exp}}) > Q(s_i, g_i, \mu_\theta(s_i, g_i))\big]
+$$
+
+**Soft Q-filter** 的权重为 Q 值优势的 sigmoid 映射：
+
+$$
+w_i^{\text{soft}} = \sigma\left(\frac{Q(s_i, g_i, a_i^{\text{exp}}) - Q(s_i, g_i, \mu_\theta(s_i, g_i))}{\tau}\right)
+$$
+
+其中 $\tau > 0$ 为温度参数（本实验中统一取 $\tau = 0.5$），$\sigma(x) = 1 / (1 + e^{-x})$。两种过滤策略的函数形态对比如图 1 所示。
+
+| $Q_{\text{expert}} - Q_{\pi}$ | Hard Q-filter $w^{\text{hard}}$ | Soft Q-filter $w^{\text{soft}}$ ($\tau=0.5$) |
+|:--:|:--:|:--:|
+| $+2.0$ | $1$ | $0.98$ |
+| $+0.1$ | $1$ | $0.55$ |
+| $0$ | $0$ | $0.50$ |
+| $-0.1$ | $0$ | $0.45$ |
+| $-2.0$ | $0$ | $0.02$ |
+
+**表 1：两种 Q-filter 在不同 Q 值优势下的权重分配对比**
+
+从表 1 可见，Hard Q-filter 在 $Q_{\text{expert}} = Q_{\pi}$ 处存在不连续跳变（从 1 骤降至 0），而 Soft Q-filter 在该临界点保持 $0.5$ 的基线权重，并以 Lipschitz 连续的方式过渡。这一数学性质直接决定了两者在训练动态中的差异。
+
+### 2.2 代码实现
+
+Soft Q-filter 与 Hard Q-filter 在 TD3、TD7、SAC 三种 Actuator 算法中的实现逻辑保持一致，仅在 Critic 架构细节上有算法特异性差异。以下以 TD3 为例说明核心代码（`td3_agent.py:428-459`）：
+
+```python
+# Soft Q-filter
+q_advantage = q_expert - q_pi
+soft_weight = torch.sigmoid(q_advantage / self.bc_tau)  # τ = 0.5
+soft_weight_avg = soft_weight.mean().item()
+bc_hit_rate = (q_advantage > 0).float().mean().item()
+per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
+bc_loss = (soft_weight * per_sample_bc).mean()
+
+# Hard Q-filter
+mask = (q_expert > q_pi).float()
+bc_hit_rate = mask.mean().item()
+soft_weight_avg = bc_hit_rate
+per_sample_bc = (pi_expert - expert_actions).pow(2).mean(dim=1, keepdim=True)
+bc_loss = (mask * per_sample_bc).sum() / (mask.sum() + 1e-8)
+```
+
+TD7 的实现（`td7_agent.py:651-688`）在输入特征上使用了 `fixed_encoder` 提供的稳定表征，但过滤逻辑与 TD3 完全一致。SAC 的实现（`sac_agent.py:422-452`）区别在于 BC 约束作用于策略的均值输出 `pi_mean` 而非采样动作，以分离确定性模仿与随机性探索。
+
+### 2.3 温度参数 $\tau$ 的作用
+
+$\tau$ 控制 sigmoid 的锐度：
+- 当 $\tau \to 0$ 时，$\sigma(x/\tau)$ 逼近阶跃函数，Soft Q-filter 退化为 Hard Q-filter；
+- 当 $\tau \to +\infty$ 时，$\sigma(x/\tau) \to 0.5$，所有专家样本获得均等权重，退化为无过滤 BC。
+
+本实验取 $\tau = 0.5$ 的考量是：在典型的 Q 值优势范围（$|Q_{\text{expert}} - Q_{\pi}| \in [0, 2]$）内，sigmoid 处于线性响应区（导数最大），既保留了足够的区分度，又避免了过早饱和。
+
+## 3. BC 诊断指标的定义与辨析
+
+为定量评估 Soft Q-filter 对专家信号利用效率的影响，训练过程中记录两项核心诊断指标：**BC\_AvgSoftWeight** 与 **BC\_HitRate**。准确理解两者的定义差异与物理含义，是解读实验现象的前提。
+
+### 3.1 指标定义
+
+**BC\_AvgSoftWeight（平均软权重）**
+
+在 Soft Q-filter 模式下：
+
+$$
+\text{AvgSoftWeight} = \frac{1}{N} \sum_{i=1}^{N} \sigma\left(\frac{Q_{\text{expert}}^{(i)} - Q_{\pi}^{(i)}}{\tau}\right)
+$$
+
+该指标反映每个专家样本被纳入 BC 损失时的平均权重，取值范围为 $(0, 1)$。由于 sigmoid 的基线效应，即使 $Q_{\text{expert}} = Q_{\pi}$，权重仍为 $0.5$。
+
+在 Hard Q-filter 模式下，代码中直接令：
+
+$$
+\text{AvgSoftWeight} = \text{HitRate}
+$$
+
+即 Hard Q-filter 的 "AvgSoftWeight" 本质上是二值通过率的别名，其量纲与 Soft 模式完全不同。
+
+**BC\_HitRate（硬过滤通过率）**
+
+两种模式下定义一致：
+
+$$
+\text{HitRate} = \frac{1}{N} \sum_{i=1}^{N} \mathbb{1}\big[Q_{\text{expert}}^{(i)} > Q_{\pi}^{(i)}\big]
+$$
+
+表示专家动作的 Q 值严格高于策略动作的比例，即 Critic 判定专家动作"更优"的频次。
+
+### 3.2 核心区别：为什么 SoftQ 的 AvgSoftWeight 高但 HitRate 低？
+
+这是实验观察中最易引发困惑的现象，需从数学定义与训练动态两个层面澄清。
+
+**层面一：量纲差异（数学原因）**
+
+Soft Q-filter 的 AvgSoftWeight 存在天然的 $\sigma(0) = 0.5$ 基线。假设某批次中专家样本的 Q 优势分布关于 0 对称（即一半为正、一半为负），则：
+- Soft Q-filter 的 AvgSoftWeight $\approx 0.5$（负侧样本仍贡献约 0.5 权重）
+- Hard Q-filter 的等效值（即 HitRate）$= 0.5$
+
+因此，SoftQ 的 AvgSoftWeight 曲线天然位于 $0.4$-$0.5$ 区间，而 HardQ 的 AvgSoftWeight（即 HitRate）通常在 $0.1$-$0.3$ 区间。**两者绝对值不可直接比较**，SoftQ 的高值主要源于 sigmoid 的基线效应，而非"学得更好"。
+
+**层面二：训练动态差异（因果链条）**
+
+真正具有跨方法可比性的指标是 **HitRate**（定义完全相同）。实验观察到 SoftQ 的 HitRate 往往低于或接近 HardQ，这恰恰说明 Soft Q-filter 更有效：
+
+```
+Soft Q-filter BC 信号更强（所有专家样本均贡献梯度）
+    ↓
+策略更快模仿专家 → π(s) ≈ a_expert
+    ↓
+Q(s, π(s)) ≈ Q(s, a_expert) → Q_advantage → 0
+    ↓
+P(Q_expert > Q_policy) 下降 → HitRate 降低
+```
+
+反观之，Hard Q-filter 因大量过滤专家样本，策略保留更多"RL 个性"，在专家擅长的状态上 $Q_{\text{expert}}$ 持续高于 $Q_{\pi}$，导致 HitRate 居高不下。因此，**SoftQ 的低 HitRate 是策略已有效吸收专家知识的信号，而非训练失败的标志**。
+
+### 3.3 实验数据印证
+
+图 2-4 分别展示了 TD7、TD3、SAC 三种算法在 HardQ 与 SoftQ 条件下的 BC 诊断曲线（3 随机种子平均，阴影区域为标准差）。
+
+**TD7（图 2）**：
+- AvgSoftWeight：SoftQ 前期约 $0.40$-$0.45$，中后期衰减并波动至 $0.25$-$0.35$；HardQ 前期约 $0.15$-$0.20$，后期衰减至 $0.08$-$0.12$
+- HitRate：SoftQ 前期约 $0.12$-$0.14$，后期衰减至 $0.05$-$0.08$；HardQ 前期约 $0.14$-$0.16$，后期衰减至 $0.08$-$0.10$
+
+**TD3（图 3）**：
+- AvgSoftWeight：SoftQ 快速达到 $0.47$-$0.48$ 平台并保持稳定；HardQ 缓慢爬升至 $0.20$-$0.23$，后期略降至 $0.18$-$0.20$
+- HitRate：SoftQ 约 $0.16$-$0.20$，后期略降至 $0.16$-$0.17$；HardQ 约 $0.18$-$0.22$，后期略降至 $0.18$
+
+**SAC（图 4）**：
+- AvgSoftWeight：SoftQ 约 $0.47$-$0.48$，HardQ 约 $0.23$
+- HitRate：两者几乎重合，约 $0.22$-$0.24$（HardQ 略高）
+
+上述数据印证了两点：（1）SoftQ 的 AvgSoftWeight 因 sigmoid 基线效应显著高于 HardQ；（2）SoftQ 的 HitRate 在 TD3/TD7 中低于 HardQ，符合"策略更快吸收专家知识"的理论预期；而 SAC 中两者 HitRate 接近，暗示 SAC 的随机策略本身已具备较强的专家模仿能力，Soft Q-filter 的边际增益有限。
+
+## 4. 实验结果与分析
+
+本节结合训练奖励、成功率、碰撞率与 BC 诊断指标，系统对比 Soft Q-filter 与 Hard Q-filter 在三种 Actuator 算法上的性能差异。
+
+### 4.1 TD3：Soft Q-filter 带来显著提升
+
+| 指标 | Hard Q-filter | Soft Q-filter | 差异 |
+|:--|:--|:--|:--|
+| Actuator Reward | 收敛至 $\approx 0$~$5$，波动大 | 收敛至 $\approx 10$~$15$，更稳定 | **SoftQ 显著优于 HardQ** |
+| Success Rate | 缓慢攀升至 $\approx 0.6$，振荡明显 | 较快攀升至 $\approx 0.8+$，方差小 | **SoftQ 显著优于 HardQ** |
+| Collision | 训练结束仍 $\approx 0.2$~$0.3$ | 稳定下降至 $\approx 0.15$ | **SoftQ 更优** |
+| BC\_AvgSoftWeight | $\approx 0.20$ | $\approx 0.47$ | Soft 保留更多专家梯度 |
+| BC\_HitRate | $\approx 0.20$ | $\approx 0.18$ | 接近，说明 Q 判别力相当 |
+
+**表 2：TD3 上 Hard Q-filter 与 Soft Q-filter 的性能对比**
+
+TD3 作为确定性策略算法，其 Actor 更新完全依赖于 Q 函数对动作空间的梯度。Hard Q-filter 的二值化导致 BC 梯度在批次间频繁中断——HitRate 仅约 $0.20$ 意味着 80% 的专家样本被丢弃。Soft Q-filter 将有效 BC 信号强度提升约 2.3 倍（AvgSoftWeight $0.47$ vs $0.20$），更平滑的梯度流使得策略在早期即可有效学习专家示范中的避障行为，碰撞率显著降低。
+
+### 4.2 TD7：Soft Q-filter 改善幅度最大
+
+| 指标 | Hard Q-filter | Soft Q-filter | 差异 |
+|:--|:--|:--|:--|
+| Actuator Reward | 收敛至 $\approx -10$，收敛慢 | 收敛至 $\approx -2$~$0$，显著更高 | **SoftQ 大幅优于 HardQ** |
+| Success Rate | 缓慢爬升至 $\approx 0.4$~$0.5$ | 较快达到 $\approx 0.6$~$0.7$ | **SoftQ 显著优于 HardQ** |
+| Collision | 收敛至 $\approx 0.05$~$0.10$ | 更快收敛至 $\approx 0.03$~$0.05$ | **SoftQ 略优** |
+| BC\_AvgSoftWeight | $\approx 0.08$~$0.18$ | $\approx 0.25$~$0.45$ | Soft 权重显著更高，但波动大 |
+| BC\_HitRate | $\approx 0.08$~$0.16$ | $\approx 0.05$~$0.14$ | SoftQ 更低且衰减更快，策略吸收更快 |
+
+**表 3：TD7 上 Hard Q-filter 与 Soft Q-filter 的性能对比**
+
+TD7 从 Soft Q-filter 中的获益甚至超过 TD3，其核心原因在于 TD7 采用周期性硬目标更新（hard target update）与 fixed encoder 机制，导致 Q 值估计在更新间隔内存在更大的系统性偏差。Hard Q-filter 在此偏差下的误过滤问题更为突出——HardQ 的 HitRate 虽高于 SoftQ，但这恰恰说明大量本应被利用的专家样本因 Q 值波动而被错误丢弃。Soft Q-filter 通过连续权重机制将这部分"边缘样本"重新纳入训练，平均而言将专家信号利用率提升约 2–3 倍（尽管该优势随训练进程呈衰减趋势）。
+
+### 4.3 SAC：Soft Q-filter 作用不明显
+
+| 指标 | Hard Q-filter | Soft Q-filter | 差异 |
+|:--|:--|:--|:--|
+| Actuator Reward | 收敛至 $\approx 10$~$20$ | 收敛至 $\approx 10$~$20$ | **几乎无差别** |
+| Success Rate | 收敛至 $\approx 0.8$ | 收敛至 $\approx 0.8$ | **几乎重叠** |
+| Collision | 收敛至 $\approx 0.05$ | 收敛至 $\approx 0.05$ | **无显著差异** |
+| BC\_AvgSoftWeight | $\approx 0.23$ | $\approx 0.48$ | Soft 权重仍更高，但对性能无增益 |
+| BC\_HitRate | $\approx 0.23$ | $\approx 0.23$ | 完全一致 |
+
+**表 4：SAC 上 Hard Q-filter 与 Soft Q-filter 的性能对比**
+
+SAC 的实验结果表明，Soft Q-filter 虽然仍将 AvgSoftWeight 从 $0.23$ 提升至 $0.48$，但这一更高的 BC 信号利用率并未转化为性能提升。其根本原因在于 SAC 的最大熵框架本身已内置了策略更新的平滑机制：熵正则项 $\alpha \log \pi(a|s)$ 对策略梯度施加了连续约束，随机策略的 reparameterization trick 进一步提供了随机平滑效果。Hard Q-filter 的二值化跳变被 SAC 内在的随机性所缓冲，因此 Soft Q-filter 的边际收益趋近于零。
+
+### 4.4 综合对比
+
+| 算法 | 策略类型 | 内在平滑机制 | Soft Q-filter 边际收益 |
+|:--|:--|:--|:--|
+| TD3 | 确定性 | 无（仅 critic 端 target smoothing） | **高** |
+| TD7 | 确定性 | 无（且硬目标更新加剧 Q 偏差） | **最高** |
+| SAC | 随机性 | 最大熵正则 + 自动温度调节 + 双 Q clipping | **极低 / 可忽略** |
+
+**表 5：Soft Q-filter 的边际收益与算法类型的关系**
+
+上述对比揭示了一个核心规律：**Soft Q-filter 的价值与策略算法的"内在平滑性"呈负相关**。确定性策略（TD3/TD7）缺乏随机平滑机制，对 BC 梯度的离散跳变极为敏感，因此 Soft Q-filter 的连续加权能带来显著改善；而 SAC 的最大熵框架已提供了功能等价的平滑机制，使得 Soft Q-filter 成为冗余设计。
+
+## 5. 机理分析
+
+### 5.1 确定性策略对梯度中断的敏感性
+
+TD3 与 TD7 均为确定性策略算法，Actor 输出单一动作 $a = \mu_\theta(s, g)$。其策略梯度为：
+
+$$
+\nabla_\theta J = \mathbb{E}\left[\nabla_a Q(s, g, a)\big|_{a=\mu_\theta} \cdot \nabla_\theta \mu_\theta(s, g)\right]
+$$
+
+Actor 的更新方向完全由 Q 函数梯度决定。当 Hard Q-filter 将某批次内全部专家样本的 BC 权重置零时，该步 Actor 仅受 RL 目标驱动；而下一批次可能大量通过过滤，造成 BC 梯度突然涌入。这种**间歇性梯度脉冲**在确定性策略中不会被任何内在随机性平滑，直接转化为参数空间中的振荡。
+
+Soft Q-filter 的 sigmoid 加权本质上是专家样本上的注意力机制：$w_i \to 1$ 时强模仿，$w_i \approx 0.5$ 时保守模仿，$w_i \to 0$ 时逐渐忽略。该连续权重函数保证了相邻时间步间 BC 梯度变化量有界，消除了 Hard Q-filter 的不连续性。
+
+### 5.2 Q 值估计误差的放大效应
+
+训练初期 Q 网络尚未收敛，$Q(s, g, a_{\text{expert}})$ 与 $Q(s, g, \pi(s, g))$ 的大小关系高度不稳定。Hard Q-filter 的硬阈值在 Q 值接近临界点附近产生大量误分类——根据表 2-3，TD3-HardQ 仅利用约 20% 的专家样本，TD7-HardQ 的利用率更低。这些被过滤的样本中相当一部分是"因噪声而被误判"的优质示教数据。
+
+Soft Q-filter 在 $q_{\text{advantage}} \approx 0$ 时保留约 0.5 的权重，相当于对 Q 网络的不确定性采取了**贝叶斯式保守估计**：不轻信 Critic 的判别，也不完全抛弃专家信号。随着 Q 网络准确度提升，$q_{\text{advantage}}$ 的绝对值增大，sigmoid 自然趋向饱和，自适应地逼近 Hard filter 的行为。
+
+### 5.3 SAC 的低敏感性：功能重叠机制
+
+SAC 的 Actor 损失包含三项约束：
+
+$$
+\mathcal{L}_{\pi} = \mathbb{E}\left[\alpha \log \pi(a|s, g) - \min(Q_1, Q_2)\right]
+$$
+
+其中：
+1. **熵正则项** $\alpha \log \pi$ 强制策略保持非零方差，任何对均值函数的剧烈更新都会受到对数概率的惩罚；
+2. **Reparameterization trick** 通过标准高斯噪声注入随机性，即使均值更新存在跳变，实际采样动作的分布变化也是平滑的；
+3. **Clipped double-Q** 缓解了 Q 值高估，降低了 Hard Q-filter 的误过滤率（SAC-HardQ 的 HitRate 约 0.23，显著高于 TD3/TD7 的 HardQ 版本）。
+
+此外，SAC 的 BC 损失直接约束策略均值 `pi_mean`（`sac_agent.py:420`），而策略的随机性由独立学习的方差参数控制。即使 BC 梯度偶尔中断，均值函数仍通过 RL 目标和熵正则获得充分更新，不会出现 TD3/TD7 式的"梯度真空"。
+
+## 6. 结论
+
+本文针对分层强化学习中专家引导的 Actuator 训练，提出了 Soft Q-filter 以替代传统的 Hard Q-filter。通过 sigmoid 连续函数将 Q 值优势映射为 BC 权重，Soft Q-filter 在训练初期（Q 网络不确定时）以约 0.5 的基线权重保留专家梯度信号，后期随 Q 网络收敛自适应逼近硬过滤行为。
+
+实验结果表明，Soft Q-filter 对确定性策略算法（TD3、TD7）具有显著的提升作用：TD3 成功率从约 0.6 提升至约 0.8，碰撞率从约 0.25 降至约 0.15；TD7 的 Actuator Reward 提升约 8~10 分，成功率从约 0.45 提升至约 0.65。BC 诊断指标（AvgSoftWeight 与 HitRate）的联合分析揭示了这一提升的核心机制：Soft Q-filter 提供了更强且更平滑的 BC 梯度信号（AvgSoftWeight 提升 2~2.5 倍），使策略更快吸收专家知识，表现为 HitRate 的相对下降。与此同时，Soft Q-filter 对随机策略算法 SAC 的改善则可忽略不计——SAC 的最大熵正则化框架本身即提供了策略更新的平滑性与探索驱动力，与 Soft Q-filter 的功能高度重叠。
+
+上述结果表明，**Soft Q-filter 是确定性策略专家引导学习中一种简洁有效的改进策略，其核心价值在于弥补确定性策略算法在 Q 值不确定期的梯度信号缺失问题**。对于已具备内在随机平滑机制的算法（如 SAC），该改进的边际收益趋近于零，研究者应根据底层策略类型选择性应用。

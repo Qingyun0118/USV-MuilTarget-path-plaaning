@@ -593,8 +593,8 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
     actuator = TD3ActuatorAgent(actuator_state_dim, 2, 2, max_action=1.0)
     expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
-    default_selector_model = os.path.join(args.output_dir, "best_selector.pth")
-    default_actuator_model = os.path.join(args.output_dir, "best_actuator_actor.pth")
+    default_selector_model = os.path.join(args.output_dir, "selector.pth")
+    default_actuator_model = os.path.join(args.output_dir, "actuator_actor.pth")
     selector_model_path = args.eval_selector_model_path or default_selector_model
     actuator_model_path = args.eval_actuator_model_path or default_actuator_model
 
@@ -1083,9 +1083,9 @@ if __name__ == "__main__":
                         help="评估时障碍物数量")
     parser.add_argument("--eval_seed", default=42, type=int)
     parser.add_argument("--eval_selector_model_path", default=None, type=str,
-                        help="评估时 Selector 模型路径 (默认: output_dir/best_selector.pth)")
+                        help="评估时 Selector 模型路径 (默认: output_dir/selector.pth)")
     parser.add_argument("--eval_actuator_model_path", default=None, type=str,
-                        help="评估时 Actuator Actor 模型路径 (默认: output_dir/best_actuator_actor.pth)")
+                        help="评估时 Actuator Actor 模型路径 (默认: output_dir/actuator_actor.pth)")
     parser.add_argument("--eval_save_csv", action="store_true",
                         help="评估时保存路径 CSV 文件")
     parser.add_argument("--eval_tb_motion", action="store_true",

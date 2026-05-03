@@ -42,54 +42,57 @@ ALGORITHMS = {
     #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
     # ],
     ########################
-        "Expert-HRL-TD7-HardQ": [
-        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
-        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
-        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
-    ],
-        "Expert-HRL-TD7-SoftQ(tau=0.001)": [
-        r"expert_hrl_td7_0429_seed2021_softQ0.001\runs\Expert_HRL_TD7_20260429_231737",
-        r"expert_hrl_td7_0429_seed2022_softQ0.001\runs\Expert_HRL_TD7_20260429_231652",
-        r"expert_hrl_td7_0429_seed2023_softQ0.001\runs\Expert_HRL_TD7_20260429_231502",
-    ],
-        "Expert-HRL-TD7-SoftQ(tau=0.1)": [
-        r"expert_hrl_td7_0427_seed2021_softQ0.1\runs\Expert_HRL_TD7_20260428_182840",
-        r"expert_hrl_td7_0429_seed2022_softQ0.1\runs\Expert_HRL_TD7_20260429_092922",
-        r"expert_hrl_td7_0429_seed2023_softQ0.1\runs\Expert_HRL_TD7_20260429_093437",
-    ],
-        "Expert-HRL-TD7-SoftQ(tau=0.3)": [
-        r"expert_hrl_td7_0427_seed2021_softQ0.3\runs\Expert_HRL_TD7_20260428_184046",
-        r"expert_hrl_td7_0429_seed2022_softQ0.3\runs\Expert_HRL_TD7_20260429_093032",
-        r"expert_hrl_td7_0429_seed2023_softQ0.3\runs\Expert_HRL_TD7_20260429_093548",
+    #     "Expert-HRL-TD7-HardQ": [
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_HardQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_HardQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_HardQ2021",
+    # ],
+    #     "Expert-HRL-TD7-SoftQ(tau=0.001)": [
+    #     r"expert_hrl_td7_0429_seed2021_softQ0.001\runs\Expert_HRL_TD7_20260429_231737",
+    #     r"expert_hrl_td7_0429_seed2022_softQ0.001\runs\Expert_HRL_TD7_20260429_231652",
+    #     r"expert_hrl_td7_0429_seed2023_softQ0.001\runs\Expert_HRL_TD7_20260429_231502",
+    # ],
+    #     "Expert-HRL-TD7-SoftQ(tau=0.1)": [
+    #     r"expert_hrl_td7_0427_seed2021_softQ0.1\runs\Expert_HRL_TD7_20260428_182840",
+    #     r"expert_hrl_td7_0429_seed2022_softQ0.1\runs\Expert_HRL_TD7_20260429_092922",
+    #     r"expert_hrl_td7_0429_seed2023_softQ0.1\runs\Expert_HRL_TD7_20260429_093437",
+    # ],
+    #     "Expert-HRL-TD7-SoftQ(tau=0.3)": [
+    #     r"expert_hrl_td7_0427_seed2021_softQ0.3\runs\Expert_HRL_TD7_20260428_184046",
+    #     r"expert_hrl_td7_0429_seed2022_softQ0.3\runs\Expert_HRL_TD7_20260429_093032",
+    #     r"expert_hrl_td7_0429_seed2023_softQ0.3\runs\Expert_HRL_TD7_20260429_093548",
         
-    ],
+    # ],
 
-        "Expert-HRL-TD7-SoftQ(tau=0.5)": [
-        r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
-        r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
-        r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
-    ],
+    #     "Expert-HRL-TD7-SoftQ(tau=0.5)": [
+    #     # r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
+    #     # r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+    #     # r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
+    # ],
 
-        "Expert-HRL-TD7-SoftQ(tau=0.7)": [
-        r"expert_hrl_td7_0427_seed2021_softQ0.7\runs\Expert_HRL_TD7_20260428_184127",
-        r"expert_hrl_td7_0429_seed2022_softQ0.7\runs\Expert_HRL_TD7_20260429_093109",
-        r"expert_hrl_td7_0429_seed2023_softQ0.7\runs\Expert_HRL_TD7_20260429_093625",
+    #     "Expert-HRL-TD7-SoftQ(tau=0.7)": [
+    #     r"expert_hrl_td7_0427_seed2021_softQ0.7\runs\Expert_HRL_TD7_20260428_184127",
+    #     r"expert_hrl_td7_0429_seed2022_softQ0.7\runs\Expert_HRL_TD7_20260429_093109",
+    #     r"expert_hrl_td7_0429_seed2023_softQ0.7\runs\Expert_HRL_TD7_20260429_093625",
 
-    ],
+    # ],
 
-        "Expert-HRL-TD7-SoftQ(tau=1.0)": [
-        r"expert_hrl_td7_0427_seed2021_softQ1.0\runs\Expert_HRL_TD7_20260428_183017",
-        r"expert_hrl_td7_0429_seed2022_softQ1.0\runs\Expert_HRL_TD7_20260429_093157",
-        r"expert_hrl_td7_0429_seed2023_softQ1.0\runs\Expert_HRL_TD7_20260429_093722",
+    #     "Expert-HRL-TD7-SoftQ(tau=1.0)": [
+    #     r"expert_hrl_td7_0427_seed2021_softQ1.0\runs\Expert_HRL_TD7_20260428_183017",
+    #     r"expert_hrl_td7_0429_seed2022_softQ1.0\runs\Expert_HRL_TD7_20260429_093157",
+    #     r"expert_hrl_td7_0429_seed2023_softQ1.0\runs\Expert_HRL_TD7_20260429_093722",
 
-    ],
+    # ],
 
-        "Expert-HRL-TD7-SoftQ(tau=5.0)": [
-        r"expert_hrl_td7_0429_seed2021_softQ5.0\runs\Expert_HRL_TD7_20260429_231940",
-        r"expert_hrl_td7_0429_seed2022_softQ5.0\runs\Expert_HRL_TD7_20260429_232007",
-        r"expert_hrl_td7_0429_seed2023_softQ5.0\runs\Expert_HRL_TD7_20260429_232047",
+    #     "Expert-HRL-TD7-SoftQ(tau=5.0)": [
+    #     r"expert_hrl_td7_0429_seed2021_softQ5.0\runs\Expert_HRL_TD7_20260429_231940",
+    #     r"expert_hrl_td7_0429_seed2022_softQ5.0\runs\Expert_HRL_TD7_20260429_232007",
+    #     r"expert_hrl_td7_0429_seed2023_softQ5.0\runs\Expert_HRL_TD7_20260429_232047",
 
-    ],
+    # ],
     # "Expert-HRL-TD3-HardQ": [
     #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_HardQ2021",
     #     r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_HardQ2022",
@@ -118,6 +121,43 @@ ALGORITHMS = {
     #     r"1_Result\trainingResult\SAC\seed2023\Expert_HRL_SAC_SoftQ2023",
     #     r"1_Result\trainingResult\SAC\seed2022\Expert_HRL_SAC_SoftQ2022",
     # ],
+    #     "Expert-HRL-SAC": [
+    #     r"1_Result\trainingResult\SAC\seed2025\Expert_HRL_SAC_SoftQ2025",
+    #     r"1_Result\trainingResult\SAC\seed2024\Expert_HRL_SAC_SoftQ2024",
+    #     r"1_Result\trainingResult\SAC\seed2023\Expert_HRL_SAC_SoftQ2023",
+    #     r"1_Result\trainingResult\SAC\seed2022\Expert_HRL_SAC_SoftQ2022",
+    # ],
+    #     "NoExpert-HRL-SAC": [
+    #     r"expert_hrl_sac_430_seed2024_noexpert\runs\Expert_HRL_SAC_20260430_005355",
+    #     r"expert_hrl_sac_430_seed2025_noexpert\runs\Expert_HRL_SAC_20260430_004442",
+    #     r"expert_hrl_sac_430_seed2026_noexpert\runs\Expert_HRL_SAC_20260430_004343",
+    # ],
+    #     "Expert-HRL-TD3": [
+    #     r"1_Result\trainingResult\TD3\seed2026\Expert_HRL_TD3_SoftQ2026",
+    #     r"1_Result\trainingResult\TD3\seed2025\Expert_HRL_TD3_SoftQ2025",
+    #     r"1_Result\trainingResult\TD3\seed2024\Expert_HRL_TD3_SoftQ2024",
+    #     r"1_Result\trainingResult\TD3\seed2023\Expert_HRL_TD3_SoftQ2023",
+    #     r"1_Result\trainingResult\TD3\seed2022\Expert_HRL_TD3_SoftQ2022",
+    #     r"1_Result\trainingResult\TD3\seed2021\Expert_HRL_TD3_SoftQ2021",
+    # ],
+    #     "NoExpert-HRL-TD3": [
+    #     r"expert_hrl_td3_430_seed2024_noexpert\runs\Expert_HRL_TD3_20260430_101843",
+    #     r"expert_hrl_td3_430_seed2025_noexpert\runs\Expert_HRL_TD3_20260501_135422",
+    #     r"expert_hrl_td3_430_seed2026_noexpert\runs\Expert_HRL_TD3_20260501_140702",
+    # ],
+    #     "Expert-HRL-TD7": [
+    #     r"1_Result\trainingResult\TD7\seed2026\Expert_HRL_TD7_SoftQ2026",
+    #     r"1_Result\trainingResult\TD7\seed2025\Expert_HRL_TD7_SoftQ2025",
+    #     r"1_Result\trainingResult\TD7\seed2024\Expert_HRL_TD7_SoftQ2024",
+    #     r"1_Result\trainingResult\TD7\seed2023\Expert_HRL_TD7_SoftQ2023",
+    #     r"1_Result\trainingResult\TD7\seed2022\Expert_HRL_TD7_SoftQ2022",
+    #     r"1_Result\trainingResult\TD7\seed2021\Expert_HRL_TD7_SoftQ2021",
+    # ],
+    #     "NoExpert-HRL-TD7": [
+    #     r"expert_hrl_td7_430_seed2024_noexpert\runs\Expert_HRL_TD7_20260430_101649",
+    #     r"expert_hrl_td7_430_seed2025_noexpert\runs\Expert_HRL_TD7_20260501_135345",
+    #     r"expert_hrl_td7_430_seed2026_noexpert\runs\Expert_HRL_TD7_20260501_140625",
+    # ],
 
 }
 
@@ -125,12 +165,13 @@ ALGORITHMS = {
 TAGS = [
     "Reward/Actuator",
     "Reward/Selector",
-    "Metrics/TotalDistance",
-    "Metrics/SuccessRate",
+    # "Metrics/TotalDistance",
+    # "Metrics/Collision", 
+    # "Metrics/SuccessRate",
     # ---- Soft vs Hard Q-filter 对比分析 ----
     # "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
     # "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
-    # "Metrics/Collision",           # 碰撞率 (平滑梯度是否降低早期碰撞)
+         
     # 'Training/Expert_Probability',
 ]
 
@@ -278,8 +319,14 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
                       data_source="tensorboard", x_axis="episodes",
                       smooth_method="uniform", ema_alpha=None):
     n_tags = len(tags)
-    n_cols = (n_tags + 1) // 2
-    fig, axes = plt.subplots(2, n_cols, figsize=(6 * n_cols, 10), squeeze=False)
+    if n_tags <= 2:
+        n_rows, n_cols = 1, max(n_tags, 1)
+        figsize = (6 * n_cols, 5)
+    else:
+        n_cols = (n_tags + 1) // 2
+        n_rows = 2
+        figsize = (6 * n_cols, 10)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
     axes = axes.flatten()
 
     x_label = "global steps" if x_axis == "global_steps" else "episodes"

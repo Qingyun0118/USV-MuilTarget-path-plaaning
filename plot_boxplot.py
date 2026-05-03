@@ -34,8 +34,9 @@ import numpy as np
 # 默认场景列表（与 run_missing_evals.py 保持一致）
 # ============================================================================
 DEFAULT_SCENARIO_ORDER = [
-    (3, 6), (5, 6), (7, 6), (9, 6),
-    (5, 10), (5, 14), (7, 12), (9, 12),
+    (3, 6), 
+    # (5, 6), (7, 6), (9, 6),
+    # (5, 10), (5, 14), (7, 12), (9, 12),
 ]
 
 
@@ -234,11 +235,6 @@ def plot_scenario_boxplot(scenario_data, labels, targets, obstacles, output_dir=
         patch.set_facecolor(color)
         patch.set_alpha(0.75)
 
-    # 在箱子旁标注 n 值
-    for i, (label, vals) in enumerate(zip(active_labels, data_vals)):
-        ax.annotate(f"n={len(vals)}", xy=(i + 1, ax.get_ylim()[1]),
-                    ha='center', va='bottom', fontsize=8, color='gray')
-
     ax.set_xticklabels(active_labels, fontsize=10)
     ax.set_ylabel('Success Rate', fontsize=12)
     ax.set_title(f'Success Rate Distribution — {targets}T{obstacles}O', fontsize=13)
@@ -309,8 +305,8 @@ def main():
                         help="只绘制指定目标数的场景（默认自动检测所有场景）")
     parser.add_argument("--eval_obstacles", type=int, default=None,
                         help="只绘制指定障碍物数的场景")
-    parser.add_argument("--output_dir", type=str, default="./figures",
-                        help="图片保存目录 (默认: ./figures)")
+    parser.add_argument("--output_dir", type=str, default="./1_Result",
+                        help="图片保存目录 (默认: ./1_Result)")
     parser.add_argument("--no-show", action="store_true",
                         help="不弹出显示图片，仅保存")
     parser.add_argument("--no-save", action="store_true",

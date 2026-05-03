@@ -362,7 +362,7 @@ if __name__ == "__main__":
                         help="评估种子 (手动模式必填; 自动模式可覆盖报告值)")
     parser.add_argument("--usv_length", type=float, default=3.0)
     parser.add_argument("--usv_width", type=float, default=1.5)
-    parser.add_argument("--target_radius", type=float, default=3.0)
+    parser.add_argument("--target_radius", type=float, default=5.0)
     parser.add_argument("--obstacle_radius_min", type=float, default=3.0)
     parser.add_argument("--obstacle_radius_max", type=float, default=10.0)
     parser.add_argument("--use_random_shapes", action="store_true",

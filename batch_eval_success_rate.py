@@ -144,13 +144,27 @@ def parse_existing_evals(model_dir):
         algo_match = re.search(r"算法:\s*(\w+)", block)
         algo = algo_match.group(1).lower() if algo_match else detect_algo(model_dir)
 
-        # Mean
+        # Mean (成功率)
         mean_match = re.search(r"成功率均值\s*\(Mean\):\s*([\d.]+)", block)
         mean_rate = float(mean_match.group(1)) if mean_match else 0.0
 
-        # Std
+        # Std (成功率)
         std_match = re.search(r"成功率均方差\s*\(Std\):\s*([\d.]+)", block)
         std_rate = float(std_match.group(1)) if std_match else 0.0
+
+        # 碰撞率 (可能不存在于旧记录)
+        cr_mean_match = re.search(r"碰撞率均值\s*\(Mean\):\s*([\d.]+)", block)
+        mean_collision_rate = float(cr_mean_match.group(1)) if cr_mean_match else None
+
+        cr_std_match = re.search(r"碰撞率均方差\s*\(Std\):\s*([\d.]+)", block)
+        std_collision_rate = float(cr_std_match.group(1)) if cr_std_match else None
+
+        # 成功步数 (可能不存在于旧记录)
+        ss_mean_match = re.search(r"成功步数均值\s*\(Mean\):\s*([\d.]+)", block)
+        mean_steps_success = float(ss_mean_match.group(1)) if ss_mean_match else None
+
+        ss_std_match = re.search(r"成功步数均方差\s*\(Std\):\s*([\d.]+)", block)
+        std_steps_success = float(ss_std_match.group(1)) if ss_std_match else None
 
         # 总回合数
         total_ep_match = re.search(r"总评估回合数:\s*(\d+)", block)
@@ -162,6 +176,10 @@ def parse_existing_evals(model_dir):
             'std_rate': std_rate,
             'algo': algo,
             'total_episodes': total_ep,
+            'mean_collision_rate': mean_collision_rate,
+            'std_collision_rate': std_collision_rate,
+            'mean_steps_success': mean_steps_success,
+            'std_steps_success': std_steps_success,
         }
 
     return existing
@@ -340,6 +358,8 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
         actuator.fixed_encoder.eval()
 
     per_seed_rates = []
+    per_seed_collision_rates = []
+    per_seed_success_steps = []
     all_results = []
     model_start = time.time()
 
@@ -350,6 +370,7 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
         collisions = 0
         total_reached = 0
         total_steps_sum = 0
+        success_steps_sum = 0
         seed_start = time.time()
 
         for ep in range(M):
@@ -362,16 +383,22 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
             collisions += int(crush)
             total_reached += reached
             total_steps_sum += steps
+            if success:
+                success_steps_sum += steps
 
             if (ep + 1) % 50 == 0:
                 print(f"  [EvalSeed {seed}] Ep {ep + 1}/{M}: running SR={successes / (ep + 1):.3f}")
 
         seed_elapsed = time.time() - seed_start
         rate = successes / M
+        collision_rate = collisions / M
+        avg_steps_success = success_steps_sum / successes if successes > 0 else float('nan')
         per_seed_rates.append(rate)
+        per_seed_collision_rates.append(collision_rate)
+        per_seed_success_steps.append(avg_steps_success)
 
         print(f"  [EvalSeed {seed}] 完成: SR={rate:.4f} ({successes}/{M}), "
-              f"碰撞={collisions}, 平均目标={total_reached/M:.1f}, "
+              f"碰撞率={collision_rate:.4f}, 成功步数={avg_steps_success:.1f}, "
               f"耗时={seed_elapsed:.1f}s")
 
         all_results.append({
@@ -380,8 +407,10 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
             'successes': successes,
             'episodes': M,
             'collisions': collisions,
+            'collision_rate': collision_rate,
             'avg_targets': total_reached / M,
             'avg_steps': total_steps_sum / M,
+            'avg_steps_success': avg_steps_success,
         })
 
         if hasattr(env, 'close'):
@@ -391,6 +420,18 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
     rates = np.array(per_seed_rates)
     mean_rate = float(np.mean(rates))
     std_rate = float(np.std(rates, ddof=1))
+
+    collision_rates_arr = np.array(per_seed_collision_rates)
+    mean_collision_rate = float(np.mean(collision_rates_arr))
+    std_collision_rate = float(np.std(collision_rates_arr, ddof=1))
+
+    success_steps_arr = np.array([v for v in per_seed_success_steps if not math.isnan(v)])
+    if len(success_steps_arr) > 0:
+        mean_steps_success = float(np.mean(success_steps_arr))
+        std_steps_success = float(np.std(success_steps_arr, ddof=1)) if len(success_steps_arr) > 1 else 0.0
+    else:
+        mean_steps_success = float('nan')
+        std_steps_success = float('nan')
 
     # 保存单模型结果（追加到该目录下的文件）
     result_path = os.path.join(model_dir, "batch_eval_results.txt")
@@ -408,17 +449,22 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
         f.write(f"总耗时:   {model_elapsed:.1f}s\n")
         f.write(f"{'─' * 60}\n")
         f.write(f"评估种子列表: {eval_seeds}\n")
-        f.write(f"各评估种子成功率:\n")
+        f.write(f"各评估种子结果:\n")
         for r in all_results:
-            f.write(f"  EvalSeed {r['eval_seed']:5d}: {r['success_rate']:.4f} "
-                    f"({r['successes']}/{r['episodes']})  "
-                    f"碰撞={r['collisions']}  "
+            f.write(f"  EvalSeed {r['eval_seed']:5d}: "
+                    f"SR={r['success_rate']:.4f} ({r['successes']}/{r['episodes']})  "
+                    f"碰撞率={r['collision_rate']:.4f}  "
+                    f"成功步数={r['avg_steps_success']:.1f}  "
                     f"平均目标={r['avg_targets']:.1f}  "
                     f"平均步数={r['avg_steps']:.1f}\n")
         f.write(f"{'─' * 60}\n")
-        f.write(f"成功率均值 (Mean):  {mean_rate:.4f}\n")
-        f.write(f"成功率均方差 (Std): {std_rate:.4f}\n")
-        f.write(f"Mean ± Std:         {mean_rate:.4f} ± {std_rate:.4f}\n")
+        f.write(f"成功率均值 (Mean):    {mean_rate:.4f}\n")
+        f.write(f"成功率均方差 (Std):   {std_rate:.4f}\n")
+        f.write(f"碰撞率均值 (Mean):    {mean_collision_rate:.4f}\n")
+        f.write(f"碰撞率均方差 (Std):   {std_collision_rate:.4f}\n")
+        f.write(f"成功步数均值 (Mean):  {mean_steps_success:.1f}\n")
+        f.write(f"成功步数均方差 (Std): {std_steps_success:.1f}\n")
+        f.write(f"Mean ± Std (SR):      {mean_rate:.4f} ± {std_rate:.4f}\n")
 
     print(f"  单模型结果已保存至: {result_path}")
 
@@ -428,6 +474,10 @@ def eval_single_model(model_dir, args, state_dim, env_kwargs):
         'eval_seed_results': all_results,
         'mean_rate': mean_rate,
         'std_rate': std_rate,
+        'mean_collision_rate': mean_collision_rate,
+        'std_collision_rate': std_collision_rate,
+        'mean_steps_success': mean_steps_success,
+        'std_steps_success': std_steps_success,
         'total_episodes': N_eval * M,
         'elapsed': model_elapsed,
     }
@@ -553,6 +603,10 @@ def main():
                     'total_episodes': prev['total_episodes'],
                     'elapsed': 0.0,
                     '_skipped': True,
+                    'mean_collision_rate': prev.get('mean_collision_rate'),
+                    'std_collision_rate': prev.get('std_collision_rate'),
+                    'mean_steps_success': prev.get('mean_steps_success'),
+                    'std_steps_success': prev.get('std_steps_success'),
                 })
                 continue
 
@@ -578,17 +632,45 @@ def main():
     method_std = float(np.std(rates, ddof=1))
     method_sem = method_std / math.sqrt(len(rates))
 
+    # 碰撞率 method-level
+    cr_vals = [r.get('mean_collision_rate') for r in all_model_results
+               if r.get('mean_collision_rate') is not None]
+    if len(cr_vals) > 0:
+        cr_arr = np.array(cr_vals)
+        method_cr_mean = float(np.mean(cr_arr))
+        method_cr_std = float(np.std(cr_arr, ddof=1)) if len(cr_arr) > 1 else 0.0
+        method_cr_sem = method_cr_std / math.sqrt(len(cr_arr)) if len(cr_arr) > 1 else float('nan')
+    else:
+        method_cr_mean = float('nan')
+        method_cr_std = float('nan')
+        method_cr_sem = float('nan')
+
+    # 成功步数 method-level
+    ss_vals = [r.get('mean_steps_success') for r in all_model_results
+               if r.get('mean_steps_success') is not None and not math.isnan(r.get('mean_steps_success', float('nan')))]
+    if len(ss_vals) > 0:
+        ss_arr = np.array(ss_vals)
+        method_ss_mean = float(np.mean(ss_arr))
+        method_ss_std = float(np.std(ss_arr, ddof=1)) if len(ss_arr) > 1 else 0.0
+        method_ss_sem = method_ss_std / math.sqrt(len(ss_arr)) if len(ss_arr) > 1 else float('nan')
+    else:
+        method_ss_mean = float('nan')
+        method_ss_std = float('nan')
+        method_ss_sem = float('nan')
+
     new_eval_count = sum(1 for r in all_model_results if not r.get('_skipped'))
     print(f"\n  评估模型数:         {len(all_model_results)}"
           f" (新评估: {new_eval_count}, 复用已有: {skipped})")
     print(f"  总评估回合数:       {sum(r['total_episodes'] for r in all_model_results)}")
     print(f"  总耗时:             {total_elapsed:.1f}s")
-    print(f"\n  {'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6} {'备注':>8}")
-    print(f"  {'─' * 72}")
+    print(f"\n  {'模型目录':<40} {'SR':>8} {'碰撞率':>8} {'成功步数':>8} {'Algo':>6} {'备注':>8}")
+    print(f"  {'─' * 80}")
     for r in all_model_results:
         short_name = os.path.basename(os.path.normpath(r['model_dir']))
         note = "(复用)" if r.get('_skipped') else ""
-        print(f"  {short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6} {note:>8}")
+        cr_str = f"{r.get('mean_collision_rate', 0):.4f}" if r.get('mean_collision_rate') is not None else "N/A"
+        ss_str = f"{r.get('mean_steps_success', 0):.0f}" if r.get('mean_steps_success') is not None and not math.isnan(r.get('mean_steps_success', float('nan'))) else "N/A"
+        print(f"  {short_name:<40} {r['mean_rate']:>8.4f} {cr_str:>8} {ss_str:>8} {r['algo']:>6} {note:>8}")
 
     print(f"\n  ── Method-level 统计 ──")
     print(f"  成功率均值 (Mean):      {method_mean:.4f}")
@@ -596,6 +678,20 @@ def main():
     print(f"  标准误 (SEM):           {method_sem:.4f}")
     print(f"  95% 置信区间:           [{method_mean - 1.96*method_sem:.4f}, {method_mean + 1.96*method_sem:.4f}]")
     print(f"  Mean ± Std:             {method_mean:.4f} ± {method_std:.4f}")
+    print(f"  ──")
+    print(f"  碰撞率均值 (Mean):      {method_cr_mean:.4f}")
+    print(f"  碰撞率均方差 (Std):     {method_cr_std:.4f}")
+    if not math.isnan(method_cr_sem):
+        print(f"  碰撞率标准误 (SEM):     {method_cr_sem:.4f}")
+        print(f"  碰撞率 95% CI:          [{method_cr_mean - 1.96*method_cr_sem:.4f}, {method_cr_mean + 1.96*method_cr_sem:.4f}]")
+    print(f"  碰撞率 Mean ± Std:      {method_cr_mean:.4f} ± {method_cr_std:.4f}")
+    print(f"  ──")
+    print(f"  成功步数均值 (Mean):    {method_ss_mean:.1f}")
+    print(f"  成功步数均方差 (Std):   {method_ss_std:.1f}")
+    if not math.isnan(method_ss_sem):
+        print(f"  成功步数标准误 (SEM):   {method_ss_sem:.1f}")
+        print(f"  成功步数 95% CI:        [{method_ss_mean - 1.96*method_ss_sem:.1f}, {method_ss_mean + 1.96*method_ss_sem:.1f}]")
+    print(f"  成功步数 Mean ± Std:    {method_ss_mean:.1f} ± {method_ss_std:.1f}")
     print("=" * 70)
 
     # --- 保存汇总结果 ---
@@ -612,18 +708,34 @@ def main():
         f.write(f"每种子评估回合: {args.eval_episodes}\n")
         f.write(f"总耗时: {total_elapsed:.1f}s\n")
         f.write(f"新评估: {new_eval_count} 个, 复用已有: {skipped} 个\n")
-        f.write(f"\n{'模型目录':<40} {'Mean':>8} {'Std':>8} {'Algo':>6} {'备注':>8}\n")
-        f.write(f"{'─' * 72}\n")
+        f.write(f"\n{'模型目录':<40} {'SR':>8} {'碰撞率':>8} {'成功步数':>8} {'Algo':>6} {'备注':>8}\n")
+        f.write(f"{'─' * 80}\n")
         for r in all_model_results:
             short_name = os.path.basename(os.path.normpath(r['model_dir']))
             note = "(复用)" if r.get('_skipped') else ""
-            f.write(f"{short_name:<40} {r['mean_rate']:>8.4f} {r['std_rate']:>8.4f} {r['algo']:>6} {note:>8}\n")
+            cr_str = f"{r.get('mean_collision_rate', 0):.4f}" if r.get('mean_collision_rate') is not None else "N/A"
+            ss_str = f"{r.get('mean_steps_success', 0):.0f}" if r.get('mean_steps_success') is not None and not math.isnan(r.get('mean_steps_success', float('nan'))) else "N/A"
+            f.write(f"{short_name:<40} {r['mean_rate']:>8.4f} {cr_str:>8} {ss_str:>8} {r['algo']:>6} {note:>8}\n")
         f.write(f"\nMethod-level 统计:\n")
-        f.write(f"  成功率均值 (Mean):    {method_mean:.4f}\n")
-        f.write(f"  成功率均方差 (Std):   {method_std:.4f}\n")
-        f.write(f"  标准误 (SEM):         {method_sem:.4f}\n")
-        f.write(f"  95% CI:               [{method_mean - 1.96*method_sem:.4f}, {method_mean + 1.96*method_sem:.4f}]\n")
-        f.write(f"  Mean ± Std:           {method_mean:.4f} ± {method_std:.4f}\n")
+        f.write(f"  成功率均值 (Mean):       {method_mean:.4f}\n")
+        f.write(f"  成功率均方差 (Std):      {method_std:.4f}\n")
+        f.write(f"  成功率标准误 (SEM):      {method_sem:.4f}\n")
+        f.write(f"  成功率 95% CI:           [{method_mean - 1.96*method_sem:.4f}, {method_mean + 1.96*method_sem:.4f}]\n")
+        f.write(f"  成功率 Mean ± Std:       {method_mean:.4f} ± {method_std:.4f}\n")
+        f.write(f"  ──\n")
+        f.write(f"  碰撞率均值 (Mean):       {method_cr_mean:.4f}\n")
+        f.write(f"  碰撞率均方差 (Std):      {method_cr_std:.4f}\n")
+        f.write(f"  碰撞率标准误 (SEM):      {method_cr_sem:.4f}\n")
+        if not math.isnan(method_cr_sem):
+            f.write(f"  碰撞率 95% CI:           [{method_cr_mean - 1.96*method_cr_sem:.4f}, {method_cr_mean + 1.96*method_cr_sem:.4f}]\n")
+        f.write(f"  碰撞率 Mean ± Std:       {method_cr_mean:.4f} ± {method_cr_std:.4f}\n")
+        f.write(f"  ──\n")
+        f.write(f"  成功步数均值 (Mean):     {method_ss_mean:.1f}\n")
+        f.write(f"  成功步数均方差 (Std):    {method_ss_std:.1f}\n")
+        f.write(f"  成功步数标准误 (SEM):    {method_ss_sem:.1f}\n")
+        if not math.isnan(method_ss_sem):
+            f.write(f"  成功步数 95% CI:         [{method_ss_mean - 1.96*method_ss_sem:.1f}, {method_ss_mean + 1.96*method_ss_sem:.1f}]\n")
+        f.write(f"  成功步数 Mean ± Std:     {method_ss_mean:.1f} ± {method_ss_std:.1f}\n")
         f.write(f"{'=' * 70}\n")
 
     print(f"\n汇总结果已保存至: {summary_path}")

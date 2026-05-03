@@ -668,14 +668,14 @@ def evaluate_expert_hrl(args, eval_mode='rl'):
         zs_dim=args.zs_dim, bc_tau=args.bc_tau)
     expert = ReactiveController()  # Expert 控制器 (expert 模式下使用)
 
-    default_selector_model = os.path.join(args.output_dir, "best_selector.pth")
-    default_actuator_model = os.path.join(args.output_dir, "best_actuator_actor.pth")
+    default_selector_model = os.path.join(args.output_dir, "selector.pth")
+    default_actuator_model = os.path.join(args.output_dir, "actuator_actor.pth")
     selector_model_path = args.eval_selector_model_path or default_selector_model
     actuator_model_path = args.eval_actuator_model_path or default_actuator_model
 
-    # TD7: encoder 默认使用 output_dir 下 best_encoder;
+    # TD7: encoder 默认使用 output_dir 下最后保存的 encoder;
     # 若传入 actuator actor 路径且同目录存在配套 encoder 文件, 则优先使用该配套 encoder。
-    default_encoder_model = os.path.join(args.output_dir, "best_actuator_encoder.pth")
+    default_encoder_model = os.path.join(args.output_dir, "actuator_encoder.pth")
     encoder_model_path = default_encoder_model
     if args.eval_actuator_model_path:
         actor_name = os.path.basename(actuator_model_path)
@@ -1124,9 +1124,9 @@ if __name__ == "__main__":
                         help="评估时障碍物数量")
     parser.add_argument("--eval_seed", default=42, type=int)
     parser.add_argument("--eval_selector_model_path", default=None, type=str,
-                        help="评估时 Selector 模型路径 (默认: output_dir/best_selector.pth)")
+                        help="评估时 Selector 模型路径 (默认: output_dir/selector.pth)")
     parser.add_argument("--eval_actuator_model_path", default=None, type=str,
-                        help="评估时 Actuator Actor 模型路径 (默认: output_dir/best_actuator_actor.pth)")
+                        help="评估时 Actuator Actor 模型路径 (默认: output_dir/actuator_actor.pth)")
     parser.add_argument("--eval_save_csv", action="store_true",
                         help="评估时保存路径 CSV 文件")
     parser.add_argument("--eval_tb_motion", action="store_true",

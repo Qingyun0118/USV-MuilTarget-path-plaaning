@@ -237,7 +237,8 @@ def plot_scenario_boxplot(scenario_data, labels, targets, obstacles, output_dir=
 
     ax.set_xticklabels(active_labels, fontsize=10)
     ax.set_ylabel('Success Rate', fontsize=12)
-    ax.set_title(f'Success Rate Distribution — {targets}T{obstacles}O', fontsize=13)
+    # ax.set_title(f'Success Rate Distribution — {targets}T{obstacles}O', fontsize=13)
+    ax.set_title(f'Success Rate Distribution', fontsize=13)
     ax.set_ylim(-0.02, 1.02)
     ax.yaxis.set_major_locator(ticker.MultipleLocator(0.1))
     ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))

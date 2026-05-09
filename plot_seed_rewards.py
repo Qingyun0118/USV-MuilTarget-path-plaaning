@@ -10,6 +10,33 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
+# ============ 全局绘图风格 (Times New Roman) ============
+plt.rcParams.update({
+    # ── 字体 ──
+    "font.family": "serif",                         # 衬线字体族
+    "font.serif": ["Times New Roman", "DejaVu Serif", "SimSun"],  # 字体回退链: Times → DejaVu → 宋体
+    "font.size": 9,                                 # 全局基准字号 (pt)
+    "axes.titlesize": 10,                           # 子图标题字号
+    "axes.labelsize": 12,                           # 横纵轴标签字号
+    "legend.fontsize": 12,                           # 图例字号
+    "xtick.labelsize": 8,                           # 横轴刻度字号
+    "ytick.labelsize": 8,                           # 纵轴刻度字号
+    # ── 边框 ──
+    "axes.spines.top": False,                       # 隐藏顶部边框 (学术风格)
+    "axes.spines.right": False,                     # 隐藏右侧边框 (学术风格)
+    # ── 网格 ──
+    "axes.grid": True,                              # 显示网格线
+    "grid.alpha": 0.2,                              # 网格线透明度 (0=全透, 1=不透明)
+    "grid.linestyle": "-",                          # 网格线型: - 实线, -- 虚线
+    # ── 线条与标记 ──
+    "lines.linewidth": 1.5,                         # 曲线默认线宽
+    "lines.markersize": 4.5,                        # 数据点标记大小
+    # ── 分辨率 (屏幕 vs 保存分离) ──
+    "figure.dpi": 150,                              # plt.show() 屏幕显示分辨率
+    "savefig.dpi": 300,                             # savefig() 保存分辨率 (300=印刷标准)
+    "savefig.bbox": "tight",                        # 自动裁剪空白边距
+})
+
 # ============ 配置区 ============
 # 数据源: "tensorboard" 直接读取 event 文件, "csv" 从导出的 CSV 文件读取
 DATA_SOURCE = "tensorboard"  # "tensorboard" | "csv"
@@ -170,13 +197,14 @@ ALGORITHMS = {
 
 # 要绘制的 tag（TensorBoard 中的标量名）
 TAGS = [
-    # "Reward/Actuator",
-    # "Reward/Selector",
-    # "Metrics/Collision", 
-    # "Metrics/SuccessRate",
+    "Reward/Actuator",
+    "Reward/Selector",
+    "Metrics/Collision", 
+    "Metrics/SuccessRate",
     # ---- Soft vs Hard Q-filter 对比分析 ----
-    # "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
-    # "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
+    # 'Training/Expert_Probability'
+    "Training/BC_AvgSoftWeight",   # Soft: sigmoid 平均权重; Hard: 等于 hit rate
+    "Training/BC_HitRate",         # Q_expert > Q_policy 的比例 (BC 信号通过率)
     
 ]
 
@@ -184,11 +212,13 @@ TAGS = [
 SMOOTH_METHOD = "ema"  # "uniform" | "ema" | "both"
 # 平滑窗口大小（设为 1 则不平滑；对 EMA 则通过 alpha = 2/(window+1) 近似等效）
 SMOOTH_WINDOW = 50
+# 子图排版: None 表示自动排版，也可手动指定 (行, 列)，如 (2, 3) 表示 2 行 3 列
+SUBPLOT_LAYOUT = (3,2)  # None | (int, int)，例如 (2, 3)
 # EMA 的 alpha 参数（仅 SMOOTH_METHOD="ema" 或 "both" 时生效，设为 None 则自动用 2/(SMOOTH_WINDOW+1)）
 EMA_ALPHA = None
 
 # 输出图片路径（None 则只显示不保存）
-SAVE_PATH = None
+SAVE_PATH = "figures/TD7_difftau"  # PNG 格式，自动保存为 PDF 矢量图
 
 # 手动指定 training_history.json 路径 (可选, 覆盖自动查找)
 # 格式: { "日志目录路径": "training_history.json 完整路径" }
@@ -322,9 +352,13 @@ def _aggregate_and_draw(ax, all_x, all_values, x_axis, color, label, linestyle="
 
 def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
                       data_source="tensorboard", x_axis="episodes",
-                      smooth_method="uniform", ema_alpha=None):
+                      smooth_method="uniform", ema_alpha=None,
+                      subplot_layout=None):
     n_tags = len(tags)
-    if n_tags <= 2:
+    if subplot_layout is not None:
+        n_rows, n_cols = subplot_layout
+        figsize = (6 * n_cols, 5 * n_rows)
+    elif n_tags <= 2:
         n_rows, n_cols = 1, max(n_tags, 1)
         figsize = (6 * n_cols, 5)
     else:
@@ -389,7 +423,7 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
         ax.set_xlabel(x_label)
         y_label = tag.split("/")[-1] + " Reward" if tag.startswith("Reward/") else tag.split("/")[-1]
         ax.set_ylabel(y_label)
-        ax.legend(fontsize=8)
+        ax.legend()
         ax.grid(True, alpha=0.3)
 
     # 隐藏多余子图
@@ -399,8 +433,13 @@ def plot_algo_compare(algorithms, tags, smooth_window=50, save_path=None,
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=200, bbox_inches="tight")
-        print(f"Saved to {save_path}")
+        fig.savefig(save_path)  # PNG, 继承 savefig.dpi=300
+        # 同时导出 PDF (矢量, 用于 LaTeX 论文)
+        base, _ = os.path.splitext(save_path)
+        pdf_path = base + ".pdf"
+        fig.savefig(pdf_path, format="pdf")  # PDF 无视 DPI, 矢量无限缩放
+        print(f"Saved: {save_path}")
+        print(f"Saved: {pdf_path}")
     plt.show()
 
 
@@ -415,4 +454,4 @@ if __name__ == "__main__":
         exit(1)
 
     plot_algo_compare(ALGORITHMS, TAGS, SMOOTH_WINDOW, SAVE_PATH, DATA_SOURCE, X_AXIS,
-                      SMOOTH_METHOD, EMA_ALPHA)
+                      SMOOTH_METHOD, EMA_ALPHA, SUBPLOT_LAYOUT)

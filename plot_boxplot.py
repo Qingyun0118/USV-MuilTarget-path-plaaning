@@ -29,6 +29,23 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
 
+# 全局字体: Times New Roman (学术风格)
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "DejaVu Serif", "SimSun"],
+    "font.size": 10,
+    "axes.titlesize": 12,
+    "axes.labelsize": 11,
+    "legend.fontsize": 9,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "figure.dpi": 150,
+    "savefig.dpi": 300,
+    "savefig.bbox": "tight",
+})
+
 
 # ============================================================================
 # 默认场景列表（与 run_missing_evals.py 保持一致）
@@ -253,9 +270,12 @@ def plot_scenario_boxplot(scenario_data, labels, targets, obstacles, output_dir=
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        path = os.path.join(output_dir, f"boxplot_{targets}T{obstacles}O.png")
-        fig.savefig(path, dpi=200, bbox_inches='tight')
-        print(f"  已保存: {path}")
+        png_path = os.path.join(output_dir, f"boxplot_{targets}T{obstacles}O.png")
+        pdf_path = os.path.join(output_dir, f"boxplot_{targets}T{obstacles}O.pdf")
+        fig.savefig(png_path)
+        fig.savefig(pdf_path, format="pdf")
+        print(f"  已保存: {png_path}")
+        print(f"  已保存: {pdf_path}")
 
     plt.show()
 
@@ -306,8 +326,8 @@ def main():
                         help="只绘制指定目标数的场景（默认自动检测所有场景）")
     parser.add_argument("--eval_obstacles", type=int, default=None,
                         help="只绘制指定障碍物数的场景")
-    parser.add_argument("--output_dir", type=str, default="./1_Result",
-                        help="图片保存目录 (默认: ./1_Result)")
+    parser.add_argument("--output_dir", type=str, default="./figures",
+                        help="图片保存目录 (默认: ./figures)")
     parser.add_argument("--no-show", action="store_true",
                         help="不弹出显示图片，仅保存")
     parser.add_argument("--no-save", action="store_true",

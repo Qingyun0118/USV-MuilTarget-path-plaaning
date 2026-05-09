@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch, Polygon as MplPolygon, Circle, Wedge
@@ -16,9 +17,10 @@ def draw_scene(save_path="scene_demo.png"):
       - 局部海流场
     """
     plt.rcParams.update({
-        'font.family': ['SimHei', 'serif'],
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'DejaVu Serif'],
         'font.size': 13,
-        'mathtext.fontset': 'cm'
+        'mathtext.fontset': 'cm',
     })
 
     fig, ax = plt.subplots(figsize=(8, 7))
@@ -249,7 +251,11 @@ def draw_scene(save_path="scene_demo.png"):
     plt.tight_layout(rect=[0, 0.07, 1, 1])
 
     fig.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Scene saved to {save_path}")
+    base, _ = os.path.splitext(save_path)
+    pdf_path = base + ".pdf"
+    fig.savefig(pdf_path, format="pdf")
+    print(f"Scene saved: {save_path}")
+    print(f"Scene saved: {pdf_path}")
     plt.show()
 
 

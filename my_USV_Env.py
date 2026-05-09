@@ -838,10 +838,19 @@ class MyUsvEnv():
         
         return u, v
     
-    def visualize_env(self, time_step=None):
-        """可视化环境"""
-        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
-                             'mathtext.fontset': 'cm'})
+    def visualize_env(self, time_step=None, save_path=None):
+        """可视化环境
+
+        Args:
+            time_step: 指定时间步用于时变海流，None 则用稳态海流
+            save_path: 保存路径，None 则仅显示不保存
+        """
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 10,
+            'mathtext.fontset': 'cm',
+        })
         fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('white')
@@ -888,9 +897,9 @@ class MyUsvEnv():
                    linewidth=1.5, label='Current'),
         ]
         ax.legend(handles=legend_elements, loc='upper center',
-                  bbox_to_anchor=(0.5, -0.04), ncol=3,
-                  fontsize=9, frameon=True, edgecolor='gray',
-                  framealpha=1.0, handletextpad=0.4, columnspacing=1.0)
+                  bbox_to_anchor=(0.5, -0.08), ncol=6,
+                  fontsize=8.5, frameon=True, edgecolor='gray',
+                  framealpha=1.0, handletextpad=0.3, columnspacing=0.8)
         
         ax.set_xlabel('$x$ / m')
         ax.set_ylabel('$y$ / m')
@@ -902,7 +911,14 @@ class MyUsvEnv():
         ax.set_aspect('equal')
         ax.grid(True, linewidth=0.3, alpha=0.4)
         ax.tick_params(direction='in', length=3)
-        plt.tight_layout(rect=[0, 0.05, 1, 1])
+        fig.subplots_adjust(bottom=0.14)   # 手动预留底部空间给图例
+        if save_path is not None:
+            fig.savefig(save_path, dpi=300, bbox_inches='tight')
+            base, _ = os.path.splitext(save_path)
+            pdf_path = base + ".pdf"
+            fig.savefig(pdf_path, format="pdf")
+            print(f"Scene saved: {save_path}")
+            print(f"Scene saved: {pdf_path}")
         plt.show()
 
     def animate(self, csv_file=None, duration=20, interval=100,
@@ -960,8 +976,12 @@ class MyUsvEnv():
                         headings[i] = headings[i-1] if i > 0 else 0.0
 
         # ---------- 画布 ----------
-        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
-                             'mathtext.fontset': 'cm'})
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 10,
+            'mathtext.fontset': 'cm',
+        })
         fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('white')
@@ -1061,7 +1081,7 @@ class MyUsvEnv():
 
         if save_path is not None:
             try:
-                anim.save(save_path, writer='pillow')
+                anim.save(save_path, writer='pillow', dpi=300)
                 print(f"动画已保存至 {save_path}  ({total_frames} 帧)")
             except Exception as e:
                 print(f"保存动画失败: {e}")
@@ -1118,8 +1138,12 @@ class MyUsvEnv():
             show_usv_shape: 是否使用USV形状绘制轨迹节点
             usv_interval: 每隔多少个点绘制一个USV形状
         """
-        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
-                             'mathtext.fontset': 'cm'})
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 10,
+            'mathtext.fontset': 'cm',
+        })
         fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('white')
@@ -1258,7 +1282,7 @@ class MyUsvEnv():
             ax.set_ylim(Y_MIN, Y_MAX)
             ax.set_aspect('equal')
             ax.tick_params(direction='in', length=3)
-            plt.tight_layout(rect=[0, 0.05, 1, 1])
+            plt.tight_layout(rect=[0, 0.08, 1, 1])
             
             if ifsave:
                 save_filename = (f"all_episodes_paths.png" if max_episode > 1
@@ -2093,8 +2117,12 @@ class MultiUsvEnv(MyUsvEnv):
             show_usv_shape: 是否沿轨迹绘制USV形状
             usv_interval: USV形状的间隔步数
         """
-        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
-                             'mathtext.fontset': 'cm'})
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 10,
+            'mathtext.fontset': 'cm',
+        })
         fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('white')
@@ -2237,7 +2265,7 @@ class MultiUsvEnv(MyUsvEnv):
         ax.set_ylim(Y_MIN, Y_MAX)
         ax.set_aspect('equal')
         ax.tick_params(direction='in', length=3)
-        plt.tight_layout(rect=[0, 0.05, 1, 1])
+        plt.tight_layout(rect=[0, 0.08, 1, 1])
 
         if ifsave:
             save_dir = savePath or output_dir
@@ -2322,8 +2350,12 @@ class MultiUsvEnv(MyUsvEnv):
             print("未找到任何有效的 USV 轨迹 CSV, 仅播放海流")
 
         # ---------- 画布 ----------
-        plt.rcParams.update({'font.family': 'serif', 'font.size': 10,
-                             'mathtext.fontset': 'cm'})
+        plt.rcParams.update({
+            'font.family': 'serif',
+            'font.serif': ['Times New Roman', 'DejaVu Serif'],
+            'font.size': 10,
+            'mathtext.fontset': 'cm',
+        })
         fig, ax = plt.subplots(figsize=(7, 7))
         fig.patch.set_facecolor('white')
         ax.set_facecolor('white')
@@ -2433,7 +2465,7 @@ class MultiUsvEnv(MyUsvEnv):
 
         if save_path is not None:
             try:
-                anim.save(save_path, writer='pillow')
+                anim.save(save_path, writer='pillow', dpi=300)
                 print(f"动画已保存至 {save_path}  ({total_frames} 帧)")
             except Exception as e:
                 print(f"保存动画失败: {e}")

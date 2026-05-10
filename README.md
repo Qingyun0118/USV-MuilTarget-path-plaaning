@@ -54,7 +54,7 @@ pip install torch numpy scipy gymnasium netCDF4 shapely matplotlib tensorboard
 | `hrl_config.py` | 全局配置：设备选择、坐标缩放因子、随机种子设置 |
 | `hrl_helpers.py` | HRL 辅助函数：Selector/Actuator 状态提取、奖励计算 |
 | `buffers.py` | 经验回放缓冲区：`ReplayBuffer`（Selector用）、`GoalConditionedReplayBuffer`（执行器用，含PER/SumTree） |
-| `expert_scheduler.py` | 专家调度器：Dawood 指数衰减控制专家示范概率（p0=0.9 → p_min=0.01） |
+| `expert_scheduler.py` | 专家调度器：Dawood 指数衰减控制专家示范概率 |
 
 ### 多USV协同（CTDE-MAPPO）
 
